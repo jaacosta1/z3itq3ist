@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "enabled": true,
+  "kdf": "PBKDF2-SHA256",
+  "iterations": 250000,
+  "salt": "tMsdiBNzMfbEZbe9aMUNjw==",
+  "canaryCipher": "ENC:AES256GCM:v1:tMsdiBNzMfbEZbe9aMUNjw==:sgHCupgoCJwUz3Xn:Bcv162IWEWlWpHjb4PjtJ7oLK9ZoDWSnWPnYi4jTkAhBIw==",
+  "encryptedPat": "ENC:AES256GCM:v1:2Nv0h5QsTh21OnX8afDs6A==:MsimKWKKGPR1IQOK:2CizfzNCu3nn20bwvyed4+M1oPqvtRIthqwv6AvbpLuJBg/1eBCe0oflGj5PBYhbKCNM8Ks8plKXg+gDuEy24kA0Et2ydKiNWCZivxPV+JgbeNwUwzjfeRKuJlPdKImjlOG7QWzKOjl6sBSWbw==",
+  "updatedAt": "2026-11-24T11:13:02.512Z"
+}
