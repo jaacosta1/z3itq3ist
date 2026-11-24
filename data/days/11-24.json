@@ -1,0 +1,68 @@
+{
+  "day": "11-24",
+  "entries": {
+    "2024": {
+      "year": 2024,
+      "diaryDate": "2024-11-24",
+      "title": "First frost & a quiet ledger",
+      "body": "Started keeping a perpetual diary today instead of letting notebooks vanish into boxes.\n\n> The value of a daily record is rarely visible in the same week you write it; it reveals itself three Novembers later.\n\nWalked around the block after rain. Made pour-over coffee and wrote down three small things I want to stay true to:\n\n- Keep notes honest rather than theatrical\n- Measure progress in seasons, not hours\n- Return to this exact page next year",
+      "tags": [
+        "reflection",
+        "beginnings",
+        "autumn"
+      ],
+      "mood": "grounded",
+      "image": null,
+      "writtenAt": "2024-11-24T21:10:00Z",
+      "updatedAt": "2024-11-24T21:10:00Z",
+      "encrypted": false
+    },
+    "2025": {
+      "year": 2025,
+      "diaryDate": "2025-11-24",
+      "title": "Reading myself from a year ago",
+      "body": "Seeing 2024 sitting right beside today feels surreal. Almost everything I worried about last November resolved quietly without drama.\n\nFinished reorganizing my desk and backed up all my photo folders. Note to 2026 me: **protect your mornings** before opening messages.",
+      "tags": [
+        "reflection",
+        "routine"
+      ],
+      "mood": "clear",
+      "image": null,
+      "writtenAt": "2025-11-26T22:15:00Z",
+      "updatedAt": "2025-11-26T22:20:00Z",
+      "encrypted": false
+    },
+    "2026": {
+      "year": 2026,
+      "diaryDate": "2026-11-24",
+      "title": "Three columns side by side",
+      "body": "This site is now running as a static perpetual archive—zero third-party databases, plain JSON files, and client-side AES-256-GCM encryption whenever I want entries sealed.\n\nTry **highlighting any sentence** in this column to quote it into a margin comment below, or click **Write Entry** to add a new year or attach a drag-aligned photograph.",
+      "tags": [
+        "reflection",
+        "craft",
+        "archive"
+      ],
+      "mood": "focused",
+      "image": null,
+      "writtenAt": "2026-11-24T16:40:00Z",
+      "updatedAt": "2026-11-24T16:40:00Z",
+      "encrypted": false
+    }
+  },
+  "comments": [
+    {
+      "id": "cmt-1732460500",
+      "author": "Self",
+      "body": "Still holds true two years later. Looking across all three columns makes the long arc obvious in a single glance.",
+      "createdAt": "2026-11-24T17:05:00Z",
+      "updatedAt": "2026-11-24T17:05:00Z",
+      "encrypted": false,
+      "quote": {
+        "text": "The value of a daily record is rarely visible in the same week you write it; it reveals itself three Novembers later.",
+        "year": 2024,
+        "diaryDate": "2024-11-24"
+      },
+      "image": null
+    }
+  ]
+}
