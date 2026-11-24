@@ -1,20 +1,17 @@
 {
   "version": 1,
-  "updatedAt": "2026-11-24T11:19:04.619Z",
+  "updatedAt": "2026-11-24T11:19:08.685Z",
   "days": {
     "11-24": {
       "years": [
-        2025,
         2026
       ],
       "tags": [
         "archive",
         "craft",
-        "reflection",
-        "routine"
+        "reflection"
       ],
       "wordCounts": {
-        "2025": 40,
         "2026": 53
       },
       "commentCount": 1
