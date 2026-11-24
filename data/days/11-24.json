@@ -1,23 +1,6 @@
 {
   "day": "11-24",
-  "entries": {
-    "2026": {
-      "year": 2026,
-      "diaryDate": "2026-11-24",
-      "title": "Three columns side by side",
-      "body": "This site is now running as a static perpetual archive—zero third-party databases, plain JSON files, and client-side AES-256-GCM encryption whenever I want entries sealed.\n\nTry **highlighting any sentence** in this column to quote it into a margin comment below, or click **Write Entry** to add a new year or attach a drag-aligned photograph.",
-      "tags": [
-        "reflection",
-        "craft",
-        "archive"
-      ],
-      "mood": "focused",
-      "image": null,
-      "writtenAt": "2026-11-24T16:40:00Z",
-      "updatedAt": "2026-11-24T16:40:00Z",
-      "encrypted": false
-    }
-  },
+  "entries": {},
   "comments": [
     {
       "id": "cmt-1732460500",
