@@ -2465,3 +2465,87 @@ background: rgba(0, 0, 0, 0.22);
 TOAST NOTIFICATION STACK
 ========================================================================== /
 / ... existing code ... */
+/* ... existing code ... */
+.vault-cloak-panel code {
+font-family: var(--font-mono);
+font-size: 0.78rem;
+padding: 0.08rem 0.3rem;
+border-radius: var(--radius-sm);
+background: rgba(0, 0, 0, 0.22);
+}
+
+/* Phase 9: Biometric Passkey (WebAuthn PRF), Decoy Vault & Double-Lock Entries */
+.lock-passkey-btn {
+margin-top: 0.55rem;
+border-color: rgba(224, 179, 84, 0.45);
+color: var(--accent);
+}
+
+.vault-passkey-panel,
+.vault-decoy-panel {
+border: 1px solid var(--border-subtle);
+border-radius: var(--radius-md);
+background: var(--bg-elevated);
+padding: 0.9rem 1rem;
+margin-bottom: 0.9rem;
+display: flex;
+flex-direction: column;
+gap: 0.6rem;
+}
+
+.passkey-enroll-row {
+display: flex;
+gap: 0.5rem;
+align-items: center;
+flex-wrap: wrap;
+}
+
+.passkey-enroll-row .input-text {
+flex: 1 1 200px;
+}
+
+.doublelock-composer-box {
+border: 1px dashed var(--border-strong);
+border-radius: var(--radius-md);
+background: var(--bg-elevated);
+padding: 0.7rem 0.85rem;
+display: flex;
+flex-direction: column;
+gap: 0.6rem;
+}
+
+.doublelock-sealed-card {
+border: 1px dashed rgba(224, 179, 84, 0.5);
+background: rgba(224, 179, 84, 0.06);
+border-radius: var(--radius-md);
+padding: 1rem;
+display: flex;
+flex-direction: column;
+gap: 0.55rem;
+}
+
+.dl-unlock-form {
+display: flex;
+gap: 0.45rem;
+align-items: center;
+flex-wrap: wrap;
+}
+
+.dl-unlock-form .input-text {
+flex: 1 1 160px;
+}
+
+.dl-hint-line {
+font-style: italic;
+color: var(--text-muted);
+}
+
+.dl-status-tag {
+color: #fbbf24;
+font-weight: 500;
+}
+
+/* ==========================================================================
+TOAST NOTIFICATION STACK
+========================================================================== /
+/ ... existing code ... */
