@@ -1,312 +1,74 @@
 /**
- * js/recovery.js — Perpetual Side-by-Side Web Diary Archival Recovery Kit (File 8 of 11 · Final Build)
- *
- * Generates two multi-decade disaster-recovery artifacts:
- * 1. Printable Emergency Paper Recovery Card (`buildPrintableRecoveryCardHtml` / `openPrintableRecoveryCard`)
- *    — Displays repo coordinates, DEK fingerprint, KDF spec (Argon2id / PBKDF2), cloaking status,
- *      and the formatted 256-bit Paper Recovery Key ready to print or save as PDF.
- * 2. Zero-Dependency Standalone Offline Decryptor (`buildOfflineDecryptorHtml`)
- *    — A single self-contained HTML file that runs 100% offline (`file://`) in any modern browser
- *      decades from now without GitHub or internet access. Supports:
- *      • Master Password (both PBKDF2-SHA256 and pure-JS RFC 9106 Argon2id)
- *      • 64-character 256-bit Paper Recovery Key
- *      • v1 Legacy, v2 Envelope, and v3 AAD Tamper-Bound entries & comments
- *      • Metadata-Cloaked HMAC Day Shards (`shards/<24-hex>.enc`) & encrypted `index.enc`
- *      • Double-Locked entries (`DLOCK:PBKDF2:AES256GCM:v1:...`) via optional 2nd passphrase
- *      • Encrypted `.enc` Binary Media Vault photos & voice notes (PENC v1 + AAD)
- */
-
-function escapeHtml(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
-function splitRecoveryIntoRows(recoveryCode) {
-  const clean = String(recoveryCode || '')
-    .replace(/[^0-9a-fA-F]/g, '')
-    .toUpperCase();
-  const groups = clean.match(/.{1,4}/g) || [];
-  const rows = [];
-  for (let i = 0; i < groups.length; i += 4) {
-    rows.push(groups.slice(i, i + 4).join(' - '));
-  }
-  return rows;
-}
-
-function describePasswordSlotKdf(vaultMeta) {
-  const pwSlot = (vaultMeta?.keySlots || []).find((s) => s && s.type === 'password');
-  if (!pwSlot) {
-    return `PBKDF2-SHA256 · ${Number(vaultMeta?.iterations || 250000).toLocaleString()} iterations`;
-  }
-  if (String(pwSlot.kdf || '').toLowerCase() === 'argon2id') {
-    const mb = Math.round((Number(pwSlot.memoryKiB) || 16384) / 1024);
-    const t = Number(pwSlot.timeCost) || 2;
-    return `Argon2id (RFC 9106) · ${mb} MB · t=${t} · p=1`;
-  }
-  return `${pwSlot.kdf || 'PBKDF2-SHA256'} · ${Number(pwSlot.iterations || 250000).toLocaleString()} iterations`;
-}
-
-/**
- * Builds the printable archival Paper Recovery Card HTML document.
- */
-export function buildPrintableRecoveryCardHtml({
-  recoveryCode = '',
-  vaultMeta = null,
-  repoConfig = {},
-} = {}) {
-  const generatedDate = new Date().toISOString().slice(0, 10);
-  const appRepo =
-    repoConfig.owner && repoConfig.repo
-      ? `${repoConfig.owner}/${repoConfig.repo} (${repoConfig.branch || 'main'})`
-      : 'Not configured (Sandbox)';
-  const vaultRepo = repoConfig.usePrivateVault
-    ? `${repoConfig.vaultOwner || repoConfig.owner || 'owner'}/${
-        repoConfig.vaultRepo || 'perpetual-diary-vault'
-      } (${repoConfig.vaultBranch || 'main'})`
-    : appRepo;
-
-  const mediaShardInfo = repoConfig.useMediaSharding
-    ? `${repoConfig.mediaShardPattern || 'diary-media-{year}'} (${repoConfig.mediaShardBranch || 'main'})`
-    : 'Stored inside primary vault repo';
-  const cloakStatus = vaultMeta?.metadataCloaking
-    ? 'ENABLED (index.enc + HMAC shards/*.enc)'
-    : 'Standard (days/MM-DD.json + index.json)';
-
-  const kdfDesc = describePasswordSlotKdf(vaultMeta);
-  const dekFp = vaultMeta?.dekFingerprint || 'UNAVAILABLE';
-  const rows = splitRecoveryIntoRows(recoveryCode);
-
-  const keyBlockHtml = rows.length
-    ? rows
-        .map(
-          (row, idx) =>
-            `<div class="key-row"><span class="row-num">0${idx + 1}</span><code>${escapeHtml(row)}</code></div>`
-        )
-        .join('')
-    : '<div class="key-row"><code>No recovery key generated yet. Generate one inside the Vault modal first.</code></div>';
-
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Perpetual Diary — Emergency Paper Recovery Kit</title>
-  <style>
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      padding: 28px;
-      font-family: Georgia, "Times New Roman", serif;
-      background: #f5f4ef;
-      color: #111111;
-    }
-    .sheet {
-      max-width: 800px;
-      margin: 0 auto;
-      background: #ffffff;
-      border: 2px solid #111111;
-      padding: 28px 32px;
-    }
-    .kicker {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: #555555;
-    }
-    h1 {
-      margin: 6px 0 4px;
-      font-size: 26px;
-      letter-spacing: -0.02em;
-    }
-    .subtitle {
-      margin: 0 0 18px;
-      font-size: 13.5px;
-      color: #333333;
-      line-height: 1.48;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      margin-bottom: 18px;
-    }
-    .meta-box {
-      border: 1px solid #111111;
-      padding: 9px 11px;
-    }
-    .meta-label {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: #555555;
-      margin-bottom: 4px;
-    }
-    .meta-val {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11.5px;
-      word-break: break-all;
-    }
-    .key-panel {
-      border: 2px solid #111111;
-      background: #faf9f5;
-      padding: 16px 18px;
-      margin-bottom: 18px;
-    }
-    .key-title {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      margin-bottom: 10px;
-    }
-    .key-row {
-      display: flex;
-      align-items: center;
-      gap: 14px;
-      padding: 6px 0;
-      border-bottom: 1px dashed #cccccc;
-    }
-    .key-row:last-child { border-bottom: none; }
-    .row-num {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px;
-      color: #666666;
-      width: 24px;
-    }
-    .key-row code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 16px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-    }
-    .instructions {
-      border-top: 1px solid #111111;
-      padding-top: 14px;
-      font-size: 13px;
-      line-height: 1.55;
-    }
-    .instructions h2 {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 11px;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      margin: 0 0 8px;
-    }
-    .instructions ol {
-      margin: 0;
-      padding-left: 18px;
-    }
-    .instructions li { margin-bottom: 6px; }
-    .toolbar {
-      max-width: 800px;
-      margin: 0 auto 14px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-    .print-btn {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 12px;
-      background: #111111;
-      color: #ffffff;
-      border: none;
-      padding: 8px 16px;
-      cursor: pointer;
-    }
-    @media print {
-      body { background: #ffffff; padding: 0; }
-      .toolbar { display: none; }
-      .sheet { border: 2px solid #000000; max-width: none; }
-    }
-  </style>
-</head>
-<body>
-  <div class="toolbar">
-    <span class="kicker">STORE PRINTED SHEET IN A SAFE PHYSICAL LOCATION</span>
-    <button class="print-btn" onclick="window.print()">Print / Save as PDF</button>
-  </div>
-  <main class="sheet">
-    <div class="kicker">PERPETUAL SIDE-BY-SIDE DIARY · ARCHIVAL RECOVERY KIT · GENERATED ${escapeHtml(generatedDate)}</div>
-    <h1>Emergency Paper Recovery Card</h1>
-    <p class="subtitle">
-      This 256-bit recovery key unwraps your Envelope Data Encryption Key (DEK) independently of your master password or biometric passkeys.
-      Anyone with this sheet and your <code>vault.json</code> + diary archive can decrypt your entries and <code>.enc</code> media. Keep offline and secure.
-    </p>
-
-    <div class="grid">
-      <div class="meta-box">
-        <div class="meta-label">App Repository</div>
-        <div class="meta-val">${escapeHtml(appRepo)}</div>
-      </div>
-      <div class="meta-box">
-        <div class="meta-label">Vault Data Repository</div>
-        <div class="meta-val">${escapeHtml(vaultRepo)}</div>
-      </div>
-      <div class="meta-box">
-        <div class="meta-label">DEK Fingerprint (SHA-256)</div>
-        <div class="meta-val">${escapeHtml(dekFp)}</div>
-      </div>
-      <div class="meta-box">
-        <div class="meta-label">Cipher &amp; KDF Specification</div>
-        <div class="meta-val">AES-256-GCM (v2/v3 AAD + PENC .enc) · ${escapeHtml(kdfDesc)}</div>
-      </div>
-      <div class="meta-box">
-        <div class="meta-label">Metadata Cloaking</div>
-        <div class="meta-val">${escapeHtml(cloakStatus)}</div>
-      </div>
-      <div class="meta-box">
-        <div class="meta-label">Media Shard Repositories</div>
-        <div class="meta-val">${escapeHtml(mediaShardInfo)}</div>
-      </div>
-    </div>
-
-    <section class="key-panel">
-      <div class="key-title">256-Bit Paper Recovery Key (Hyphens &amp; Spaces Ignored)</div>
-      ${keyBlockHtml}
-    </section>
-
-    <section class="instructions">
-      <h2>How to Recover Your Diary (Live Site or Decades Later Offline)</h2>
-      <ol>
-        <li><strong>Live App (Forgot Master Password):</strong> Paste all 64 hex characters above directly into the Lock Screen password box to unlock your diary, then open the Vault modal (⛨) to set a fresh Master Password instantly.</li>
-        <li><strong>100% Offline Without GitHub:</strong> Open your saved <code>perpetual-offline-decryptor.html</code> file in any modern web browser (no internet required). Load your <code>perpetual-diary-archive.json</code>, raw <code>days/*.json</code>, or cloaked <code>shards/*.enc</code> files alongside <code>vault.json</code>, and enter either your Master Password (PBKDF2 or Argon2id) or the 64-character Recovery Key above.</li>
-        <li><strong>Encrypted Media (.enc):</strong> Use the built-in <em>Decrypt .enc Media File</em> panel inside the offline decryptor to recover encrypted WebP photos and voice notes back into standard files.</li>
-        <li><strong>Revocation:</strong> Generating a new Paper Recovery Key inside the Vault modal immediately replaces the recovery slot in <code>vault.json</code> and invalidates this sheet.</li>
-      </ol>
-    </section>
-  </main>
-</body>
-</html>`;
-}
-
-/**
- * Opens the printable Paper Recovery Card in a clean tab (with HTML download fallback if popups are blocked).
+ * Prints the Paper Recovery Card via a popup-blocker-proof hidden iframe
+ * (with HTML download fallback if printing is unavailable).
  */
 export function openPrintableRecoveryCard(options) {
   const html = buildPrintableRecoveryCardHtml(options);
-  const popup = window.open('', '_blank', 'noopener,noreferrer');
-  if (popup) {
-    popup.document.open();
-    popup.document.write(html);
-    popup.document.close();
-    return { openedWindow: true };
+  try {
+    const existing = document.getElementById('perpetual-recovery-print-iframe');
+    if (existing) existing.remove();
+
+    const iframe = document.createElement('iframe');
+    iframe.id = 'perpetual-recovery-print-iframe';
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.style.visibility = 'hidden';
+
+    let printed = false;
+    const cleanup = () => {
+      window.setTimeout(() => {
+        if (iframe.parentNode) iframe.remove();
+      }, 1000);
+    };
+
+    const runPrint = () => {
+      if (printed) return;
+      printed = true;
+      try {
+        const win = iframe.contentWindow;
+        if (!win) throw new Error('Print frame unavailable.');
+        win.addEventListener('afterprint', cleanup, { once: true });
+        win.focus();
+        win.print();
+        window.setTimeout(cleanup, 60000);
+      } catch {
+        cleanup();
+      }
+    };
+
+    iframe.onload = () => {
+      window.requestAnimationFrame(() => window.setTimeout(runPrint, 60));
+    };
+
+    document.body.appendChild(iframe);
+    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (doc) {
+      doc.open();
+      doc.write(html);
+      doc.close();
+      window.setTimeout(runPrint, 180);
+    } else {
+      iframe.srcdoc = html;
+    }
+
+    return { openedWindow: true, method: 'iframe' };
+  } catch {
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `perpetual-recovery-card-${new Date().toISOString().slice(0, 10)}.html`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+    return { openedWindow: false, downloadedFallback: true };
   }
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `perpetual-recovery-card-${new Date().toISOString().slice(0, 10)}.html`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
-  return { openedWindow: false, downloadedFallback: true };
 }
 
 /**
