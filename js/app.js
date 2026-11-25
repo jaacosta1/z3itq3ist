@@ -1,16 +1,6 @@
 /**
- * js/app.js — Perpetual Side-by-Side Web Diary Master Controller (File 5 of 5 · Complete Build)
- * Covers all 20 phases + Stacked Multi-Entries per Day + Word Trend Explorer + Right-Click Shortcuts:
- * - Stacked Multi-Entries per Year on any calendar date (backward-compatible with single-entry records)
- * - Word & Phrase Trend Explorer inside Insights & Arcs
- * - Smart Context-Aware Right-Click Shortcut Menu (text selection, stacked entry card, year column, heatmap cell, or workspace)
- * - Envelope Cryptography (v2 DEK/KEK, v3 AAD, Argon2id, Paper Recovery, Passkeys, Decoy, Double-Lock)
- * - Split-Repo Vault, Media-Repo Sharding, Metadata Cloaking, Git Time Machine & Cross-Device `drafts`
- * - Multi-Photo Galleries + Lightbox, Ink Sketch Pad, Encrypted Voice Notes, Alignment Studio
- * - Bi-Directional Wiki-Links & Backlinks, Story Arcs Book View, On This Week/Season, Time Capsules
- * - Year-in-Review Auto-Dossiers, Word/Mood Analytics, Templates & Prompt Decks, Command Palette (Ctrl+K)
- * - Cultural Artifacts, Opt-In Location & Weather Stamp, Custom Daily Check-In Metrics, 4 Theme Presets
- * - Installable PWA Service Worker, Offline Commit Queue, Print-to-Book, 8-Page Mini-Zine & Importers
+ * js/app.js — Perpetual Side-by-Side Web Diary Master Controller (Clean Final Build)
+ * Covers all 20 phases + Stacked Multi-Entries per Day + Word Trend Explorer + Right-Click Shortcuts
  */
 
 import {
@@ -326,7 +316,7 @@ class PerpetualDiaryApp {
       activeDay: '11-24',
       sortOrder: 'asc',
       colMode: 'fit',
-      windowScope: 'day', // 'day' | 'week' | 'season'
+      windowScope: 'day',
       heatmapMode: 'years',
       pinnedYear: null,
       mobileMode: 'swipe',
@@ -337,7 +327,7 @@ class PerpetualDiaryApp {
       indexData: { version: 1, updatedAt: '', days: {} },
       dayCache: {},
       dayShas: {},
-      decryptedEntryCache: new Map(), // Map<entryIdentity, plainEntryObj>
+      decryptedEntryCache: new Map(),
       sandboxRamDays: null,
       ramMediaUrls: new Map(),
       vaultMeta: null,
@@ -353,7 +343,7 @@ class PerpetualDiaryApp {
       pendingQuote: null,
       editingCommentId: null,
       commentDraftPhoto: null,
-      editingEntryKey: null, // { dayStr, yearKey, entryId }
+      editingEntryKey: null,
       editingBaseEntry: null,
       entryDraftGallery: [],
       entryDraftVoice: null,
@@ -389,9 +379,6 @@ class PerpetualDiaryApp {
     this.autoLockWarned = false;
   }
 
-  /* ========================================================================
-     STORAGE, ZERO-FOOTPRINT & PWA SERVICE WORKER / OFFLINE QUEUE
-     ======================================================================== */
   storageSet(key, value) {
     if (this.state.zeroFootprint) return false;
     try {
@@ -495,10 +482,6 @@ class PerpetualDiaryApp {
     }
   }
 
-  /**
-   * Executes a print edition helper (`openPrintBookWindow` or `openMiniZineWindow`)
-   * with user feedback for empty archives, popup/iframe blockers, or HTML fallback downloads.
-   */
   triggerPrintEdition(printFn, payload, label = 'Print edition') {
     try {
       const res = printFn(payload);
@@ -621,9 +604,6 @@ class PerpetualDiaryApp {
     this.revokeRamMediaUrls();
   }
 
-  /* ========================================================================
-     VAULT SESSION, AUTO-LOCK & PANIC LOCK
-     ======================================================================== */
   hasActiveSessionKey() {
     return Boolean(this.state.keyring?.dek || this.state.keyring?.legacyKey || this.state.cryptoKey);
   }
@@ -836,9 +816,6 @@ class PerpetualDiaryApp {
     if (btn) btn.hidden = !(isWebAuthnSupported() && hasPasskeySlots(this.state.vaultMeta));
   }
 
-  /* ========================================================================
-     INITIALIZATION, THEME & ROUTING
-     ======================================================================== */
   async init() {
     const savedTheme = getSavedThemePreset(this.state.zeroFootprint);
     applyThemePreset(savedTheme, false, this.state.zeroFootprint);
@@ -1028,9 +1005,6 @@ class PerpetualDiaryApp {
     }
   }
 
-  /* ========================================================================
-     VAULT, MANIFEST & DAY PERSISTENCE
-     ======================================================================== */
   async loadVaultAndIndex() {
     let vaultMeta = null;
     if (this.gh.hasToken() || this.gh.isConfigured()) {
@@ -1277,9 +1251,6 @@ class PerpetualDiaryApp {
     return res.status === 'ok' ? res.text : null;
   }
 
-  /* ========================================================================
-     VIEWS, PERPETUAL READER (STACKED MULTI-ENTRIES PER YEAR), BACKLINKS & COMMENTS
-     ======================================================================== */
   switchView(viewName) {
     document.querySelectorAll('.nav-tab').forEach((btn) => {
       btn.classList.toggle('is-active', btn.dataset.view === viewName);
@@ -1518,9 +1489,6 @@ class PerpetualDiaryApp {
     stage.appendChild(addCard);
   }
 
-  /**
-   * Builds a Year Column Card containing 1 or more stacked entries for that year & calendar date.
-   */
   async buildYearColumnCard(yearEntries, dayStr, yearKey) {
     const col = document.createElement('article');
     const yearNum = Number(yearKey);
@@ -1603,9 +1571,6 @@ class PerpetualDiaryApp {
     return col;
   }
 
-  /**
-   * Renders a single entry card inside a year's vertical stack (works identically for 1 or N entries).
-   */
   async buildStackedEntryItem(entry, dayStr, yearKey, indexInYear, totalInYear) {
     const item = document.createElement('div');
     item.className = 'stacked-entry-item';
@@ -1736,7 +1701,6 @@ class PerpetualDiaryApp {
       plainWords = countWords(stripMarkdown(decryptedBody));
     }
 
-    // Multi-Photo Gallery + Lightbox + Encrypted Voice Note
     let mediaHtml = '';
     const resolvedLightboxItems = [];
 
@@ -2138,9 +2102,6 @@ class PerpetualDiaryApp {
     return item;
   }
 
-  /* ========================================================================
-     CUSTOM CONTEXT-AWARE RIGHT-CLICK SHORTCUT MENU
-     ======================================================================== */
   hideContextShortcutMenu() {
     const menu = document.getElementById('context-shortcut-menu');
     if (menu) {
@@ -2162,7 +2123,6 @@ class PerpetualDiaryApp {
     const items = [];
     let headerLabel = `SHORTCUTS · ${formatReadableDayKey(this.state.activeDay)}`;
 
-    // 1. Selected Text Context
     if (selectedText.length > 0) {
       headerLabel = `SELECTION (${selectedText.length} CHARS)`;
       if (yearCol) {
@@ -2194,7 +2154,6 @@ class PerpetualDiaryApp {
       items.push({ sep: true });
     }
 
-    // 2. Heatmap Day Cell Context
     if (hmCell && hmCell.dataset.day) {
       const hmDay = hmCell.dataset.day;
       headerLabel = `CALENDAR · ${formatReadableDayKey(hmDay)} (${hmDay})`;
@@ -2218,7 +2177,6 @@ class PerpetualDiaryApp {
       items.push({ sep: true });
     }
 
-    // 3. Specific Stacked Entry or Year Column Context
     if (yearCol && yearCol.dataset.year) {
       const yr = yearCol.dataset.year;
       const dayStr = this.state.activeDay;
@@ -2266,7 +2224,6 @@ class PerpetualDiaryApp {
       items.push({ sep: true });
     }
 
-    // 4. Universal Workspace Shortcuts
     items.push(
       {
         label: '+ Write New Entry Today',
@@ -2317,7 +2274,6 @@ class PerpetualDiaryApp {
 
     menu.hidden = false;
 
-    // Position safely inside viewport bounds
     const rect = menu.getBoundingClientRect();
     const maxX = Math.max(8, window.innerWidth - rect.width - 10);
     const maxY = Math.max(8, window.innerHeight - rect.height - 10);
@@ -2335,9 +2291,6 @@ class PerpetualDiaryApp {
     });
   }
 
-  /* ========================================================================
-     MARGIN COMMENTS & ENCRYPTED COMMENT MEDIA
-     ======================================================================== */
   attachQuoteToComment(quoteObj) {
     this.state.pendingQuote = quoteObj;
     document.getElementById('comment-quote-source').textContent =
@@ -2674,10 +2627,6 @@ class PerpetualDiaryApp {
     }
   }
 
-  /* ========================================================================
-     ENTRY COMPOSER (MULTI-ENTRY SUPPORT, ZEN MODE, TEMPLATES, PROMPTS,
-     ARTIFACTS, METRICS, MULTI-PHOTO GALLERY, INK SKETCH PAD & VOICE NOTES)
-     ======================================================================== */
   populateComposerTemplates() {
     const sel = document.getElementById('entry-template-select');
     if (!sel) return;
@@ -3512,9 +3461,10 @@ class PerpetualDiaryApp {
     }
   }
 
-  /* ========================================================================
-     3-WAY CONFLICT RESOLVER, TIME MACHINE & CROSS-DEVICE `drafts` BRANCH
-     ======================================================================== */
+  /* ==========================================================================
+     3-WAY CONFLICT RESOLVER
+     ========================================================================== */
+
   async openConflictResolver({
     dayStr,
     yearKey,
@@ -3526,102 +3476,100 @@ class PerpetualDiaryApp {
     prevKey,
     conflictErr,
   }) {
-    const expectedDate = `${yearKey}-${dayStr}`;
     const remoteEntry = conflictErr.remoteEntry || {};
-    const remoteBody =
-      (await this.decryptFieldIfNeeded(
-        remoteEntry.body || '',
-        Boolean(remoteEntry.encrypted),
-        buildEntryAad(expectedDate, yearKey, 'body')
-      )) ?? '[Encrypted on remote]';
-    const remoteTitle =
-      (await this.decryptFieldIfNeeded(
-        remoteEntry.title || '',
-        Boolean(remoteEntry.encrypted),
-        buildEntryAad(expectedDate, yearKey, 'title')
-      )) ?? '';
+    const expectedDate = `${yearKey}-${dayStr}`;
 
-    const remotePlain = {
-      title: remoteTitle,
-      mood: remoteEntry.mood || '',
-      tags: Array.isArray(remoteEntry.tags) ? remoteEntry.tags : [],
-      body: remoteBody,
-      updatedAt: remoteEntry.updatedAt || '',
-    };
+    let remoteTitle = remoteEntry.title || '';
+    let remoteBody = remoteEntry.body || '';
+    if (remoteEntry.encrypted || isEncryptedPayload(remoteBody)) {
+      remoteBody =
+        (await this.decryptFieldIfNeeded(
+          remoteEntry.body,
+          true,
+          buildEntryAad(expectedDate, yearKey, 'body')
+        )) || '[Encrypted remote body]';
+      remoteTitle = remoteEntry.title
+        ? (await this.decryptFieldIfNeeded(
+            remoteEntry.title,
+            true,
+            buildEntryAad(expectedDate, yearKey, 'title')
+          )) || ''
+        : '';
+    }
 
-    const basePlain = this.state.editingBaseEntry || {
-      title: '',
-      mood: '',
-      tags: [],
-      body: '',
-    };
-
-    const mergeResult = buildThreeWayMerge(basePlain.body, localPlain.body, remotePlain.body);
+    const basePlain = this.state.editingBaseEntry || { title: '', body: '', mood: '', tags: [] };
+    const mergedTags = mergeTags(localPlain.tags, remoteEntry.tags || []);
+    const autoMerge = buildThreeWayMerge(basePlain.body || '', localPlain.body, remoteBody);
 
     this.state.activeConflict = {
       dayStr,
       yearKey,
       entryId,
-      basePlain,
       localPlain,
-      remotePlain,
-      remoteEntry,
-      remoteSha: conflictErr.remoteSha,
+      remotePlain: {
+        title: remoteTitle,
+        mood: remoteEntry.mood || '',
+        tags: Array.isArray(remoteEntry.tags) ? remoteEntry.tags : [],
+        body: remoteBody,
+        updatedAt: remoteEntry.updatedAt || '',
+      },
+      basePlain,
       localEntryRecord,
       mediaUploads,
       isMovingSlot,
       prevKey,
+      remoteSha: conflictErr.remoteSha || null,
     };
 
-    document.getElementById('conflict-summary-banner').innerHTML =
-      `Another device committed a newer version of <strong>${escapeHtml(
-        expectedDate
-      )}</strong> while you were editing. ` +
-      (mergeResult.hasConflicts
-        ? `<strong>${mergeResult.conflictCount} overlapping section(s)</strong> marked below.`
-        : 'Non-overlapping paragraphs merged automatically below.');
+    document.getElementById('conflict-summary-banner').textContent =
+      `Another device updated ${expectedDate} on GitHub (${
+        remoteEntry.updatedAt ? new Date(remoteEntry.updatedAt).toLocaleString() : 'recently'
+      }). Review differences below and commit a clean merge.`;
 
-    document.getElementById('conflict-local-meta').textContent = 'Unsaved local draft';
-    document.getElementById('conflict-remote-meta').textContent = remotePlain.updatedAt
-      ? `Committed ${new Date(remotePlain.updatedAt).toLocaleTimeString()}`
-      : 'Latest GitHub HEAD';
+    document.getElementById('conflict-local-meta').textContent =
+      `${countWords(localPlain.body)} words`;
+    document.getElementById('conflict-remote-meta').textContent =
+      `${countWords(remoteBody)} words`;
 
     document.getElementById('conflict-local-diff').innerHTML = renderDiffHtml(
-      basePlain.body,
+      basePlain.body || '',
       localPlain.body
     );
     document.getElementById('conflict-remote-diff').innerHTML = renderDiffHtml(
-      basePlain.body,
-      remotePlain.body
+      basePlain.body || '',
+      remoteBody
     );
 
     document.getElementById('conflict-merged-title').value =
-      localPlain.title || remotePlain.title || '';
+      localPlain.title || remoteTitle || '';
     document.getElementById('conflict-merged-mood').value =
-      localPlain.mood || remotePlain.mood || '';
-    document.getElementById('conflict-merged-tags').value = mergeTags(
-      localPlain.tags,
-      remotePlain.tags
-    ).join(', ');
-    document.getElementById('conflict-merged-body').value = mergeResult.mergedText;
+      localPlain.mood || remoteEntry.mood || '';
+    document.getElementById('conflict-merged-tags').value = mergedTags.join(', ');
+    document.getElementById('conflict-merged-body').value = autoMerge.mergedText;
 
-    document.getElementById('composer-modal').hidden = true;
     document.getElementById('conflict-modal').hidden = false;
   }
 
-  async handleConflictCommit(ev) {
+  async handleConflictMergeSubmit(ev) {
     ev.preventDefault();
     const ctx = this.state.activeConflict;
     if (!ctx) return;
 
-    const mergedBodyRaw = document.getElementById('conflict-merged-body').value.trim();
-    if (!mergedBodyRaw) {
-      this.showToast('Merged prose cannot be empty.', 'warn');
+    const mergedBody = document.getElementById('conflict-merged-body').value.trim();
+    if (!mergedBody) {
+      this.showToast('Merged entry prose cannot be empty.', 'warn');
+      return;
+    }
+    if (
+      mergedBody.includes('<<<<<<<') ||
+      mergedBody.includes('=======') ||
+      mergedBody.includes('>>>>>>>')
+    ) {
+      this.showToast('Remove all <<<<<<< / ======= / >>>>>>> conflict markers first.', 'warn');
       return;
     }
 
-    const expectedDate = `${ctx.yearKey}-${ctx.dayStr}`;
-    const mergedTitleRaw = document.getElementById('conflict-merged-title').value.trim();
+    const mergedTitle = document.getElementById('conflict-merged-title').value.trim();
     const mergedMood = document.getElementById('conflict-merged-mood').value.trim();
     const mergedTags = document
       .getElementById('conflict-merged-tags')
@@ -3629,23 +3577,20 @@ class PerpetualDiaryApp {
       .map((t) => t.trim())
       .filter(Boolean);
 
+    const expectedDate = `${ctx.yearKey}-${ctx.dayStr}`;
     const shouldEncrypt = Boolean(ctx.localEntryRecord.encrypted);
-    let finalBody = mergedBodyRaw;
-    let finalTitle = mergedTitleRaw;
+    let finalTitle = mergedTitle;
+    let finalBody = mergedBody;
 
     if (shouldEncrypt) {
-      if (!this.hasActiveSessionKey()) {
-        this.showToast('Unlock the Vault before committing encrypted entries.', 'warn');
-        return;
-      }
       finalBody = await encryptText(
-        mergedBodyRaw,
+        mergedBody,
         this.state.keyring || this.state.cryptoKey,
         buildEntryAad(expectedDate, ctx.yearKey, 'body')
       );
-      if (mergedTitleRaw) {
+      if (mergedTitle) {
         finalTitle = await encryptText(
-          mergedTitleRaw,
+          mergedTitle,
           this.state.keyring || this.state.cryptoKey,
           buildEntryAad(expectedDate, ctx.yearKey, 'title')
         );
@@ -3658,8 +3603,7 @@ class PerpetualDiaryApp {
       body: finalBody,
       mood: mergedMood,
       tags: mergedTags,
-      wordCount: countWords(stripMarkdown(mergedBodyRaw)),
-      writtenAt: ctx.remoteEntry?.writtenAt || ctx.localEntryRecord.writtenAt,
+      wordCount: countWords(stripMarkdown(mergedBody)),
       updatedAt: new Date().toISOString(),
     };
 
@@ -3679,14 +3623,14 @@ class PerpetualDiaryApp {
         yearKey: String(ctx.yearKey),
         entryId: ctx.entryId,
         entryRecord: resolvedRecord,
-        expectedUpdatedAt: ctx.remoteEntry?.updatedAt || null,
-        expectedSha: ctx.remoteSha || null,
+        expectedSha: null,
+        expectedUpdatedAt: null,
       });
 
       const res = await this.gh.commitAtomicDayMutations({
         dayMutations,
         mediaUploads: ctx.mediaUploads || [],
-        commitMessage: `diary: resolve merge conflict on ${expectedDate}`,
+        commitMessage: `diary: resolve merge conflict ${expectedDate}`,
         cloak: this.buildCloakTxAdapter(),
       });
 
@@ -3695,179 +3639,196 @@ class PerpetualDiaryApp {
       }
       if (res.dayShas) Object.assign(this.state.dayShas, res.dayShas);
       this.state.indexData = res.index;
-      this.storageRemove(`perpetual_diary_draft_${expectedDate}`);
+
       this.state.activeConflict = null;
       document.getElementById('conflict-modal').hidden = true;
-      this.showToast(`Conflict resolved & committed atomically for ${expectedDate}.`, 'success');
+      this.storageRemove(`perpetual_diary_draft_${expectedDate}`);
+      this.closeComposer();
       await this.renderActiveView();
+      this.showToast(`Conflict resolved and committed for ${expectedDate}.`, 'success');
     } catch (err) {
-      this.showToast(err.message || 'Failed to commit resolved conflict.', 'error');
+      this.showToast(err.message || 'Failed to commit merged entry.', 'error');
     }
   }
 
-  async openHistoryModal(dayStr, yearKey, currentPlain) {
-    this.state.activeHistory = {
-      dayStr,
-      yearKey: String(yearKey),
-      currentPlain,
-      revisions: [],
-      selectedIndex: 0,
-      selectedSnapshot: null,
-    };
+  /* ==========================================================================
+     GIT REVISION TIME MACHINE & CROSS-DEVICE `drafts` BRANCH
+     ========================================================================== */
 
-    document.getElementById('history-modal-title').textContent = `Revision History · ${yearKey}-${dayStr}`;
+  async openHistoryModal(dayStr, yearKey, currentPlainEntry) {
+    const modal = document.getElementById('history-modal');
+    const timelineEl = document.getElementById('history-timeline-list');
+    const diffViewer = document.getElementById('history-diff-viewer');
+    const snapViewer = document.getElementById('history-snapshot-viewer');
+    const restoreBtn = document.getElementById('history-restore-btn');
     const banner = document.getElementById('history-status-banner');
-    banner.className = 'status-callout';
-    banner.textContent = 'Fetching Git commit history…';
-    banner.hidden = false;
 
-    document.getElementById('history-timeline-list').innerHTML = '';
-    document.getElementById('history-diff-viewer').innerHTML = '';
-    document.getElementById('history-snapshot-viewer').innerHTML = '';
-    document.getElementById('history-restore-btn').disabled = true;
-    document.getElementById('history-modal').hidden = false;
+    document.getElementById('history-modal-title').textContent =
+      `Revision History · ${yearKey}-${dayStr}`;
+    timelineEl.innerHTML = '<div class="mono-meta" style="padding:0.8rem;">Loading commits…</div>';
+    diffViewer.innerHTML = '';
+    snapViewer.innerHTML = '';
+    restoreBtn.disabled = true;
+    banner.hidden = true;
+    modal.hidden = false;
 
     try {
       const revisions = await fetchDayCommitHistory(this.gh, dayStr, {
         cloakAdapter: this.buildCloakTxAdapter(),
         limit: 25,
       });
-      this.state.activeHistory.revisions = revisions;
+
       document.getElementById('history-count-label').textContent = String(revisions.length);
+      this.state.activeHistory = {
+        dayStr,
+        yearKey: String(yearKey),
+        currentPlainEntry,
+        revisions,
+        selectedRevision: null,
+        selectedEntry: null,
+      };
 
       if (revisions.length === 0) {
-        banner.textContent = 'No prior commits found for this calendar date yet.';
+        timelineEl.innerHTML =
+          '<div class="mono-meta" style="padding:0.8rem;">No prior revisions recorded yet.</div>';
         return;
       }
 
-      banner.hidden = true;
-      this.renderHistoryTimelineList();
-      await this.selectHistoryRevision(0);
-    } catch (err) {
-      banner.className = 'status-callout is-err';
-      banner.textContent = err.message || 'Could not load commit history.';
-    }
-  }
-
-  renderHistoryTimelineList() {
-    const ctx = this.state.activeHistory;
-    if (!ctx) return;
-    const listEl = document.getElementById('history-timeline-list');
-    listEl.innerHTML = ctx.revisions
-      .map((rev, idx) => {
-        const dateLabel = new Date(rev.date).toLocaleString(undefined, {
-          month: 'short',
-          day: 'numeric',
-          year: 'numeric',
-          hour: '2-digit',
-          minute: '2-digit',
-        });
-        return `
-          <button type="button" class="history-commit-item${
-            idx === ctx.selectedIndex ? ' is-active' : ''
-          }" data-rev-idx="${idx}">
+      timelineEl.innerHTML = revisions
+        .map(
+          (rev, idx) => `
+          <button type="button" class="history-commit-item" data-rev-idx="${idx}">
             <div class="history-commit-top">
-              <span class="mono-label">#${escapeHtml(rev.shortSha)}</span>
-              <span class="mono-meta">${escapeHtml(dateLabel)}</span>
+              <span class="mono-label">${escapeHtml(rev.shortSha)}</span>
+              <span class="mono-meta">${escapeHtml(
+                new Date(rev.date).toLocaleDateString(undefined, {
+                  month: 'short',
+                  day: 'numeric',
+                  year: 'numeric',
+                })
+              )}</span>
             </div>
             <div class="history-commit-msg">${escapeHtml(rev.message)}</div>
           </button>
-        `;
-      })
-      .join('');
+        `
+        )
+        .join('');
 
-    listEl.querySelectorAll('.history-commit-item').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        this.selectHistoryRevision(Number(btn.dataset.revIdx));
+      timelineEl.querySelectorAll('.history-commit-item').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          timelineEl.querySelectorAll('.history-commit-item').forEach((b) => b.classList.remove('is-active'));
+          btn.classList.add('is-active');
+          this.selectHistoryRevision(Number(btn.dataset.revIdx));
+        });
       });
-    });
+
+      timelineEl.querySelector('.history-commit-item')?.click();
+    } catch (err) {
+      banner.className = 'status-callout is-err';
+      banner.textContent = err.message || 'Could not load revision history.';
+      banner.hidden = false;
+    }
   }
 
   async selectHistoryRevision(idx) {
     const ctx = this.state.activeHistory;
     if (!ctx || !ctx.revisions[idx]) return;
-    ctx.selectedIndex = idx;
-    this.renderHistoryTimelineList();
-
     const rev = ctx.revisions[idx];
-    document.getElementById('history-selected-sha').textContent = `COMMIT #${rev.shortSha}`;
-    document.getElementById('history-selected-meta').textContent = `${rev.authorName} · ${new Date(
-      rev.date
-    ).toLocaleString()}`;
-    document.getElementById('history-restore-btn').disabled = true;
-
     const diffViewer = document.getElementById('history-diff-viewer');
     const snapViewer = document.getElementById('history-snapshot-viewer');
-    diffViewer.innerHTML = '<div class="diff-line diff-eq"><span></span><span>Decrypting snapshot…</span></div>';
+    const metaEl = document.getElementById('history-entry-meta');
+    const restoreBtn = document.getElementById('history-restore-btn');
+
+    document.getElementById('history-selected-sha').textContent = `COMMIT ${rev.shortSha}`;
+    document.getElementById('history-selected-meta').textContent =
+      ` · ${new Date(rev.date).toLocaleString()}`;
+    diffViewer.innerHTML = '<div class="mono-meta" style="padding:0.75rem;">Decrypting snapshot…</div>';
+    restoreBtn.disabled = true;
 
     try {
-      const fetched = await fetchEntryAtRevision(this.gh, ctx.dayStr, ctx.yearKey, rev, {
+      const res = await fetchEntryAtRevision(this.gh, ctx.dayStr, ctx.yearKey, rev, {
         keyring: this.state.keyring || this.state.cryptoKey,
         cloakAdapter: this.buildCloakTxAdapter(),
       });
 
-      if (!fetched.found || !fetched.entry) {
-        ctx.selectedSnapshot = null;
+      if (!res.found || !res.entry) {
         diffViewer.innerHTML =
-          '<div class="diff-line diff-eq"><span></span><span>This year did not exist in that earlier commit.</span></div>';
-        snapViewer.innerHTML = '<p class="section-subtext">Entry not present in this revision.</p>';
+          '<div class="mono-meta" style="padding:0.75rem;">Entry did not exist at this revision.</div>';
+        snapViewer.innerHTML = '';
+        metaEl.hidden = true;
         return;
       }
 
-      const snap = Array.isArray(fetched.entry) ? fetched.entry[0] : fetched.entry;
-      ctx.selectedSnapshot = snap;
-      const metaEl = document.getElementById('history-entry-meta');
-      metaEl.hidden = false;
-      metaEl.textContent = `Title: ${snap.title || '(untitled)'} · Mood: ${
-        snap.mood || '—'
-      } · Tags: ${snap.tags?.join(', ') || 'none'}`;
+      const rawSlot = res.entry;
+      const chosenEntry = Array.isArray(rawSlot) ? rawSlot[0] : rawSlot;
+      ctx.selectedRevision = rev;
+      ctx.selectedEntry = chosenEntry;
 
-      diffViewer.innerHTML = renderDiffHtml(snap.body || '', ctx.currentPlain?.body || '');
-      snapViewer.innerHTML = renderMarkdown(snap.body || '', { scopeId: `hist-${rev.shortSha}` });
-      document.getElementById('history-restore-btn').disabled = Boolean(fetched.locked);
+      metaEl.hidden = false;
+      metaEl.textContent = `${chosenEntry.title || '(No heading)'} · ${countWords(
+        chosenEntry.body || ''
+      )} words`;
+
+      diffViewer.innerHTML = renderDiffHtml(
+        chosenEntry.body || '',
+        ctx.currentPlainEntry?.body || ''
+      );
+      snapViewer.innerHTML = renderMarkdown(chosenEntry.body || '', {
+        preserveWhitespace: Boolean(chosenEntry.preserveWhitespace),
+        scopeId: `hist-${rev.shortSha}`,
+      });
+
+      this.setHistoryViewMode(this.state.historyViewMode);
+      restoreBtn.disabled = Boolean(res.locked || res.decryptionError);
     } catch (err) {
-      diffViewer.innerHTML = `<div class="diff-line diff-del"><span>!</span><span>${escapeHtml(
-        err.message || 'Failed to inspect revision.'
-      )}</span></div>`;
+      diffViewer.innerHTML = `<div class="form-error">${escapeHtml(err.message)}</div>`;
     }
+  }
+
+  setHistoryViewMode(mode) {
+    this.state.historyViewMode = mode;
+    const diffViewer = document.getElementById('history-diff-viewer');
+    const snapViewer = document.getElementById('history-snapshot-viewer');
+    diffViewer.hidden = mode !== 'diff';
+    snapViewer.hidden = mode !== 'snapshot';
+    document.querySelectorAll('#history-view-toggle .seg-btn').forEach((btn) => {
+      btn.classList.toggle('is-active', btn.dataset.historyMode === mode);
+    });
   }
 
   async refreshCloudDraftBadge() {
+    const pill = document.getElementById('cloud-drafts-count');
+    if (!pill) return;
     try {
-      const drafts = await listCloudDrafts(this.gh, { zeroFootprint: this.state.zeroFootprint });
-      const pill = document.getElementById('cloud-drafts-count');
-      if (pill) {
-        pill.textContent = String(drafts.length);
-        pill.hidden = drafts.length === 0;
-      }
+      const list = await listCloudDrafts(this.gh, { zeroFootprint: this.state.zeroFootprint });
+      pill.textContent = String(list.length);
+      pill.hidden = list.length === 0;
     } catch {
-      // ignore if repo not configured yet
+      pill.hidden = true;
     }
   }
 
-  async handleSaveCloudDraft() {
+  async handleSaveToCloudDraft() {
     const dateVal = document.getElementById('entry-date-input').value;
-    const rawBody = document.getElementById('entry-body-input').value.trim();
-    if (!dateVal || !rawBody) {
-      this.showToast('Choose a date and write some prose before saving a draft.', 'warn');
+    const title = document.getElementById('entry-title-input').value.trim();
+    const mood = document.getElementById('entry-mood-input').value.trim();
+    const tags = document
+      .getElementById('entry-tags-input')
+      .value.split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const body = document.getElementById('entry-body-input').value;
+    const encryptOnPublish = document.getElementById('entry-encrypt-checkbox').checked;
+
+    if (!body.trim() && !title.trim()) {
+      this.showToast('Write some text before saving to the drafts branch.', 'warn');
       return;
     }
 
     try {
-      const saved = await saveCloudDraft(
+      const res = await saveCloudDraft(
         this.gh,
-        {
-          diaryDate: dateVal,
-          title: document.getElementById('entry-title-input').value.trim(),
-          mood: document.getElementById('entry-mood-input').value.trim(),
-          tags: document
-            .getElementById('entry-tags-input')
-            .value.split(',')
-            .map((t) => t.trim())
-            .filter(Boolean),
-          body: rawBody,
-          encryptOnPublish: document.getElementById('entry-encrypt-checkbox').checked,
-        },
+        { diaryDate: dateVal, title, mood, tags, body, encryptOnPublish },
         {
           keyring: this.state.keyring || this.state.cryptoKey,
           encrypt: this.hasActiveSessionKey(),
@@ -3876,27 +3837,22 @@ class PerpetualDiaryApp {
       );
       this.state.activeCloudDraftDate = dateVal;
       await this.refreshCloudDraftBadge();
-      this.showToast(`Draft ${dateVal} synced to "${saved.branch}" branch.`, 'success');
+      this.showToast(`Synced draft for ${dateVal} to "${res.branch}" branch.`, 'success');
     } catch (err) {
-      this.showToast(err.message || 'Failed to save draft to branch.', 'error');
+      this.showToast(err.message || 'Failed to sync draft.', 'error');
     }
   }
 
   async openDraftsModal() {
-    const errEl = document.getElementById('drafts-error');
+    const modal = document.getElementById('drafts-modal');
     const listEl = document.getElementById('drafts-list');
+    const errEl = document.getElementById('drafts-error');
     errEl.hidden = true;
-    listEl.innerHTML = '<div class="mono-meta">Loading drafts branch…</div>';
-    document.getElementById('drafts-modal').hidden = false;
+    listEl.innerHTML = '<div class="mono-meta">Loading drafts…</div>';
+    modal.hidden = false;
 
     try {
       const drafts = await listCloudDrafts(this.gh, { zeroFootprint: this.state.zeroFootprint });
-      const pill = document.getElementById('cloud-drafts-count');
-      if (pill) {
-        pill.textContent = String(drafts.length);
-        pill.hidden = drafts.length === 0;
-      }
-
       if (drafts.length === 0) {
         listEl.innerHTML =
           '<div class="empty-comments mono-meta">No unfinished drafts on the drafts branch.</div>';
@@ -3909,32 +3865,32 @@ class PerpetualDiaryApp {
           <div class="draft-row-card">
             <div>
               <strong>${escapeHtml(d.diaryDate)}</strong>
-              <span class="mono-meta"> · ${escapeHtml(d.source)} · ${formatBytesCompact(d.size)}</span>
+              <span class="mono-meta"> · ${escapeHtml(d.source)}</span>
             </div>
             <div class="draft-row-actions">
-              <button type="button" class="btn btn-primary btn-sm draft-resume-btn" data-draft-date="${escapeHtml(
+              <button type="button" class="btn btn-primary btn-sm draft-open-btn" data-draft-date="${escapeHtml(
                 d.diaryDate
               )}">Resume</button>
               <button type="button" class="btn btn-danger btn-sm draft-del-btn" data-draft-date="${escapeHtml(
                 d.diaryDate
-              )}">Discard</button>
+              )}">Delete</button>
             </div>
           </div>
         `
         )
         .join('');
 
-      listEl.querySelectorAll('.draft-resume-btn').forEach((btn) => {
+      listEl.querySelectorAll('.draft-open-btn').forEach((btn) => {
         btn.addEventListener('click', async () => {
-          const dDate = btn.dataset.draftDate;
+          const targetDate = btn.dataset.draftDate;
           try {
-            const loaded = await loadCloudDraft(this.gh, dDate, {
+            const loaded = await loadCloudDraft(this.gh, targetDate, {
               keyring: this.state.keyring || this.state.cryptoKey,
               zeroFootprint: this.state.zeroFootprint,
             });
-            document.getElementById('drafts-modal').hidden = true;
-            this.state.activeCloudDraftDate = dDate;
-            await this.openComposer({ presetDate: dDate });
+            modal.hidden = true;
+            this.state.activeCloudDraftDate = targetDate;
+            await this.openComposer({ presetDate: targetDate });
             document.getElementById('entry-title-input').value = loaded.title || '';
             document.getElementById('entry-mood-input').value = loaded.mood || '';
             document.getElementById('entry-tags-input').value = Array.isArray(loaded.tags)
@@ -3943,7 +3899,7 @@ class PerpetualDiaryApp {
             document.getElementById('entry-body-input').value = loaded.body || '';
             this.updateComposerCounts();
           } catch (err) {
-            errEl.textContent = err.message || 'Could not load draft.';
+            errEl.textContent = err.message;
             errEl.hidden = false;
           }
         });
@@ -3951,25 +3907,35 @@ class PerpetualDiaryApp {
 
       listEl.querySelectorAll('.draft-del-btn').forEach((btn) => {
         btn.addEventListener('click', async () => {
-          const dDate = btn.dataset.draftDate;
-          await deleteCloudDraft(this.gh, dDate, { zeroFootprint: this.state.zeroFootprint });
-          await this.openDraftsModal();
+          const targetDate = btn.dataset.draftDate;
+          try {
+            await deleteCloudDraft(this.gh, targetDate, {
+              zeroFootprint: this.state.zeroFootprint,
+            });
+            await this.refreshCloudDraftBadge();
+            await this.openDraftsModal();
+          } catch (err) {
+            errEl.textContent = err.message;
+            errEl.hidden = false;
+          }
         });
       });
     } catch (err) {
-      errEl.textContent = err.message || 'Could not fetch drafts.';
+      errEl.textContent = err.message;
       errEl.hidden = false;
-      listEl.innerHTML = '';
     }
   }
 
-  /* ========================================================================
-     366-DAY HEATMAP, ARCHIVE, INSIGHTS, WORD TREND EXPLORER & STORY ARCS
-     ======================================================================== */
+  /* ==========================================================================
+     366-DAY HEATMAP, ARCHIVE, WORD TREND EXPLORER & STORY ARCS
+     ========================================================================== */
+
   renderHeatmap() {
     const grid = document.getElementById('heatmap-grid');
     const readout = document.getElementById('heatmap-hover-readout');
-    const mode = this.state.heatmapMode || 'years';
+    if (!grid) return;
+
+    const daysMap = this.state.indexData?.days || {};
     grid.innerHTML = '';
 
     for (let m = 1; m <= 12; m += 1) {
@@ -3977,62 +3943,71 @@ class PerpetualDiaryApp {
       card.className = 'hm-month-card';
       const maxD = DAYS_IN_MONTH[m - 1];
       let cellsHtml = '';
+
       for (let d = 1; d <= maxD; d += 1) {
         const dayStr = formatDayKey(m, d);
-        const summary = this.state.indexData.days?.[dayStr];
-        const { level, valueLabel } = getHeatmapLevelForMode(summary, mode);
-        const label = `${MONTHS[m - 1]} ${d} — ${valueLabel}`;
-        cellsHtml += `<button type="button" class="hm-cell hm-lvl-${level}" data-day="${dayStr}" data-label="${escapeHtml(
-          label
-        )}" aria-label="${escapeHtml(label)}"></button>`;
+        const info = daysMap[dayStr];
+        const { level, valueLabel } = getHeatmapLevelForMode(info, this.state.heatmapMode);
+        const tip = `${formatReadableDayKey(dayStr)} (${dayStr}) — ${valueLabel}`;
+        cellsHtml += `<button type="button" class="hm-cell hm-lvl-${level}" data-day="${dayStr}" data-tip="${escapeHtml(
+          tip
+        )}" title="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}"></button>`;
       }
-      card.innerHTML = `<div class="hm-month-title">${MONTHS[m - 1]}</div><div class="hm-month-cells">${cellsHtml}</div>`;
+
+      card.innerHTML = `
+        <div class="hm-month-title">${MONTHS[m - 1]}</div>
+        <div class="hm-month-cells">${cellsHtml}</div>
+      `;
       grid.appendChild(card);
     }
 
-    grid.querySelectorAll('.hm-cell').forEach((btn) => {
-      const show = () => {
-        readout.textContent = btn.dataset.label;
-      };
-      btn.addEventListener('mouseenter', show);
-      btn.addEventListener('focus', show);
-      btn.addEventListener('click', () => {
-        this.state.activeDay = btn.dataset.day;
+    grid.querySelectorAll('.hm-cell').forEach((cell) => {
+      cell.addEventListener('mouseenter', () => {
+        if (readout) readout.textContent = cell.dataset.tip || '';
+      });
+      cell.addEventListener('focus', () => {
+        if (readout) readout.textContent = cell.dataset.tip || '';
+      });
+      cell.addEventListener('click', () => {
+        this.state.activeDay = cell.dataset.day;
         this.state.compare2Active = false;
         this.switchView('reader');
       });
     });
   }
 
-  async loadAllIndexedDays() {
-    const dayKeys = Object.keys(this.state.indexData.days || {});
-    for (const dayStr of dayKeys) {
+  async loadAllIndexedDaysIntoCache(statusEl = null) {
+    const dayKeys = Object.keys(this.state.indexData?.days || {}).sort();
+    for (let i = 0; i < dayKeys.length; i += 1) {
+      const dayStr = dayKeys[i];
+      if (statusEl) {
+        statusEl.textContent = `Loading & decrypting ${i + 1}/${dayKeys.length} (${dayStr})…`;
+      }
       const doc = await this.getDayDocument(dayStr, false);
       for (const [yrKey, slot] of Object.entries(doc.entries || {})) {
         const list = getYearEntriesList(slot, yrKey, dayStr);
         for (const entry of list) {
           const expectedDate = `${yrKey}-${dayStr}`;
           const resolvedDate = entry.diaryDate || expectedDate;
-          const cacheKey = `${resolvedDate}::${entry.id}`;
-          if (this.state.decryptedEntryCache.has(cacheKey)) continue;
-          const body = await this.decryptFieldIfNeeded(
-            entry.body || '',
+          const entryId = entry.id || `ent-${yrKey}-1`;
+          const bodyRes = await this.decryptFieldDetailed(
+            entry.body,
             Boolean(entry.encrypted),
             buildEntryAad(expectedDate, yrKey, 'body')
           );
-          const title = await this.decryptFieldIfNeeded(
+          const titleRes = await this.decryptFieldDetailed(
             entry.title || '',
             Boolean(entry.encrypted),
             buildEntryAad(expectedDate, yrKey, 'title')
           );
-          if (body !== null && !isDoubleLockedPayload(body)) {
-            this.state.decryptedEntryCache.set(cacheKey, {
-              id: entry.id,
+          if (bodyRes.status === 'ok' && !isDoubleLockedPayload(bodyRes.text)) {
+            this.state.decryptedEntryCache.set(`${resolvedDate}::${entryId}`, {
+              id: entryId,
               diaryDate: resolvedDate,
               dayStr,
               year: Number(yrKey),
-              title: title || '',
-              body,
+              title: titleRes.text || '',
+              body: bodyRes.text || '',
               mood: entry.mood || '',
               tags: Array.isArray(entry.tags) ? entry.tags : [],
               location: entry.location || '',
@@ -4049,177 +4024,340 @@ class PerpetualDiaryApp {
   }
 
   async renderArchive() {
-    const daysMap = this.state.indexData.days || {};
+    const daysMap = this.state.indexData?.days || {};
     const yearSet = new Set();
     const tagCounts = new Map();
 
     for (const info of Object.values(daysMap)) {
       (info.years || []).forEach((y) => yearSet.add(Number(y)));
-      (info.tags || []).forEach((t) => tagCounts.set(t, (tagCounts.get(t) || 0) + 1));
+      (info.tags || []).forEach((t) => {
+        tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
+      });
     }
 
     const yearSel = document.getElementById('archive-year-select');
-    const sortedYears = Array.from(yearSet).sort((a, b) => b - a);
+    const prevYearVal = yearSel.value;
     yearSel.innerHTML =
       '<option value="">All Years</option>' +
-      sortedYears.map((y) => `<option value="${y}">${y}</option>`).join('');
-    yearSel.value = this.state.archiveYear;
+      Array.from(yearSet)
+        .sort((a, b) => b - a)
+        .map((y) => `<option value="${y}">${y}</option>`)
+        .join('');
+    yearSel.value = prevYearVal;
 
     const cloudEl = document.getElementById('archive-tag-cloud');
     cloudEl.innerHTML = Array.from(tagCounts.entries())
       .sort((a, b) => b[1] - a[1])
       .map(
-        ([tag, count]) =>
-          `<button type="button" class="tag-cloud-btn ${
-            this.state.archiveTag === tag ? 'is-active' : ''
-          }" data-tag="${escapeHtml(tag)}">#${escapeHtml(tag)} (${count})</button>`
+        ([tag, cnt]) =>
+          `<button type="button" class="tag-cloud-btn${
+            this.state.archiveTag === tag ? ' is-active' : ''
+          }" data-tag="${escapeHtml(tag)}">#${escapeHtml(tag)} (${cnt})</button>`
       )
       .join('');
 
     cloudEl.querySelectorAll('.tag-cloud-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const clicked = btn.dataset.tag;
-        this.state.archiveTag = this.state.archiveTag === clicked ? '' : clicked;
+        const t = btn.dataset.tag;
+        this.state.archiveTag = this.state.archiveTag === t ? '' : t;
         this.renderArchive();
       });
     });
 
     const query = this.state.archiveSearch.trim().toLowerCase();
+    const filterYear = this.state.archiveYear;
+    const filterTag = this.state.archiveTag;
     const resultsEl = document.getElementById('archive-results');
-    resultsEl.innerHTML = '';
 
-    const dayKeys = Object.keys(daysMap).sort();
-    for (const dayStr of dayKeys) {
-      const info = daysMap[dayStr];
-      if (this.state.archiveYear && !(info.years || []).includes(Number(this.state.archiveYear))) {
-        continue;
-      }
-      if (this.state.archiveTag && !(info.tags || []).includes(this.state.archiveTag)) {
-        continue;
-      }
+    const cards = [];
+    for (const [dayStr, info] of Object.entries(daysMap).sort((a, b) => a[0].localeCompare(b[0]))) {
+      const years = (info.years || []).filter((y) => !filterYear || String(y) === filterYear);
+      if (years.length === 0) continue;
+      if (filterTag && !(info.tags || []).includes(filterTag)) continue;
 
-      const cachedDoc = this.state.dayCache[dayStr];
-      let snippet = `${info.years.length} year(s) recorded: ${info.years.join(', ')}`;
-      let title = formatReadableDayKey(dayStr);
+      for (const yr of years) {
+        const matchingCached = Array.from(this.state.decryptedEntryCache.values()).filter(
+          (e) => e.dayStr === dayStr && Number(e.year) === Number(yr)
+        );
 
-      if (cachedDoc) {
-        let matched = !query;
-        for (const [yrKey, slot] of Object.entries(cachedDoc.entries || {})) {
-          if (this.state.archiveYear && Number(yrKey) !== Number(this.state.archiveYear)) continue;
-          const list = getYearEntriesList(slot, yrKey, dayStr);
-          for (const e of list) {
-            const plain = this.state.decryptedEntryCache.get(
-              `${e.diaryDate || `${yrKey}-${dayStr}`}::${e.id}`
-            );
-            const hay = plain
-              ? `${plain.title} ${plain.body} ${plain.mood} ${plain.location || ''} ${JSON.stringify(
-                  plain.artifacts || ''
-                )} ${(plain.tags || []).join(' ')}`.toLowerCase()
-              : `${e.diaryDate} ${e.mood || ''} ${(e.tags || []).join(' ')}`.toLowerCase();
-            if (query && hay.includes(query)) {
-              matched = true;
-              snippet = plain
-                ? stripMarkdown(plain.body).slice(0, 140)
-                : 'Encrypted entry (matched metadata)';
-              if (plain?.title) title = `${formatReadableDayKey(dayStr)} — ${plain.title}`;
-              break;
-            }
+        if (matchingCached.length > 0) {
+          for (const cached of matchingCached) {
+            const hay = `${cached.diaryDate} ${cached.title} ${cached.mood} ${(
+              cached.tags || []
+            ).join(' ')} ${cached.body}`.toLowerCase();
+            if (query && !hay.includes(query)) continue;
+            const plain = stripMarkdown(cached.body || '');
+            const snippet = plain ? `${plain.slice(0, 140)}…` : 'Encrypted or unloaded prose';
+            cards.push({
+              dayStr,
+              year: yr,
+              title: cached.title || `${formatReadableDayKey(dayStr)} · ${yr}`,
+              snippet,
+              tags: cached.tags || [],
+            });
           }
-          if (matched && query) break;
+        } else {
+          const hay = `${dayStr} ${yr} ${(info.tags || []).join(' ')} ${
+            info.moods?.[yr] || ''
+          }`.toLowerCase();
+          if (query && !hay.includes(query)) continue;
+          cards.push({
+            dayStr,
+            year: yr,
+            title: `${formatReadableDayKey(dayStr)} · ${yr}`,
+            snippet: 'Click "Load All Days" to search full decrypted prose.',
+            tags: info.tags || [],
+          });
         }
-        if (!matched) continue;
-      } else if (query) {
-        const metaHay = `${dayStr} ${formatReadableDayKey(dayStr)} ${(info.tags || []).join(' ')} ${
-          info.years.join(' ')
-        }`.toLowerCase();
-        if (!metaHay.includes(query)) continue;
       }
+    }
 
-      const card = document.createElement('div');
-      card.className = 'archive-card';
-      card.innerHTML = `
-        <div class="mono-label">${escapeHtml(dayStr)} · ${escapeHtml(info.years.join(' / '))}</div>
-        <strong>${escapeHtml(title)}</strong>
-        <p class="section-subtext">${escapeHtml(snippet)}</p>
-      `;
+    if (cards.length === 0) {
+      resultsEl.innerHTML =
+        '<div class="empty-comments mono-meta">No entries match the current filter.</div>';
+      return;
+    }
+
+    resultsEl.innerHTML = cards
+      .map(
+        (c) => `
+        <article class="archive-card" data-day="${escapeHtml(c.dayStr)}">
+          <div class="mono-meta">${escapeHtml(String(c.year))}-${escapeHtml(c.dayStr)}</div>
+          <strong>${escapeHtml(c.title)}</strong>
+          <p class="section-subtext">${escapeHtml(c.snippet)}</p>
+        </article>
+      `
+      )
+      .join('');
+
+    resultsEl.querySelectorAll('.archive-card').forEach((card) => {
       card.addEventListener('click', () => {
-        this.state.activeDay = dayStr;
+        this.state.activeDay = card.dataset.day;
         this.state.compare2Active = false;
         this.switchView('reader');
       });
-      resultsEl.appendChild(card);
+    });
+  }
+
+  async renderAnalyticsAndArcs() {
+    const plainEntries = Array.from(this.state.decryptedEntryCache.values());
+    const stats = computeDiaryAnalytics(this.state.indexData, plainEntries);
+
+    const kpiGrid = document.getElementById('analytics-kpi-grid');
+    if (kpiGrid) {
+      kpiGrid.innerHTML = `
+        <div class="kpi-card"><div class="mono-label">TOTAL ENTRIES</div><div class="kpi-value">${stats.totalEntries}</div></div>
+        <div class="kpi-card"><div class="mono-label">TOTAL WORDS</div><div class="kpi-value">${stats.totalWords.toLocaleString()}</div></div>
+        <div class="kpi-card"><div class="mono-label">366-DAY COVERAGE</div><div class="kpi-value">${stats.calendarCoveragePct}%</div></div>
+        <div class="kpi-card"><div class="mono-label">AVG WORDS / ENTRY</div><div class="kpi-value">${stats.avgWordsPerEntry}</div></div>
+        <div class="kpi-card"><div class="mono-label">LONGEST DAY RUN</div><div class="kpi-value">${stats.longestStreak}d</div></div>
+      `;
     }
 
-    if (resultsEl.children.length === 0) {
-      resultsEl.innerHTML =
-        '<div class="empty-comments mono-meta">No matching entries found. Click "Load All Days" to search inside decrypted prose.</div>';
+    const yearsChart = document.getElementById('analytics-years-chart');
+    if (yearsChart) {
+      const maxYearWords = Math.max(1, ...stats.yearsBreakdown.map((y) => y.words));
+      yearsChart.innerHTML =
+        stats.yearsBreakdown.length === 0
+          ? '<span class="mono-meta">No entries recorded yet.</span>'
+          : stats.yearsBreakdown
+              .map(
+                (y) => `
+              <div class="bar-chart-row">
+                <span>${y.year} (${y.entries})</span>
+                <div class="bar-chart-track"><div class="bar-chart-fill" style="width:${Math.round(
+                  (y.words / maxYearWords) * 100
+                )}%"></div></div>
+                <span>${y.words.toLocaleString()}w</span>
+              </div>
+            `
+              )
+              .join('');
+    }
+
+    const moodsChart = document.getElementById('analytics-moods-chart');
+    if (moodsChart) {
+      const maxMood = Math.max(1, ...stats.topMoods.map((m) => m.count));
+      moodsChart.innerHTML =
+        stats.topMoods.length === 0
+          ? '<span class="mono-meta">Add moods to entries to visualize patterns.</span>'
+          : stats.topMoods
+              .map(
+                (m) => `
+              <div class="bar-chart-row">
+                <span>${escapeHtml(m.mood)}</span>
+                <div class="bar-chart-track"><div class="bar-chart-fill" style="width:${Math.round(
+                  (m.count / maxMood) * 100
+                )}%"></div></div>
+                <span>${m.count}</span>
+              </div>
+            `
+              )
+              .join('');
+    }
+
+    this.renderWordTrendExplorer(plainEntries);
+
+    const dossierSel = document.getElementById('dossier-year-select');
+    if (dossierSel) {
+      const years = stats.yearsBreakdown.map((y) => y.year).sort((a, b) => b - a);
+      const list = years.length > 0 ? years : [new Date().getFullYear()];
+      if (!list.includes(Number(this.state.selectedDossierYear))) {
+        this.state.selectedDossierYear = list[0];
+      }
+      dossierSel.innerHTML = list
+        .map((y) => `<option value="${y}">${y}</option>`)
+        .join('');
+      dossierSel.value = String(this.state.selectedDossierYear);
+
+      const dossier = generateYearInReviewDossier(
+        this.state.selectedDossierYear,
+        this.state.indexData,
+        plainEntries
+      );
+      const dossierStage = document.getElementById('dossier-stage');
+      if (dossierStage) {
+        dossierStage.innerHTML = `
+          <p><strong>${dossier.year} Summary:</strong> ${dossier.entryCount} entries · ${dossier.totalWords.toLocaleString()} words · Most active month: <strong>${dossier.busiestMonth}</strong> (${dossier.busiestMonthWords.toLocaleString()} words).</p>
+        `;
+      }
+    }
+
+    const arcs = extractStoryArcs(this.state.indexData);
+    const arcSel = document.getElementById('arc-select');
+    const arcPrintBtn = document.getElementById('arc-print-book-btn');
+    const arcStage = document.getElementById('arc-book-stage');
+
+    if (arcSel) {
+      arcSel.innerHTML =
+        '<option value="">Select a Story Arc (arc:...)</option>' +
+        arcs
+          .map(
+            (a) =>
+              `<option value="${escapeHtml(a.slug)}">${escapeHtml(a.label)} (${
+                a.entryCount
+              } days)</option>`
+          )
+          .join('');
+      if (this.state.selectedArcSlug) {
+        arcSel.value = this.state.selectedArcSlug;
+      }
+
+      if (arcSel.value && arcStage) {
+        const book = buildStoryArcBook(arcSel.value, plainEntries);
+        if (arcPrintBtn) arcPrintBtn.disabled = book.chapters.length === 0;
+
+        if (book.chapters.length === 0) {
+          arcStage.innerHTML =
+            '<p class="section-subtext">Click <strong>Decrypt All Days for Full Insights</strong> above to load all chapters of this Story Arc.</p>';
+        } else {
+          arcStage.innerHTML = `
+            <div class="mono-label">STORY ARC · ${escapeHtml(book.dateSpan)} · ${book.totalWords.toLocaleString()} WORDS</div>
+            <h3 class="section-heading" style="margin-bottom:1rem;">${escapeHtml(book.title)}</h3>
+            ${book.chapters
+              .map(
+                (ch) => `
+                <article class="arc-chapter">
+                  <div class="mono-meta">${escapeHtml(ch.diaryDate)}${
+                  ch.mood ? ` · mood: ${escapeHtml(ch.mood)}` : ''
+                }</div>
+                  ${ch.title ? `<h4>${escapeHtml(ch.title)}</h4>` : ''}
+                  <div class="prose-body">${renderMarkdown(ch.body, {
+                    preserveWhitespace: Boolean(ch.preserveWhitespace),
+                    scopeId: `arc-${ch.id || ch.diaryDate}`,
+                  })}</div>
+                </article>
+              `
+              )
+              .join('')}
+          `;
+        }
+      } else if (arcPrintBtn) {
+        arcPrintBtn.disabled = true;
+      }
     }
   }
 
-  renderWordTrendSection(plainEntries) {
+  renderWordTrendExplorer(plainEntries = null) {
+    const entries = plainEntries || Array.from(this.state.decryptedEntryCache.values());
     const inputEl = document.getElementById('word-trend-input');
-    const summaryEl = document.getElementById('word-trend-summary-meta');
     const chipsEl = document.getElementById('word-trend-chips');
     const chartEl = document.getElementById('word-trend-chart');
     const matchesEl = document.getElementById('word-trend-matches');
+    const summaryEl = document.getElementById('word-trend-summary-meta');
     if (!chipsEl || !chartEl || !matchesEl) return;
 
     if (inputEl && inputEl.value !== this.state.wordTrendQuery) {
       inputEl.value = this.state.wordTrendQuery;
     }
 
-    const trend = computeWordTrend(this.state.wordTrendQuery, plainEntries);
+    const trend = computeWordTrend(this.state.wordTrendQuery, entries);
 
     chipsEl.innerHTML =
       trend.topWords.length === 0
-        ? '<span class="mono-meta">Load or decrypt entries to surface recurring keywords.</span>'
+        ? '<span class="mono-meta">Load or unlock entries to surface recurring words.</span>'
         : trend.topWords
             .map(
               (w) =>
                 `<button type="button" class="word-trend-chip${
                   this.state.wordTrendQuery.toLowerCase() === w.word ? ' is-active' : ''
-                }" data-trend-word="${escapeHtml(w.word)}">${escapeHtml(w.word)} (${w.count})</button>`
+                }" data-trend-word="${escapeHtml(w.word)}">${escapeHtml(w.word)} (${
+                  w.count
+                })</button>`
             )
             .join('');
 
     chipsEl.querySelectorAll('.word-trend-chip').forEach((btn) => {
       btn.addEventListener('click', () => {
         this.state.wordTrendQuery = btn.dataset.trendWord || '';
-        this.renderWordTrendSection(Array.from(this.state.decryptedEntryCache.values()));
+        this.renderWordTrendExplorer(entries);
       });
     });
 
     if (!trend.query) {
-      summaryEl.textContent = 'Type any word or click a keyword chip above';
-      chartEl.innerHTML = '';
+      if (summaryEl) {
+        summaryEl.textContent = `${entries.length} decrypted entr${
+          entries.length === 1 ? 'y' : 'ies'
+        } indexed in RAM`;
+      }
+      chartEl.innerHTML =
+        '<span class="mono-meta">Enter any word or phrase above (or click a recurring word chip) to plot its trajectory across years.</span>';
       matchesEl.innerHTML = '';
       return;
     }
 
-    summaryEl.textContent =
-      trend.totalOccurrences > 0
-        ? `“${trend.query}” · ${trend.totalOccurrences} mention(s) across ${
-            trend.matchingEntriesCount
-          } entry/entries${trend.peakYear ? ` · Peak year: ${trend.peakYear}` : ''}`
-        : `No mentions of “${trend.query}” in loaded entries`;
+    if (summaryEl) {
+      summaryEl.textContent = `"${trend.query}": ${trend.totalOccurrences} mention(s) across ${
+        trend.matchingEntriesCount
+      } entr${trend.matchingEntriesCount === 1 ? 'y' : 'ies'}${
+        trend.peakYear ? ` · Peak: ${trend.peakYear}` : ''
+      }`;
+    }
 
-    const maxOcc = Math.max(1, ...trend.byYear.map((y) => y.occurrences));
+    const maxHits = Math.max(1, ...trend.byYear.map((y) => y.occurrences));
     chartEl.innerHTML =
       trend.byYear.length === 0
-        ? ''
+        ? '<span class="mono-meta">No years loaded yet.</span>'
         : trend.byYear
             .map(
               (y) => `
               <div class="bar-chart-row">
                 <span>${y.year} (${y.entryHits}/${y.totalEntries})</span>
                 <div class="bar-chart-track"><div class="bar-chart-fill" style="width:${Math.round(
-                  (y.occurrences / maxOcc) * 100
+                  (y.occurrences / maxHits) * 100
                 )}%"></div></div>
                 <span>${y.occurrences}×</span>
               </div>
             `
             )
             .join('');
+
+    if (trend.matches.length === 0) {
+      matchesEl.innerHTML = `<span class="mono-meta">No mentions of "${escapeHtml(
+        trend.query
+      )}" in currently loaded entries. Click "Decrypt All Days for Full Insights" to scan your entire archive.</span>`;
+      return;
+    }
 
     matchesEl.innerHTML = trend.matches
       .map(
@@ -4243,311 +4381,24 @@ class PerpetualDiaryApp {
     });
   }
 
-  async renderAnalyticsAndArcs() {
-    const plainEntries = Array.from(this.state.decryptedEntryCache.values());
-    const stats = computeDiaryAnalytics(this.state.indexData, plainEntries);
+  /* ==========================================================================
+     COMMAND PALETTE (`Ctrl+K`)
+     ========================================================================== */
 
-    const kpiGrid = document.getElementById('analytics-kpi-grid');
-    if (kpiGrid) {
-      kpiGrid.innerHTML = `
-        <div class="kpi-card"><div class="mono-label">TOTAL ENTRIES</div><div class="kpi-value">${stats.totalEntries}</div></div>
-        <div class="kpi-card"><div class="mono-label">TOTAL WORDS</div><div class="kpi-value">${stats.totalWords.toLocaleString()}</div></div>
-        <div class="kpi-card"><div class="mono-label">AVG WORDS / ENTRY</div><div class="kpi-value">${stats.avgWordsPerEntry}</div></div>
-        <div class="kpi-card"><div class="mono-label">366-DAY COVERAGE</div><div class="kpi-value">${stats.calendarCoveragePct}%</div></div>
-        <div class="kpi-card"><div class="mono-label">LONGEST STREAK</div><div class="kpi-value">${stats.longestStreak}d</div></div>
-        <div class="kpi-card"><div class="mono-label">SEALED CAPSULES</div><div class="kpi-value">${stats.sealedCapsules}</div></div>
-      `;
-    }
-
-    const yearsChart = document.getElementById('analytics-years-chart');
-    if (yearsChart) {
-      const maxW = Math.max(1, ...stats.yearsBreakdown.map((y) => y.words));
-      yearsChart.innerHTML =
-        stats.yearsBreakdown.length === 0
-          ? '<span class="mono-meta">No entries indexed yet.</span>'
-          : stats.yearsBreakdown
-              .map(
-                (y) => `
-              <div class="bar-chart-row">
-                <span>${y.year} (${y.entries})</span>
-                <div class="bar-chart-track"><div class="bar-chart-fill" style="width:${Math.round(
-                  (y.words / maxW) * 100
-                )}%"></div></div>
-                <span>${y.words.toLocaleString()}w</span>
-              </div>
-            `
-              )
-              .join('');
-    }
-
-    const moodsChart = document.getElementById('analytics-moods-chart');
-    if (moodsChart) {
-      const maxM = Math.max(1, ...stats.topMoods.map((m) => m.count));
-      moodsChart.innerHTML =
-        stats.topMoods.length === 0
-          ? '<span class="mono-meta">No mood tags recorded yet.</span>'
-          : stats.topMoods
-              .map(
-                (m) => `
-              <div class="bar-chart-row">
-                <span>${escapeHtml(m.mood)}</span>
-                <div class="bar-chart-track"><div class="bar-chart-fill" style="width:${Math.round(
-                  (m.count / maxM) * 100
-                )}%"></div></div>
-                <span>${m.count}×</span>
-              </div>
-            `
-              )
-              .join('');
-    }
-
-    // Word & Phrase Trend Explorer
-    this.renderWordTrendSection(plainEntries);
-
-    // Year-in-Review Dossier
-    const dossierSel = document.getElementById('dossier-year-select');
-    const yearsList = stats.yearsBreakdown.map((y) => y.year).sort((a, b) => b - a);
-    if (dossierSel) {
-      dossierSel.innerHTML = yearsList.map((y) => `<option value="${y}">${y}</option>`).join('');
-      if (yearsList.length > 0) {
-        if (!yearsList.includes(Number(this.state.selectedDossierYear))) {
-          this.state.selectedDossierYear = yearsList[0];
-        }
-        dossierSel.value = String(this.state.selectedDossierYear);
-        const dossier = generateYearInReviewDossier(
-          this.state.selectedDossierYear,
-          this.state.indexData,
-          plainEntries
-        );
-        document.getElementById('dossier-stage').innerHTML = `
-          <p><strong>${dossier.year} Summary:</strong> ${dossier.entryCount} entries · <strong>${dossier.totalWords.toLocaleString()} words</strong> (avg ${dossier.avgWords}/entry) · Busiest month: <strong>${escapeHtml(dossier.busiestMonth)}</strong> (${dossier.busiestMonthWords.toLocaleString()}w).</p>
-          ${
-            dossier.highlights.length
-              ? `<ul>${dossier.highlights
-                  .map(
-                    (h) =>
-                      `<li><strong>${escapeHtml(h.diaryDate)} (${escapeHtml(
-                        h.title
-                      )}):</strong> “${escapeHtml(h.excerpt)}”</li>`
-                  )
-                  .join('')}</ul>`
-              : '<p class="mono-meta">Click "Decrypt All Days for Full Insights" above to include encrypted quotes & highlights.</p>'
-          }
-        `;
-      }
-    }
-
-    // Story Arcs Book View
-    const arcs = extractStoryArcs(this.state.indexData);
-    const arcSel = document.getElementById('arc-select');
-    const arcPrintBtn = document.getElementById('arc-print-book-btn');
-    const arcStage = document.getElementById('arc-book-stage');
-    if (arcSel && arcStage) {
-      arcSel.innerHTML =
-        '<option value="">Select a Story Arc (arc:...)</option>' +
-        arcs
-          .map(
-            (a) =>
-              `<option value="${escapeHtml(a.slug)}">${escapeHtml(a.label)} (${
-                a.entryCount
-              } days)</option>`
-          )
-          .join('');
-      if (this.state.selectedArcSlug && arcs.some((a) => a.slug === this.state.selectedArcSlug)) {
-        arcSel.value = this.state.selectedArcSlug;
-        const book = buildStoryArcBook(this.state.selectedArcSlug, plainEntries);
-        arcPrintBtn.disabled = book.chapters.length === 0;
-        if (book.chapters.length === 0) {
-          arcStage.innerHTML = `<p class="section-subtext">Click <strong>"Decrypt All Days for Full Insights"</strong> above to load and stitch all chapters of <strong>${escapeHtml(
-            book.title
-          )}</strong>.</p>`;
-        } else {
-          arcStage.innerHTML = `
-            <div style="margin-bottom:1rem;">
-              <div class="mono-label">${escapeHtml(book.dateSpan)} · ${book.chapters.length} CHAPTERS · ${book.totalWords.toLocaleString()} WORDS</div>
-              <h3 class="section-heading">${escapeHtml(book.title)}</h3>
-            </div>
-            ${book.chapters
-              .map(
-                (ch) => `
-                <article class="arc-chapter">
-                  <div class="mono-meta">${escapeHtml(ch.diaryDate)}${
-                  ch.mood ? ` · mood: ${escapeHtml(ch.mood)}` : ''
-                }</div>
-                  ${ch.title ? `<h4 class="entry-title">${escapeHtml(ch.title)}</h4>` : ''}
-                  <div class="prose-body">${renderMarkdown(ch.body, {
-                    preserveWhitespace: Boolean(ch.preserveWhitespace),
-                    scopeId: `arc-${ch.id || ch.diaryDate}`,
-                  })}</div>
-                </article>
-              `
-              )
-              .join('')}
-          `;
-        }
-      } else {
-        arcPrintBtn.disabled = true;
-      }
-    }
-  }
-
-  /* ========================================================================
-     EXPORTS, PRINT-TO-BOOK, 8-PAGE MINI-ZINE & MIGRATION IMPORTERS
-     ======================================================================== */
-  async buildExportBundle() {
-    await this.loadAllIndexedDays();
-    const outDays = {};
-    for (const [dayStr, doc] of Object.entries(this.state.dayCache)) {
-      const decEntries = {};
-      for (const [yrKey, slot] of Object.entries(doc.entries || {})) {
-        const list = getYearEntriesList(slot, yrKey, dayStr);
-        const decList = [];
-        for (const e of list) {
-          const expectedDate = `${yrKey}-${dayStr}`;
-          const plainBody =
-            (await this.decryptFieldIfNeeded(
-              e.body || '',
-              Boolean(e.encrypted),
-              buildEntryAad(expectedDate, yrKey, 'body')
-            )) ?? e.body;
-          const plainTitle =
-            (await this.decryptFieldIfNeeded(
-              e.title || '',
-              Boolean(e.encrypted),
-              buildEntryAad(expectedDate, yrKey, 'title')
-            )) ?? e.title;
-          decList.push({
-            ...e,
-            title: plainTitle,
-            body: plainBody,
-            encrypted: false,
-          });
-        }
-        if (decList.length > 0) {
-          decEntries[yrKey] = decList.length === 1 ? decList[0] : decList;
-        }
-      }
-      const decComments = [];
-      for (const c of doc.comments || []) {
-        const plainCmt =
-          (await this.decryptFieldIfNeeded(
-            c.body || '',
-            Boolean(c.encrypted),
-            buildCommentAad(dayStr, c.id, 'body')
-          )) ?? c.body;
-        decComments.push({
-          ...c,
-          body: plainCmt,
-          encrypted: false,
-        });
-      }
-      outDays[dayStr] = { day: dayStr, entries: decEntries, comments: decComments };
-    }
-    return { exportedAt: new Date().toISOString(), days: outDays };
-  }
-
-  triggerFileDownload(filename, contentStr, mime) {
-    const blob = new Blob([contentStr], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-
-  async handleImportFile(file) {
-    if (!file) return;
-    try {
-      const text = await file.text();
-      const parsed = parseImportedDiaryFile(file.name, text);
-      if (!parsed.entries || parsed.entries.length === 0) {
-        throw new Error('No valid dated entries were found in that file.');
-      }
-
-      const confirmed = await this.openConfirm({
-        title: `Import ${parsed.entries.length} Entry/Entries`,
-        message: `Detected "${parsed.format}" with ${parsed.entries.length} dated entry/entries. Import them into your perpetual diary now?`,
-        confirmLabel: `Import ${parsed.entries.length} Entries`,
-      });
-      if (!confirmed) return;
-
-      const shouldEncrypt = this.hasActiveSessionKey();
-      const byDay = new Map();
-      for (const item of parsed.entries) {
-        if (!byDay.has(item.dayStr)) byDay.set(item.dayStr, []);
-        byDay.get(item.dayStr).push(item);
-      }
-
-      let importedCount = 0;
-      for (const [dayStr, items] of byDay.entries()) {
-        const doc = await this.getDayDocument(dayStr, true);
-        for (const item of items) {
-          const yrKey = String(item.year);
-          const dateVal = item.diaryDate;
-          const bodyVal = shouldEncrypt
-            ? await encryptText(
-                item.body,
-                this.state.keyring || this.state.cryptoKey,
-                buildEntryAad(dateVal, yrKey, 'body')
-              )
-            : item.body;
-          const titleVal =
-            shouldEncrypt && item.title
-              ? await encryptText(
-                  item.title,
-                  this.state.keyring || this.state.cryptoKey,
-                  buildEntryAad(dateVal, yrKey, 'title')
-                )
-              : item.title;
-
-          const existingList = getYearEntriesList(doc.entries[yrKey], yrKey, dayStr);
-          existingList.push({
-            id: `ent-imp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            year: item.year,
-            diaryDate: dateVal,
-            title: titleVal,
-            body: bodyVal,
-            tags: item.tags || [],
-            mood: item.mood || '',
-            location: item.location || '',
-            weather: item.weather || '',
-            artifacts: item.artifacts || null,
-            metrics: item.metrics || null,
-            preserveWhitespace: Boolean(item.preserveWhitespace),
-            wordCount: countWords(stripMarkdown(item.body)),
-            images: [],
-            image: null,
-            writtenAt: item.writtenAt || new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            encrypted: shouldEncrypt,
-          });
-          doc.entries[yrKey] = existingList.length === 1 ? existingList[0] : existingList;
-          importedCount += 1;
-        }
-        await this.persistDayDocument(dayStr, doc, `diary: import ${items.length} entry/entries on ${dayStr}`);
-      }
-
-      this.showToast(`Successfully imported ${importedCount} entries from ${parsed.format}.`, 'success');
-      await this.renderActiveView();
-    } catch (err) {
-      this.showToast(err.message || 'Archive import failed.', 'error');
-    }
-  }
-
-  /* ========================================================================
-     PHASE 17 COMMAND PALETTE (`Ctrl+K` / `Cmd+K`)
-     ======================================================================== */
   buildCommandList() {
     const cmds = [
       {
+        id: 'cmd-write',
+        title: '+ Write New Entry Today',
+        subtitle: getTodayIsoDate(),
+        keywords: 'new compose write today',
+        run: () => this.openComposer({ presetDate: getTodayIsoDate() }),
+      },
+      {
         id: 'cmd-today',
         title: 'Jump to Today Side-by-Side',
-        subtitle: `Open ${formatReadableDayKey(getTodayDayKey())} across all years`,
-        keywords: 'today now home date',
-        shortcut: 'T',
+        subtitle: formatReadableDayKey(getTodayDayKey()),
+        keywords: 'today reader home',
         run: () => {
           this.state.activeDay = getTodayDayKey();
           this.state.compare2Active = false;
@@ -4555,128 +4406,89 @@ class PerpetualDiaryApp {
         },
       },
       {
-        id: 'cmd-write',
-        title: 'Write New Entry',
-        subtitle: 'Open the atomic entry composer for today',
-        keywords: 'compose new entry journal write',
-        shortcut: 'N',
-        run: () => this.openComposer({ presetDate: getTodayIsoDate() }),
-      },
-      {
-        id: 'cmd-prompt',
-        title: 'Draw Random Writing Prompt & Write',
-        subtitle: 'Open composer with a curated longitudinal or self-inquiry prompt',
-        keywords: 'prompt deck idea inspire question',
-        run: async () => {
-          await this.openComposer({ presetDate: getTodayIsoDate() });
-          const p = drawRandomPrompt('all', '');
-          if (p) {
-            this.state.activePromptText = p.text;
-            document.getElementById('entry-prompt-text').textContent = `[${p.categoryLabel}] ${p.text}`;
-            document.getElementById('entry-prompt-banner').hidden = false;
-          }
-        },
-      },
-      {
         id: 'cmd-heatmap',
-        title: 'Open 366-Day Perpetual Heatmap',
-        subtitle: 'Inspect calendar density, word velocity, or daily check-in metrics',
-        keywords: 'heatmap 366 calendar grid density',
+        title: 'View 366-Day Perpetual Heatmap',
+        subtitle: 'Multi-metric calendar grid',
+        keywords: '366 heatmap calendar',
         run: () => this.switchView('heatmap'),
       },
       {
         id: 'cmd-archive',
         title: 'Open Archive, Search & Exports',
-        subtitle: 'Search entries, print books/zines, export JSON/MD, or import archives',
+        subtitle: 'Search, Print Book, Mini-Zine, Import',
         keywords: 'archive search export import',
         run: () => this.switchView('archive'),
       },
       {
         id: 'cmd-analytics',
-        title: 'Open Insights, Word Trends, Dossier & Story Arcs',
-        subtitle: 'Track word trajectories across years, annual dossiers, and Story Arc books',
-        keywords: 'insights analytics word trend dossier story arcs book',
+        title: 'Open Insights, Word Trends & Story Arcs',
+        subtitle: 'Word velocity, vocabulary trends, Year-in-Review Dossier',
+        keywords: 'analytics insights word trend arcs dossier book',
         run: () => this.switchView('analytics'),
       },
       {
-        id: 'cmd-week',
-        title: 'Toggle "On This Week" Perpetual Ribbon',
-        subtitle: 'View all recorded entries within ±3 days across every year',
-        keywords: 'week ribbon window season',
-        run: () => {
-          this.state.windowScope = this.state.windowScope === 'week' ? 'day' : 'week';
-          document.querySelectorAll('#window-scope-group .seg-btn').forEach((b) => {
-            b.classList.toggle('is-active', b.dataset.windowScope === this.state.windowScope);
-          });
-          this.switchView('reader');
-        },
-      },
-      {
         id: 'cmd-print-book',
-        title: 'Print-to-Book (All Loaded Entries)',
-        subtitle: 'Generate a clean paginated book with table of contents',
-        keywords: 'print book pdf',
-        run: async () => {
-          await this.loadAllIndexedDays();
-          openPrintBookWindow({
-            title: 'Perpetual Side-by-Side Diary',
-            entries: Array.from(this.state.decryptedEntryCache.values()),
-          });
-        },
+        title: 'Print-to-Book (Paginated PDF Edition)',
+        subtitle: 'Generates clean print layout with table of contents',
+        keywords: 'print pdf book export',
+        run: () =>
+          this.triggerPrintEdition(
+            openPrintBookWindow,
+            {
+              title: 'Perpetual Side-by-Side Diary',
+              subtitle: 'Compiled Print Edition',
+              entries: Array.from(this.state.decryptedEntryCache.values()),
+            },
+            'Print Book'
+          ),
       },
       {
         id: 'cmd-mini-zine',
-        title: 'Generate 8-Page Foldable Pocket Mini-Zine',
-        subtitle: '1-sheet landscape imposition for folding a pocket zine',
-        keywords: 'zine mini pocket print fold',
-        run: async () => {
-          await this.loadAllIndexedDays();
-          openMiniZineWindow({
-            title: 'Perpetual Pocket Zine',
-            entries: Array.from(this.state.decryptedEntryCache.values()).slice(-6),
-          });
-        },
-      },
-      {
-        id: 'cmd-drafts',
-        title: 'Open Synced Drafts Branch',
-        subtitle: 'Resume works-in-progress from the Git drafts branch',
-        keywords: 'drafts branch sync',
-        run: () => this.openDraftsModal(),
+        title: 'Print 8-Page Foldable Mini-Zine',
+        subtitle: '1-sheet pocket booklet imposition',
+        keywords: 'zine pocket print fold',
+        run: () =>
+          this.triggerPrintEdition(
+            openMiniZineWindow,
+            {
+              title: 'Perpetual Pocket Zine',
+              entries: Array.from(this.state.decryptedEntryCache.values()),
+            },
+            '8-Page Mini-Zine'
+          ),
       },
       {
         id: 'cmd-vault',
-        title: 'Open Diary Password, Vault & Recovery Kit',
-        subtitle: 'Manage Argon2id, Passkeys, Decoy Vault, Cloaking & Paper Recovery',
-        keywords: 'vault password encryption recovery passkey decoy cloak',
+        title: 'Open Vault, Passkeys, Cloaking & Recovery Kit',
+        subtitle: 'Encryption & security settings',
+        keywords: 'vault password argon2 passkey recovery cloak',
         run: () => this.openVaultModal(),
       },
       {
         id: 'cmd-github',
         title: 'Open GitHub Sync & Split-Repo Settings',
-        subtitle: 'Configure repositories, sharding, PAT & Zero-Footprint Mode',
-        keywords: 'github sync repo token pat settings',
-        shortcut: 'Ctrl+Shift+G',
-        run: () => this.openGithubModal(),
+        subtitle: 'Repository, PAT & Zero-Footprint Mode',
+        keywords: 'github sync pat settings split repo',
+        run: () => this.openGitHubModal(),
       },
       {
-        id: 'cmd-panic',
+        id: 'cmd-lock',
         title: 'Panic Lock Diary Now',
-        subtitle: 'Immediately wipe session keys, decrypted media & scrub DOM',
-        keywords: 'lock panic security wipe',
-        shortcut: 'Ctrl+Shift+L',
+        subtitle: 'Wipe keys & decrypted media from RAM',
+        keywords: 'lock panic security',
         run: () => this.lockDiaryNow('panic'),
       },
     ];
 
-    for (const entry of this.state.decryptedEntryCache.values()) {
+    for (const dayStr of Object.keys(this.state.indexData?.days || {}).sort()) {
+      const info = this.state.indexData.days[dayStr];
       cmds.push({
-        id: `entry-${entry.diaryDate}-${entry.id || ''}`,
-        title: `${entry.diaryDate}${entry.title ? ` — ${entry.title}` : ''}`,
-        subtitle: stripMarkdown(entry.body).slice(0, 72),
-        keywords: `${entry.diaryDate} ${entry.dayStr} ${entry.mood} ${(entry.tags || []).join(' ')}`,
+        id: `day-${dayStr}`,
+        title: `Jump to ${formatReadableDayKey(dayStr)} (${dayStr})`,
+        subtitle: `Years: ${(info.years || []).join(', ')}`,
+        keywords: `${dayStr} ${formatReadableDayKey(dayStr)} ${(info.tags || []).join(' ')}`,
         run: () => {
-          this.state.activeDay = entry.dayStr;
+          this.state.activeDay = dayStr;
           this.state.compare2Active = false;
           this.switchView('reader');
         },
@@ -4687,47 +4499,30 @@ class PerpetualDiaryApp {
   }
 
   openCommandPalette() {
-    if (!this.state.unlocked) return;
     const modal = document.getElementById('cmdk-modal');
     const input = document.getElementById('cmdk-input');
-    this.state.cmdkSelectedIndex = 0;
+    if (!modal || !input) return;
     input.value = '';
+    this.state.cmdkSelectedIndex = 0;
     this.renderCommandPaletteResults('');
     modal.hidden = false;
     input.focus();
   }
 
   renderCommandPaletteResults(query) {
+    const listEl = document.getElementById('cmdk-list');
+    if (!listEl) return;
     const all = this.buildCommandList();
-    let filtered = filterCommands(all, query);
-
-    const cleanQ = String(query || '').trim();
-    if (/^\d{2}-\d{2}$/.test(cleanQ)) {
-      filtered = [
-        {
-          id: `jump-${cleanQ}`,
-          title: `Jump to Calendar Date ${cleanQ} (${formatReadableDayKey(cleanQ)})`,
-          subtitle: 'Open perpetual side-by-side reader for this date',
-          run: () => {
-            const { month, day } = parseDayKey(cleanQ);
-            this.state.activeDay = formatDayKey(month, day);
-            this.state.compare2Active = false;
-            this.switchView('reader');
-          },
-        },
-        ...filtered,
-      ];
-    }
-
+    const filtered = filterCommands(all, query).slice(0, 14);
     this.state.cmdkItems = filtered;
     this.state.cmdkSelectedIndex = Math.min(
       Math.max(0, this.state.cmdkSelectedIndex),
       Math.max(0, filtered.length - 1)
     );
 
-    const listEl = document.getElementById('cmdk-list');
     if (filtered.length === 0) {
-      listEl.innerHTML = '<div class="empty-comments mono-meta">No matching commands or dates.</div>';
+      listEl.innerHTML =
+        '<div class="mono-meta" style="padding:0.85rem;">No matching commands or dates.</div>';
       return;
     }
 
@@ -4739,9 +4534,8 @@ class PerpetualDiaryApp {
         }" data-cmd-idx="${idx}">
           <div>
             <div class="cmdk-item-title">${escapeHtml(cmd.title)}</div>
-            ${cmd.subtitle ? `<div class="cmdk-item-sub">${escapeHtml(cmd.subtitle)}</div>` : ''}
+            <div class="cmdk-item-sub">${escapeHtml(cmd.subtitle || '')}</div>
           </div>
-          ${cmd.shortcut ? `<span class="cmdk-kbd">${escapeHtml(cmd.shortcut)}</span>` : ''}
         </button>
       `
       )
@@ -4749,16 +4543,28 @@ class PerpetualDiaryApp {
 
     listEl.querySelectorAll('.cmdk-item').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const picked = this.state.cmdkItems[Number(btn.dataset.cmdIdx)];
+        const chosen = filtered[Number(btn.dataset.cmdIdx)];
         document.getElementById('cmdk-modal').hidden = true;
-        if (picked && typeof picked.run === 'function') picked.run();
+        if (chosen) chosen.run();
       });
     });
   }
 
-  /* ========================================================================
-     MODALS: ZERO-KNOWLEDGE SHARE, GITHUB SETTINGS & ENVELOPE VAULT
-     ======================================================================== */
+  /* ==========================================================================
+     ZERO-KNOWLEDGE SHARE LINKS
+     ========================================================================== */
+
+  openShareComposerModal(entrySnapshot) {
+    this.state.pendingShareEntry = entrySnapshot;
+    document.getElementById('share-entry-summary').textContent =
+      `Sharing ${entrySnapshot.diaryDate}${
+        entrySnapshot.title ? ` — "${entrySnapshot.title}"` : ''
+      }. Encrypted client-side with a fresh 256-bit key stored strictly in the URL #fragment.`;
+    document.getElementById('share-result-box').hidden = true;
+    document.getElementById('share-error').hidden = true;
+    document.getElementById('share-modal').hidden = false;
+  }
+
   async openSharedEntryViewer(shareId, keyB64Url) {
     const overlay = document.getElementById('shared-viewer-overlay');
     const titleEl = document.getElementById('shared-viewer-title');
@@ -4769,268 +4575,137 @@ class PerpetualDiaryApp {
 
     overlay.hidden = false;
     errEl.hidden = true;
-    titleEl.textContent = 'Decrypting shared memory…';
-    metaEl.textContent = '';
-    tagsEl.innerHTML = '';
-    bodyEl.innerHTML = '';
 
     try {
-      const shared = await fetchAndDecryptShareLink(shareId, keyB64Url, this.gh);
-      titleEl.textContent = shared.title || shared.diaryDate || 'Shared Memory';
-      metaEl.textContent = `${shared.diaryDate || ''}${
-        shared.mood ? ` · mood: ${shared.mood}` : ''
-      }${shared.expiresAt ? ` · expires ${new Date(shared.expiresAt).toLocaleDateString()}` : ''}`;
-      if (Array.isArray(shared.tags) && shared.tags.length > 0) {
-        tagsEl.innerHTML = shared.tags
-          .map((t) => `<span class="tag-chip">#${escapeHtml(t)}</span>`)
-          .join('');
-      }
-      bodyEl.innerHTML = renderMarkdown(shared.body || '', { scopeId: `sh-${shareId}` });
+      const payload = await fetchAndDecryptShareLink(shareId, keyB64Url, this.gh);
+      titleEl.textContent = payload.title || `Shared Entry · ${payload.diaryDate}`;
+      metaEl.textContent = `${payload.diaryDate}${payload.mood ? ` · mood: ${payload.mood}` : ''}`;
+      tagsEl.innerHTML = (payload.tags || [])
+        .map((t) => `<span class="tag-chip">#${escapeHtml(t)}</span>`)
+        .join('');
+      bodyEl.innerHTML = renderMarkdown(payload.body || '', { scopeId: `shared-${shareId}` });
     } catch (err) {
       titleEl.textContent = 'Shared Entry Unavailable';
-      errEl.textContent = err.message || 'Could not decrypt this share link.';
+      errEl.textContent = err.message || 'Could not decrypt shared entry.';
       errEl.hidden = false;
     }
   }
 
-  openShareComposerModal(entrySnapshot) {
-    this.state.pendingShareEntry = entrySnapshot;
-    document.getElementById('share-entry-summary').textContent =
-      `Creating an isolated zero-knowledge link for ${entrySnapshot.diaryDate}${
-        entrySnapshot.title ? ` (“${entrySnapshot.title}”)` : ''
-      }.`;
-    document.getElementById('share-result-box').hidden = true;
-    document.getElementById('share-result-url').value = '';
-    document.getElementById('share-error').hidden = true;
-    document.getElementById('share-modal').hidden = false;
-  }
-
-  async openGithubModal() {
-    const cfg = this.gh.config;
-    document.getElementById('gh-owner-input').value = cfg.owner || '';
-    document.getElementById('gh-repo-input').value = cfg.repo || '';
-    document.getElementById('gh-branch-input').value = cfg.branch || 'main';
-    document.getElementById('gh-datapath-input').value = cfg.dataPath || 'data';
-
-    const useVault = cfg.usePrivateVault !== false;
-    document.getElementById('gh-use-private-vault').checked = useVault;
-    document.getElementById('split-vault-fields').hidden = !useVault;
-    document.getElementById('gh-vault-owner-input').value = cfg.vaultOwner || '';
-    document.getElementById('gh-vault-repo-input').value = cfg.vaultRepo || 'perpetual-diary-vault';
-    document.getElementById('gh-vault-branch-input').value = cfg.vaultBranch || 'main';
-    document.getElementById('gh-vault-path-input').value = cfg.vaultPath || 'data';
-
-    const useShard = Boolean(cfg.useMediaSharding);
-    document.getElementById('gh-use-media-sharding').checked = useShard;
-    document.getElementById('media-shard-fields').hidden = !useShard;
-    const shardPattern = cfg.mediaShardPattern || 'diary-media-{year}';
-    document.getElementById('gh-media-shard-pattern').value = shardPattern;
-    document.getElementById('gh-media-shard-branch').value = cfg.mediaShardBranch || 'main';
-    document.getElementById('gh-media-shard-preview').textContent =
-      `Active shard: ${resolveShardRepoName(shardPattern, new Date().getFullYear())}`;
-
-    document.getElementById('gh-token-input').value = cfg.token || '';
-    document.getElementById('gh-token-expiry-input').value = cfg.tokenExpiresAt
-      ? String(cfg.tokenExpiresAt).slice(0, 10)
-      : '';
-    document.getElementById('gh-read-api-checkbox').checked = cfg.readFromApiWhenAuthed !== false;
-    document.getElementById('gh-zero-footprint-checkbox').checked = this.state.zeroFootprint;
-    document.getElementById('gh-test-result').hidden = true;
-    document.getElementById('github-modal').hidden = false;
-
-    this.refreshRepoHealthRadar().catch(() => {});
-  }
-
-  async refreshRepoHealthRadar() {
-    const modePill = document.getElementById('health-mode-pill');
-    const repoLabel = document.getElementById('health-repo-label');
-    const barFill = document.getElementById('quota-bar-fill');
-    const sizeLabel = document.getElementById('health-size-label');
-    const patLabel = document.getElementById('health-pat-status');
-    const commitLabel = document.getElementById('health-commit-label');
-    const warnBox = document.getElementById('health-expiry-warning');
-
-    try {
-      const h = await this.gh.getRepoHealth();
-      modePill.textContent = h.mode.toUpperCase();
-      repoLabel.textContent = h.vaultRepoName || 'No remote repo connected';
-      barFill.style.width = `${Math.min(100, h.usagePercent)}%`;
-      barFill.classList.toggle('is-warn', h.usagePercent >= 75);
-      sizeLabel.textContent = `${formatBytesCompact(h.totalSizeKb * 1024)} / 1,024 MB (${
-        h.usagePercent
-      }%)`;
-      patLabel.textContent = this.gh.hasToken() ? 'PAT: Active' : 'PAT: Not set';
-      commitLabel.textContent = h.lastCommitSha
-        ? `HEAD: #${h.lastCommitSha.slice(0, 7)}${h.pagesStatus ? ` · Pages: ${h.pagesStatus}` : ''}`
-        : 'Atomic Commit Engine: Git Trees API ready';
-
-      if (h.tokenExpiry) {
-        const daysLeft = Math.ceil((new Date(h.tokenExpiry).getTime() - Date.now()) / 86400000);
-        if (daysLeft <= 14) {
-          warnBox.hidden = false;
-          warnBox.textContent =
-            daysLeft <= 0
-              ? '⚠ Your GitHub Personal Access Token has expired! Generate a fresh Fine-Grained PAT.'
-              : `⚠ Your GitHub Personal Access Token expires in ${daysLeft} day(s).`;
-        } else {
-          warnBox.hidden = true;
-        }
-      } else {
-        warnBox.hidden = true;
-      }
-    } catch {
-      // keep default radar UI
-    }
-  }
-
-  renderVaultSlotsList(vm) {
-    const listEl = document.getElementById('vault-slots-list');
-    if (!listEl || !vm) return;
-    const slots = Array.isArray(vm.keySlots) ? vm.keySlots : [];
-    listEl.innerHTML = slots
-      .map(
-        (s) => `
-        <div class="vault-slot-card">
-          <div>
-            <strong>${escapeHtml(s.label || s.type)}</strong>
-            <span class="mono-meta"> · ${escapeHtml(s.kdf || s.type)}</span>
-          </div>
-          <span class="mono-meta">${s.rotatedAt ? new Date(s.rotatedAt).toLocaleDateString() : ''}</span>
-        </div>
-      `
-      )
-      .join('');
-  }
-
-  renderPasskeySlotsList(vm) {
-    const listEl = document.getElementById('vault-passkey-list');
-    const statusEl = document.getElementById('vault-passkey-status');
-    if (!listEl) return;
-    const pkSlots = (Array.isArray(vm?.keySlots) ? vm.keySlots : []).filter(
-      (s) => s && s.type === 'passkey'
-    );
-    if (statusEl) {
-      statusEl.textContent = pkSlots.length > 0 ? `${pkSlots.length} enrolled` : 'Not enrolled';
-    }
-    listEl.innerHTML = pkSlots
-      .map(
-        (s) => `
-        <div class="vault-slot-card">
-          <span>⚷ <strong>${escapeHtml(s.label || 'Passkey')}</strong></span>
-          <button type="button" class="btn btn-danger btn-sm remove-pk-btn" data-pk-id="${escapeHtml(
-            s.id
-          )}">Revoke</button>
-        </div>
-      `
-      )
-      .join('');
-
-    listEl.querySelectorAll('.remove-pk-btn').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const nextVault = removePasskeySlot(this.state.vaultMeta, btn.dataset.pkId);
-        await this.persistVaultMeta(nextVault, 'diary: revoke biometric passkey slot');
-        this.renderPasskeySlotsList(nextVault);
-        this.renderVaultSlotsList(nextVault);
-        this.showToast('Passkey slot revoked.', 'info');
-      });
-    });
-  }
-
-  renderActiveSharesList() {
-    const panel = document.getElementById('vault-shares-panel');
-    const listEl = document.getElementById('vault-shares-list');
-    const countEl = document.getElementById('vault-shares-count');
-    if (!panel || !listEl) return;
-
-    const records = loadShareRecords(this.state.zeroFootprint ? null : window.localStorage);
-    panel.hidden = records.length === 0;
-    if (countEl) countEl.textContent = `${records.length} active`;
-
-    listEl.innerHTML = records
-      .map(
-        (r) => `
-        <div class="vault-slot-card">
-          <div>
-            <strong>${escapeHtml(r.titlePreview || r.diaryDate)}</strong>
-            <span class="mono-meta"> · ${escapeHtml(r.diaryDate)}</span>
-          </div>
-          <button type="button" class="btn btn-danger btn-sm revoke-share-btn" data-share-id="${escapeHtml(
-            r.shareId
-          )}">Revoke Link</button>
-        </div>
-      `
-      )
-      .join('');
-
-    listEl.querySelectorAll('.revoke-share-btn').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const shareId = btn.dataset.shareId;
-        try {
-          await revokeShareLink(shareId, this.gh, {
-            zeroFootprint: this.state.zeroFootprint,
-          });
-          this.renderActiveSharesList();
-          this.showToast('Share link permanently revoked.', 'success');
-        } catch (err) {
-          this.showToast(err.message || 'Failed to revoke share link.', 'error');
-        }
-      });
-    });
-  }
+  /* ==========================================================================
+     VAULT & GITHUB MODALS
+     ========================================================================== */
 
   openVaultModal() {
     const vm = this.state.vaultMeta;
-    const isV2 = Number(vm?.version) === 2;
-    const isUnlockedV2 = isV2 && this.hasActiveSessionKey() && !this.state.isDecoySession;
-
     const banner = document.getElementById('vault-status-banner');
-    banner.textContent = this.hasConfiguredVault()
-      ? `Vault active (${isV2 ? 'v2 Envelope · v3 AAD' : 'Legacy v1'}) · Lock Screen ${
-          vm.enabled ? 'ENABLED' : 'DISABLED'
-        }.`
-      : 'No Vault password configured yet. Set a Master Password below to enable AES-256-GCM encryption & Lock Screen.';
+    const archPanel = document.getElementById('vault-arch-panel');
+    const recPanel = document.getElementById('vault-recovery-panel');
+    const upgBanner = document.getElementById('vault-upgrade-banner');
+    const migBanner = document.getElementById('vault-migrate-banner');
+    const mediaMigBanner = document.getElementById('vault-media-migrate-banner');
+    const cloakPanel = document.getElementById('vault-cloak-panel');
+    const passkeyPanel = document.getElementById('vault-passkey-panel');
+    const decoyPanel = document.getElementById('vault-decoy-panel');
+    const argon2Panel = document.getElementById('vault-argon2-panel');
+    const sharesPanel = document.getElementById('vault-shares-panel');
+    const curPassGroup = document.getElementById('vault-current-pass-group');
 
-    document.getElementById('vault-arch-panel').hidden = !isV2;
-    if (isV2) {
-      document.getElementById('vault-fingerprint-label').textContent = `DEK: ${
-        vm.dekFingerprint || '—'
-      }`;
-      this.renderVaultSlotsList(vm);
+    document.getElementById('vault-error').hidden = true;
+    document.getElementById('vault-current-password').value = '';
+    document.getElementById('vault-new-password').value = '';
+    document.getElementById('vault-confirm-password').value = '';
+    document.getElementById('vault-lock-enabled-checkbox').checked = Boolean(vm?.enabled);
+    document.getElementById('vault-autolock-select').value = String(
+      this.getEffectiveAutoLockMinutes()
+    );
+    document.getElementById('vault-encrypt-pat-checkbox').checked = Boolean(vm?.encryptedPat);
+
+    const hasVault = this.hasConfiguredVault();
+    const isV2 = Number(vm?.version) === 2;
+    const isUnlocked = this.hasActiveSessionKey();
+
+    curPassGroup.hidden = !hasVault;
+    document.getElementById('vault-disable-btn').hidden = !hasVault;
+
+    if (!hasVault) {
+      banner.className = 'status-callout';
+      banner.textContent =
+        'No master password configured yet. Set one below to initialize a v2 Envelope + v3 AAD Vault.';
+    } else if (isUnlocked) {
+      banner.className = 'status-callout is-ok';
+      banner.textContent = `Vault unlocked (${isV2 ? 'v2 Envelope' : 'v1 Legacy'} · DEK ${
+        this.state.keyring?.dekFingerprint || 'active'
+      }).`;
+    } else {
+      banner.className = 'status-callout is-err';
+      banner.textContent = 'Vault is currently locked.';
     }
 
-    document.getElementById('vault-recovery-panel').hidden = !isUnlockedV2;
-    if (isUnlockedV2) {
-      const hasRec = (vm.keySlots || []).some((s) => s && s.type === 'recovery');
+    archPanel.hidden = !isV2;
+    recPanel.hidden = !(isV2 && isUnlocked);
+    upgBanner.hidden = !(hasVault && !isV2);
+    migBanner.hidden = !(isV2 && isUnlocked);
+    mediaMigBanner.hidden = !(isV2 && isUnlocked);
+    cloakPanel.hidden = !(isV2 && isUnlocked);
+    passkeyPanel.hidden = !(isV2 && isUnlocked && isWebAuthnSupported());
+    decoyPanel.hidden = !(isV2 && isUnlocked);
+    argon2Panel.hidden = !(isV2 && isUnlocked);
+
+    if (isV2) {
+      document.getElementById('vault-fingerprint-label').textContent =
+        `DEK: ${vm.dekFingerprint || '—'}`;
+      const slots = Array.isArray(vm.keySlots) ? vm.keySlots : [];
+      document.getElementById('vault-slots-list').innerHTML = slots
+        .map(
+          (s) =>
+            `<div class="vault-slot-card"><span><strong>${escapeHtml(
+              s.label || s.type
+            )}</strong> · <span class="mono-meta">${escapeHtml(
+              s.kdf || s.format || s.type
+            )}</span></span><span class="mono-meta">${escapeHtml(s.id)}</span></div>`
+        )
+        .join('');
+
+      const hasRec = slots.some((s) => s.type === 'recovery');
       document.getElementById('vault-recovery-slot-status').textContent = hasRec
         ? 'Active slot enrolled'
         : 'Not generated';
-      document.getElementById('vault-print-card-btn').disabled = !this.state.recentRecoveryCode;
-    }
 
-    document.getElementById('vault-upgrade-banner').hidden = !(
-      this.hasConfiguredVault() && !isV2
-    );
-    document.getElementById('vault-migrate-banner').hidden = !isUnlockedV2;
-    document.getElementById('vault-media-migrate-banner').hidden = !isUnlockedV2;
+      const pwSlot = slots.find((s) => s.type === 'password');
+      document.getElementById('vault-kdf-status-pill').textContent =
+        pwSlot?.kdf || 'PBKDF2-SHA256';
 
-    const cloakPanel = document.getElementById('vault-cloak-panel');
-    cloakPanel.hidden = !isUnlockedV2;
-    if (isUnlockedV2) {
-      const cloaked = Boolean(vm.metadataCloaking);
-      document.getElementById('vault-cloak-status-pill').textContent = cloaked ? 'ON' : 'OFF';
-      document.getElementById('vault-cloak-enabled-checkbox').checked = cloaked;
-      document.getElementById('vault-generic-commits-checkbox').checked = Boolean(
-        vm.genericCommitMessages || cloaked
+      document.getElementById('vault-cloak-enabled-checkbox').checked = Boolean(
+        vm.metadataCloaking
       );
-    }
+      document.getElementById('vault-generic-commits-checkbox').checked = Boolean(
+        vm.genericCommitMessages
+      );
+      document.getElementById('vault-cloak-status-pill').textContent = vm.metadataCloaking
+        ? 'ACTIVE'
+        : 'OFF';
 
-    const pkPanel = document.getElementById('vault-passkey-panel');
-    pkPanel.hidden = !(isUnlockedV2 && isWebAuthnSupported());
-    if (!pkPanel.hidden) this.renderPasskeySlotsList(vm);
+      const pkSlots = slots.filter((s) => s.type === 'passkey');
+      document.getElementById('vault-passkey-status').textContent =
+        pkSlots.length > 0 ? `${pkSlots.length} enrolled` : 'Not enrolled';
+      document.getElementById('vault-passkey-list').innerHTML = pkSlots
+        .map(
+          (pk) =>
+            `<div class="vault-slot-card"><span>⚷ ${escapeHtml(
+              pk.label
+            )}</span><button type="button" class="btn btn-danger btn-sm pk-remove-btn" data-pk-id="${escapeHtml(
+              pk.id
+            )}">Revoke</button></div>`
+        )
+        .join('');
+      document.querySelectorAll('.pk-remove-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const next = removePasskeySlot(this.state.vaultMeta, btn.dataset.pkId);
+          await this.persistVaultMeta(next, 'diary: revoke passkey slot');
+          this.openVaultModal();
+        });
+      });
 
-    const decoyPanel = document.getElementById('vault-decoy-panel');
-    decoyPanel.hidden = !isUnlockedV2;
-    if (isUnlockedV2) {
       const hasDecoy = Boolean(vm.altProfile);
       document.getElementById('vault-decoy-status').textContent = hasDecoy
         ? 'Configured'
@@ -5038,66 +4713,122 @@ class PerpetualDiaryApp {
       document.getElementById('vault-remove-decoy-btn').hidden = !hasDecoy;
     }
 
-    const argonPanel = document.getElementById('vault-argon2-panel');
-    argonPanel.hidden = !isUnlockedV2;
-    if (isUnlockedV2) {
-      const pwSlot = (vm.keySlots || []).find((s) => s && s.type === 'password');
-      document.getElementById('vault-kdf-status-pill').textContent =
-        pwSlot?.kdf || 'PBKDF2-SHA256';
+    const shareRecords = loadShareRecords(this.state.zeroFootprint ? null : window.localStorage);
+    sharesPanel.hidden = shareRecords.length === 0;
+    if (shareRecords.length > 0) {
+      document.getElementById('vault-shares-count').textContent = `${shareRecords.length} active`;
+      document.getElementById('vault-shares-list').innerHTML = shareRecords
+        .map(
+          (sr) =>
+            `<div class="vault-slot-card"><span>${escapeHtml(sr.diaryDate)} · ${escapeHtml(
+              sr.titlePreview
+            )}</span><button type="button" class="btn btn-danger btn-sm share-revoke-btn" data-share-id="${escapeHtml(
+              sr.shareId
+            )}">Revoke</button></div>`
+        )
+        .join('');
+      document.querySelectorAll('.share-revoke-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          await revokeShareLink(btn.dataset.shareId, this.gh, {
+            zeroFootprint: this.state.zeroFootprint,
+          });
+          this.showToast('Share link permanently revoked.', 'success');
+          this.openVaultModal();
+        });
+      });
     }
 
-    this.renderActiveSharesList();
-
-    document.getElementById('vault-lock-enabled-checkbox').checked = Boolean(vm?.enabled);
-    document.getElementById('vault-autolock-select').value = String(
-      this.getEffectiveAutoLockMinutes()
-    );
-    document.getElementById('vault-current-pass-group').hidden = !this.hasConfiguredVault();
-    document.getElementById('vault-current-password').value = '';
-    document.getElementById('vault-new-password').value = '';
-    document.getElementById('vault-confirm-password').value = '';
-    document.getElementById('vault-encrypt-pat-checkbox').checked = Boolean(vm?.encryptedPat);
-    document.getElementById('vault-disable-btn').hidden = !Boolean(vm?.enabled);
-    document.getElementById('vault-error').hidden = true;
     document.getElementById('vault-modal').hidden = false;
   }
 
-  /* ========================================================================
-     GLOBAL EVENT LISTENERS, RIGHT-CLICK CONTEXT MENU & KEYBOARD SHORTCUTS
-     ======================================================================== */
+  async openGitHubModal() {
+    const cfg = this.gh.config;
+    document.getElementById('gh-owner-input').value = cfg.owner || '';
+    document.getElementById('gh-repo-input').value = cfg.repo || '';
+    document.getElementById('gh-branch-input').value = cfg.branch || 'main';
+    document.getElementById('gh-datapath-input').value = cfg.dataPath || 'data';
+    document.getElementById('gh-use-private-vault').checked = Boolean(cfg.usePrivateVault);
+    document.getElementById('gh-vault-owner-input').value = cfg.vaultOwner || '';
+    document.getElementById('gh-vault-repo-input').value =
+      cfg.vaultRepo || 'perpetual-diary-vault';
+    document.getElementById('gh-vault-branch-input').value = cfg.vaultBranch || 'main';
+    document.getElementById('gh-vault-path-input').value = cfg.vaultPath || 'data';
+    document.getElementById('gh-use-media-sharding').checked = Boolean(cfg.useMediaSharding);
+    document.getElementById('gh-media-shard-pattern').value =
+      cfg.mediaShardPattern || 'diary-media-{year}';
+    document.getElementById('gh-media-shard-branch').value = cfg.mediaShardBranch || 'main';
+    document.getElementById('gh-token-input').value = cfg.token || '';
+    document.getElementById('gh-token-expiry-input').value = cfg.tokenExpiresAt || '';
+    document.getElementById('gh-read-api-checkbox').checked = Boolean(cfg.readFromApiWhenAuthed);
+    document.getElementById('gh-zero-footprint-checkbox').checked = this.state.zeroFootprint;
+
+    document.getElementById('split-vault-fields').hidden = !cfg.usePrivateVault;
+    document.getElementById('media-shard-fields').hidden = !cfg.useMediaSharding;
+    document.getElementById('gh-media-shard-preview').textContent =
+      `Active shard: ${resolveShardRepoName(
+        cfg.mediaShardPattern || 'diary-media-{year}',
+        new Date().getFullYear()
+      )}`;
+    document.getElementById('gh-test-result').hidden = true;
+    document.getElementById('github-modal').hidden = false;
+
+    try {
+      const health = await this.gh.getRepoHealth();
+      document.getElementById('health-mode-pill').textContent = health.mode.toUpperCase();
+      document.getElementById('health-repo-label').textContent = health.vaultRepoName;
+      document.getElementById('health-size-label').textContent =
+        `${formatBytesCompact(health.totalSizeKb * 1024)} / 1,024 MB (${health.usagePercent}%)`;
+      document.getElementById('health-pat-status').textContent = this.gh.hasToken()
+        ? 'PAT: Configured'
+        : 'PAT: Not set';
+      const fill = document.getElementById('quota-bar-fill');
+      fill.style.width = `${Math.min(100, health.usagePercent)}%`;
+      fill.classList.toggle('is-warn', health.usagePercent >= 75);
+    } catch {
+      // non-fatal
+    }
+  }
+
+  /* ==========================================================================
+     EVENT BINDINGS
+     ========================================================================== */
+
   bindEvents() {
-    window.addEventListener('beforeunload', () => this.revokeRamMediaUrls());
     window.addEventListener('online', () => {
       this.updateModeBadge();
-      this.flushOfflineQueueIfReady(false).catch(() => {});
+      this.flushOfflineQueueIfReady(false);
     });
     window.addEventListener('offline', () => this.updateModeBadge());
+    window.addEventListener('beforeunload', () => this.revokeRamMediaUrls());
 
-    ['pointerdown', 'keydown', 'scroll'].forEach((evt) => {
-      window.addEventListener(evt, () => this.recordUserActivity(true), { passive: true });
+    ['pointerdown', 'keydown', 'scroll'].forEach((evtName) => {
+      window.addEventListener(evtName, () => this.recordUserActivity(true), { passive: true });
     });
 
-    // Context-Aware Right-Click Shortcut Menu (preserves native spellcheck inside inputs/textareas)
     document.addEventListener('contextmenu', (ev) => {
-      if (!this.state.unlocked) return;
-      const tag = ev.target?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || ev.target?.isContentEditable) {
+      const tag = ev.target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || ev.target?.isContentEditable) {
         return;
       }
+      if (!this.state.unlocked) return;
       ev.preventDefault();
       this.showContextShortcutMenu(ev.clientX, ev.clientY, ev.target);
     });
 
-    document.addEventListener('pointerdown', (ev) => {
+    document.addEventListener('click', (ev) => {
       const menu = document.getElementById('context-shortcut-menu');
       if (menu && !menu.hidden && !menu.contains(ev.target)) {
         this.hideContextShortcutMenu();
       }
     });
 
-    // Global Keyboard Shortcuts (Panic Lock, Settings, Command Palette, Escape)
     window.addEventListener('keydown', (ev) => {
       const mod = ev.ctrlKey || ev.metaKey;
+      if (mod && ev.key.toLowerCase() === 'k') {
+        ev.preventDefault();
+        this.openCommandPalette();
+        return;
+      }
       if (mod && ev.shiftKey && ev.key.toLowerCase() === 'l') {
         ev.preventDefault();
         this.lockDiaryNow('panic');
@@ -5105,12 +4836,7 @@ class PerpetualDiaryApp {
       }
       if (mod && ev.shiftKey && ev.key.toLowerCase() === 'g') {
         ev.preventDefault();
-        this.openGithubModal();
-        return;
-      }
-      if (mod && !ev.shiftKey && ev.key.toLowerCase() === 'k') {
-        ev.preventDefault();
-        this.openCommandPalette();
+        this.openGitHubModal();
         return;
       }
       if (ev.key === 'Escape') {
@@ -5126,36 +4852,35 @@ class PerpetualDiaryApp {
       }
     });
 
-    // Lock Screen Form & Passkey Unlock
-    document.getElementById('lock-zero-footprint-checkbox')?.addEventListener('change', (e) => {
-      this.setZeroFootprintMode(e.target.checked, true);
-    });
-
+    // Lock Screen
     document.getElementById('lock-form')?.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       const errEl = document.getElementById('lock-error');
       errEl.hidden = true;
       const secret = document.getElementById('lock-password-input').value;
+      const zf = Boolean(document.getElementById('lock-zero-footprint-checkbox')?.checked);
+      this.setZeroFootprintMode(zf, false);
+
       const res = await unlockVaultOrDecoy(secret, this.state.vaultMeta);
       if (!res.ok) {
         errEl.textContent = res.error || 'Incorrect password.';
         errEl.hidden = false;
         return;
       }
+
       this.setActiveKeyring(res.keyring);
       this.state.isDecoySession = Boolean(res.isDecoy);
       this.state.decoyPolicy = res.decoyPolicy || null;
       this.state.unlocked = true;
-      if (res.pat && !this.gh.hasToken()) {
+      if (res.pat) {
         this.gh.updateConfig({ token: res.pat });
+        this.saveGitHubConfigLocally();
       }
       document.getElementById('lock-password-input').value = '';
       document.getElementById('lock-screen').hidden = true;
       await this.loadManifestIndex();
-      this.applyHashRoute();
-      await this.renderActiveView();
       this.updateModeBadge();
-      this.flushOfflineQueueIfReady(false).catch(() => {});
+      await this.renderActiveView();
     });
 
     document.getElementById('lock-passkey-btn')?.addEventListener('click', async () => {
@@ -5163,111 +4888,97 @@ class PerpetualDiaryApp {
       errEl.hidden = true;
       const res = await unlockVaultWithPasskey(this.state.vaultMeta);
       if (!res.ok) {
-        errEl.textContent = res.error || 'Biometric unlock failed.';
+        errEl.textContent = res.error || 'Passkey unlock failed.';
         errEl.hidden = false;
         return;
       }
       this.setActiveKeyring(res.keyring);
-      this.state.isDecoySession = false;
       this.state.unlocked = true;
-      if (res.pat && !this.gh.hasToken()) {
+      if (res.pat) {
         this.gh.updateConfig({ token: res.pat });
+        this.saveGitHubConfigLocally();
       }
       document.getElementById('lock-screen').hidden = true;
       await this.loadManifestIndex();
-      this.applyHashRoute();
-      await this.renderActiveView();
       this.updateModeBadge();
+      await this.renderActiveView();
     });
 
     document.getElementById('lock-open-settings-btn')?.addEventListener('click', () => {
-      this.openGithubModal();
+      this.openGitHubModal();
     });
 
-    // Header Navigation & Controls
+    // Header Controls
     document.querySelectorAll('.nav-tab').forEach((btn) => {
       btn.addEventListener('click', () => this.switchView(btn.dataset.view));
     });
-
     document.getElementById('brand-home-link')?.addEventListener('click', (ev) => {
       ev.preventDefault();
       this.state.activeDay = getTodayDayKey();
       this.state.compare2Active = false;
       this.switchView('reader');
     });
-
-    document.getElementById('theme-preset-select')?.addEventListener('change', (e) => {
-      applyThemePreset(e.target.value, true, this.state.zeroFootprint);
-    });
-
-    document.getElementById('offline-queue-pill')?.addEventListener('click', () => {
-      this.flushOfflineQueueIfReady(true);
-    });
-
     document.getElementById('open-cmdk-btn')?.addEventListener('click', () => this.openCommandPalette());
     document.getElementById('open-drafts-btn')?.addEventListener('click', () => this.openDraftsModal());
-    document.getElementById('open-composer-btn')?.addEventListener('click', () => {
-      const { month, day } = parseDayKey(this.state.activeDay);
-      this.openComposer({ presetDate: `${new Date().getFullYear()}-${pad2(month)}-${pad2(day)}` });
-    });
+    document.getElementById('open-composer-btn')?.addEventListener('click', () =>
+      this.openComposer({ presetDate: getTodayIsoDate() })
+    );
     document.getElementById('vault-btn')?.addEventListener('click', () => this.openVaultModal());
     document.getElementById('lock-now-btn')?.addEventListener('click', () => this.lockDiaryNow('manual'));
-    document.getElementById('github-settings-btn')?.addEventListener('click', () => this.openGithubModal());
+    document.getElementById('github-settings-btn')?.addEventListener('click', () =>
+      this.openGitHubModal()
+    );
+    document.getElementById('offline-queue-pill')?.addEventListener('click', () =>
+      this.flushOfflineQueueIfReady(true)
+    );
+    document.getElementById('theme-preset-select')?.addEventListener('change', (ev) => {
+      applyThemePreset(ev.target.value, true, this.state.zeroFootprint);
+    });
 
-    // Reader Date Navigation & Controls
-    const stepCalendarDay = (delta) => {
+    // Reader Date & Layout Controls
+    document.getElementById('month-select')?.addEventListener('change', (ev) => {
+      const m = Number(ev.target.value);
+      const { day } = parseDayKey(this.state.activeDay);
+      this.state.activeDay = formatDayKey(m, day);
+      this.renderReader();
+    });
+    document.getElementById('day-select')?.addEventListener('change', (ev) => {
+      const { month } = parseDayKey(this.state.activeDay);
+      this.state.activeDay = formatDayKey(month, Number(ev.target.value));
+      this.renderReader();
+    });
+    document.getElementById('prev-day-btn')?.addEventListener('click', () => {
       const all = getAll366DayKeys();
-      const idx = Math.max(0, all.indexOf(this.state.activeDay));
-      this.state.activeDay = all[(idx + delta + all.length) % all.length];
-      this.state.compare2Active = false;
-      this.renderReader();
-    };
-
-    document.getElementById('prev-day-btn')?.addEventListener('click', () => stepCalendarDay(-1));
-    document.getElementById('next-day-btn')?.addEventListener('click', () => stepCalendarDay(1));
-
-    document.getElementById('month-select')?.addEventListener('change', (e) => {
-      const m = Number(e.target.value) || 1;
-      const d = Number(document.getElementById('day-select').value) || 1;
-      this.syncDaySelectorOptions(m, d);
-      this.state.activeDay = formatDayKey(m, Number(document.getElementById('day-select').value));
-      this.state.compare2Active = false;
+      const idx = all.indexOf(this.state.activeDay);
+      this.state.activeDay = all[(idx - 1 + all.length) % all.length];
       this.renderReader();
     });
-
-    document.getElementById('day-select')?.addEventListener('change', (e) => {
-      const m = Number(document.getElementById('month-select').value) || 1;
-      this.state.activeDay = formatDayKey(m, Number(e.target.value) || 1);
-      this.state.compare2Active = false;
+    document.getElementById('next-day-btn')?.addEventListener('click', () => {
+      const all = getAll366DayKeys();
+      const idx = all.indexOf(this.state.activeDay);
+      this.state.activeDay = all[(idx + 1) % all.length];
       this.renderReader();
     });
-
     document.getElementById('today-btn')?.addEventListener('click', () => {
       this.state.activeDay = getTodayDayKey();
       this.state.compare2Active = false;
       this.renderReader();
     });
-
     document.getElementById('next-recorded-btn')?.addEventListener('click', () => {
-      const recorded = Object.keys(this.state.indexData.days || {}).sort();
-      if (recorded.length === 0) {
-        this.showToast('No recorded days in index yet.', 'info');
-        return;
-      }
-      const next = recorded.find((d) => d > this.state.activeDay) || recorded[0];
+      const keys = Object.keys(this.state.indexData?.days || {}).sort();
+      if (keys.length === 0) return;
+      const next = keys.find((k) => k > this.state.activeDay) || keys[0];
       this.state.activeDay = next;
       this.state.compare2Active = false;
       this.renderReader();
     });
-
     document.getElementById('random-day-btn')?.addEventListener('click', () => {
-      const recorded = Object.keys(this.state.indexData.days || {});
-      const pool = recorded.length > 0 ? recorded : getAll366DayKeys();
-      this.state.activeDay = pool[Math.floor(Math.random() * pool.length)];
+      const keys = Object.keys(this.state.indexData?.days || {});
+      if (keys.length === 0) return;
+      this.state.activeDay = keys[Math.floor(Math.random() * keys.length)];
       this.state.compare2Active = false;
       this.renderReader();
     });
-
     document.getElementById('jump-comments-btn')?.addEventListener('click', () => {
       document.getElementById('comments-section')?.scrollIntoView({ behavior: 'smooth' });
     });
@@ -5275,16 +4986,16 @@ class PerpetualDiaryApp {
     document.querySelectorAll('#col-width-group .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         this.state.colMode = btn.dataset.colMode;
-        document.querySelectorAll('#col-width-group .seg-btn').forEach((b) => {
-          b.classList.toggle('is-active', b === btn);
-        });
+        document.querySelectorAll('#col-width-group .seg-btn').forEach((b) =>
+          b.classList.toggle('is-active', b === btn)
+        );
         this.renderReader();
       });
     });
 
-    document.getElementById('sort-order-btn')?.addEventListener('click', (e) => {
+    document.getElementById('sort-order-btn')?.addEventListener('click', (ev) => {
       this.state.sortOrder = this.state.sortOrder === 'asc' ? 'desc' : 'asc';
-      e.currentTarget.textContent =
+      ev.currentTarget.textContent =
         this.state.sortOrder === 'asc' ? 'Oldest → Newest' : 'Newest → Oldest';
       this.renderReader();
     });
@@ -5292,9 +5003,9 @@ class PerpetualDiaryApp {
     document.querySelectorAll('#window-scope-group .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         this.state.windowScope = btn.dataset.windowScope;
-        document.querySelectorAll('#window-scope-group .seg-btn').forEach((b) => {
-          b.classList.toggle('is-active', b === btn);
-        });
+        document.querySelectorAll('#window-scope-group .seg-btn').forEach((b) =>
+          b.classList.toggle('is-active', b === btn)
+        );
         this.renderReader();
       });
     });
@@ -5304,15 +5015,13 @@ class PerpetualDiaryApp {
       this.renderReader();
     });
     document.getElementById('compare-swap-btn')?.addEventListener('click', () => {
-      const a = document.getElementById('compare-date-a').value;
-      const b = document.getElementById('compare-date-b').value;
-      this.state.compareDateA = b;
-      this.state.compareDateB = a;
-      this.renderReader();
+      const a = document.getElementById('compare-date-a');
+      const b = document.getElementById('compare-date-b');
+      [a.value, b.value] = [b.value, a.value];
     });
     document.getElementById('compare-run-btn')?.addEventListener('click', () => {
-      this.state.compareDateA = document.getElementById('compare-date-a').value || '2024-11-24';
-      this.state.compareDateB = document.getElementById('compare-date-b').value || '2026-11-24';
+      this.state.compareDateA = document.getElementById('compare-date-a').value;
+      this.state.compareDateB = document.getElementById('compare-date-b').value;
       this.renderReader();
     });
     document.getElementById('compare-exit-btn')?.addEventListener('click', () => {
@@ -5320,322 +5029,241 @@ class PerpetualDiaryApp {
       this.renderReader();
     });
 
-    document.getElementById('copy-permalink-btn')?.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(window.location.href);
-        this.showToast('Permalink copied to clipboard.', 'success');
-      } catch {
-        this.showToast('Copy the URL from your browser address bar.', 'info');
-      }
+    document.getElementById('copy-permalink-btn')?.addEventListener('click', () => {
+      this.syncHashRoute();
+      navigator.clipboard?.writeText(window.location.href).catch(() => {});
+      this.showToast('Permalink copied to clipboard.', 'success');
     });
 
     document.querySelectorAll('#mobile-view-toggle .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         this.state.mobileMode = btn.dataset.mobileMode;
-        document.querySelectorAll('#mobile-view-toggle .seg-btn').forEach((b) => {
-          b.classList.toggle('is-active', b === btn);
-        });
+        document.querySelectorAll('#mobile-view-toggle .seg-btn').forEach((b) =>
+          b.classList.toggle('is-active', b === btn)
+        );
         this.renderReader();
       });
     });
 
-    // Wiki-Link clicks, Margin Sidenote toggles & Footnote smooth jumps inside prose
-    document.addEventListener('click', (ev) => {
-      const wikiEl = ev.target.closest?.('.wiki-link');
-      if (wikiEl) {
+    // Wiki-Link & Sidenote clicks inside Reader
+    document.getElementById('columns-stage')?.addEventListener('click', (ev) => {
+      const wiki = ev.target.closest('.wiki-link');
+      if (wiki) {
         ev.preventDefault();
-        const dayKey = wikiEl.dataset.wikiDay;
-        if (dayKey) {
-          this.state.activeDay = dayKey;
+        const dayTarget = wiki.dataset.wikiDay;
+        if (dayTarget) {
+          this.state.activeDay = dayTarget;
           this.state.compare2Active = false;
-          this.switchView('reader');
+          this.renderReader();
         }
         return;
       }
-
-      const snBtn = ev.target.closest?.('.md-sidenote-ref');
+      const snBtn = ev.target.closest('.md-sidenote-ref');
       if (snBtn) {
         const wrap = snBtn.closest('.md-sidenote-wrap');
-        if (wrap) {
-          const isOpen = wrap.classList.toggle('is-open');
-          snBtn.setAttribute('aria-expanded', String(isOpen));
-        }
-        return;
-      }
-
-      const fnLink = ev.target.closest?.('[data-fn-target]');
-      if (fnLink) {
-        ev.preventDefault();
-        const target = document.getElementById(fnLink.dataset.fnTarget);
-        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const open = wrap.classList.toggle('is-open');
+        snBtn.setAttribute('aria-expanded', String(open));
       }
     });
 
-    // Highlight-to-Quote Selection Pill
-    document.addEventListener('mouseup', () => {
+    // Floating Highlight-to-Quote Pill
+    document.addEventListener('selectionchange', () => {
       const pill = document.getElementById('selection-quote-pill');
+      if (!pill) return;
       const sel = window.getSelection();
       const text = sel?.toString().trim() || '';
-      if (!text || text.length < 4 || !sel.anchorNode) {
-        if (pill) pill.hidden = true;
+      if (!text || sel.rangeCount === 0) {
+        pill.hidden = true;
         return;
       }
-      const el =
-        sel.anchorNode.nodeType === Node.ELEMENT_NODE
-          ? sel.anchorNode
-          : sel.anchorNode.parentElement;
-      const col = el?.closest?.('.year-column');
-      if (!col || !el.closest?.('.prose-body')) {
-        if (pill) pill.hidden = true;
+      const anchorEl =
+        sel.anchorNode?.nodeType === 1 ? sel.anchorNode : sel.anchorNode?.parentElement;
+      const col = anchorEl?.closest?.('.year-column');
+      const card = anchorEl?.closest?.('.stacked-entry-item');
+      if (!col || !col.dataset.year) {
+        pill.hidden = true;
         return;
       }
-      const stacked = el?.closest?.('.stacked-entry-item');
       const rect = sel.getRangeAt(0).getBoundingClientRect();
-      pill.style.left = `${Math.max(12, window.scrollX + rect.left)}px`;
       pill.style.top = `${Math.max(12, window.scrollY + rect.top - 38)}px`;
-      pill.dataset.targetYear = col.dataset.year || '';
-      pill.dataset.targetDate = stacked?.dataset.diaryDate || col.dataset.diaryDate || '';
+      pill.style.left = `${Math.max(12, window.scrollX + rect.left)}px`;
+      pill.dataset.quoteText = text;
+      pill.dataset.quoteYear = col.dataset.year;
+      pill.dataset.quoteDate = card?.dataset.diaryDate || col.dataset.diaryDate;
       pill.hidden = false;
     });
 
     document.getElementById('selection-quote-pill')?.addEventListener('click', (ev) => {
-      const sel = window.getSelection();
-      const text = sel?.toString().trim() || '';
-      const pill = ev.currentTarget;
-      if (text && pill.dataset.targetYear) {
-        this.attachQuoteToComment({
-          text,
-          year: Number(pill.dataset.targetYear),
-          diaryDate: pill.dataset.targetDate,
-        });
-      }
+      const btn = ev.currentTarget;
+      this.attachQuoteToComment({
+        text: btn.dataset.quoteText || '',
+        year: Number(btn.dataset.quoteYear),
+        diaryDate: btn.dataset.quoteDate || '',
+      });
     });
 
-    // Margin Comment Form & Media
-    document.getElementById('comment-form')?.addEventListener('submit', (e) => this.handleCommentSubmit(e));
-    document.getElementById('comment-cancel-edit-btn')?.addEventListener('click', () => this.resetCommentComposer());
-    document.getElementById('comment-clear-quote-btn')?.addEventListener('click', () => this.clearCommentQuote());
-
-    document.getElementById('comment-photo-file')?.addEventListener('change', async (e) => {
-      const file = e.target.files?.[0];
+    // Margin Comments Form & Photo
+    document.getElementById('comment-form')?.addEventListener('submit', (ev) =>
+      this.handleCommentSubmit(ev)
+    );
+    document.getElementById('comment-cancel-edit-btn')?.addEventListener('click', () =>
+      this.resetCommentComposer()
+    );
+    document.getElementById('comment-clear-quote-btn')?.addEventListener('click', () =>
+      this.clearCommentQuote()
+    );
+    document.getElementById('comment-photo-file')?.addEventListener('change', async (ev) => {
+      const file = ev.target.files?.[0];
       if (!file) return;
       try {
         const processed = await processImageFile(file, {
           preset: getSavedWebpPreset(this.state.zeroFootprint),
         });
         this.state.commentDraftPhoto = {
-          src: processed.dataUrl,
-          caption: '',
+          src: '',
+          caption: document.getElementById('comment-photo-caption').value.trim(),
           align: 'full',
           posX: 50,
           posY: 50,
           width: 100,
-          height: 220,
+          height: 200,
           _pendingBuffer: processed.arrayBuffer,
-          _mime: processed.mime,
           _ext: processed.ext,
+          _mime: processed.mime,
         };
         document.getElementById('comment-photo-remove-btn').hidden = false;
-        const statsEl = document.getElementById('comment-photo-stats');
-        statsEl.textContent = `${processed.formatLabel} · ${formatBytesCompact(processed.size)}`;
-        statsEl.hidden = false;
         this.commentStudio.setMedia(processed.dataUrl, this.state.commentDraftPhoto);
       } catch (err) {
-        this.showToast(err.message || 'Could not process comment photo.', 'error');
+        this.showToast(err.message, 'error');
       }
+      ev.target.value = '';
     });
-
     document.getElementById('comment-photo-remove-btn')?.addEventListener('click', () => {
       this.state.commentDraftPhoto = null;
-      document.getElementById('comment-photo-file').value = '';
       document.getElementById('comment-photo-remove-btn').hidden = true;
-      document.getElementById('comment-photo-stats').hidden = true;
       this.commentStudio.clear();
     });
 
-    // Heatmap, Archive, Insights, Word Trend Explorer & Story Arcs Events
-    document.getElementById('heatmap-mode-select')?.addEventListener('change', (e) => {
-      this.state.heatmapMode = e.target.value;
-      this.renderHeatmap();
-    });
-
-    document.getElementById('load-all-days-btn')?.addEventListener('click', async () => {
-      await this.loadAllIndexedDays();
-      this.showToast('Loaded & decrypted all indexed days into RAM.', 'success');
-      await this.renderArchive();
-    });
-
-    document.getElementById('analytics-load-all-btn')?.addEventListener('click', async () => {
-      await this.loadAllIndexedDays();
-      this.showToast('Decrypted all entries for longitudinal insights & word trends.', 'success');
-      await this.renderAnalyticsAndArcs();
-    });
-
-    document.getElementById('word-trend-input')?.addEventListener('input', (e) => {
-      this.state.wordTrendQuery = e.target.value;
-      this.renderWordTrendSection(Array.from(this.state.decryptedEntryCache.values()));
-    });
-
-    document.getElementById('word-trend-clear-btn')?.addEventListener('click', () => {
-      this.state.wordTrendQuery = '';
-      const inp = document.getElementById('word-trend-input');
-      if (inp) inp.value = '';
-      this.renderWordTrendSection(Array.from(this.state.decryptedEntryCache.values()));
-    });
-
-    document.getElementById('archive-search-input')?.addEventListener('input', (e) => {
-      this.state.archiveSearch = e.target.value;
-      this.renderArchive();
-    });
-
-    document.getElementById('archive-year-select')?.addEventListener('change', (e) => {
-      this.state.archiveYear = e.target.value;
-      this.renderArchive();
-    });
-
-    document.getElementById('import-diary-file')?.addEventListener('change', async (e) => {
-      const f = e.target.files?.[0];
-      e.target.value = '';
-      if (f) await this.handleImportFile(f);
-    });
-
-    document.getElementById('print-book-btn')?.addEventListener('click', async () => {
-      await this.loadAllIndexedDays();
-      this.triggerPrintEdition(
-        openPrintBookWindow,
-        {
-          title: 'Perpetual Side-by-Side Diary',
-          entries: Array.from(this.state.decryptedEntryCache.values()),
-        },
-        'Print Book'
-      );
-    });
-
-    document.getElementById('print-zine-btn')?.addEventListener('click', async () => {
-      await this.loadAllIndexedDays();
-      this.triggerPrintEdition(
-        openMiniZineWindow,
-        {
-          title: 'Perpetual Pocket Zine',
-          entries: Array.from(this.state.decryptedEntryCache.values()).slice(-6),
-        },
-        '8-Page Mini-Zine'
-      );
-    });
-
-    document.getElementById('export-json-btn')?.addEventListener('click', async () => {
-      const bundle = await this.buildExportBundle();
-      this.triggerFileDownload(
-        `perpetual-diary-archive-${getTodayIsoDate()}.json`,
-        `${JSON.stringify(bundle, null, 2)}\n`,
-        'application/json'
-      );
-    });
-
-    document.getElementById('export-md-btn')?.addEventListener('click', async () => {
-      const bundle = await this.buildExportBundle();
-      const lines = ['# Perpetual Side-by-Side Diary Archive', ''];
-      for (const dayStr of Object.keys(bundle.days).sort()) {
-        lines.push(`## ${formatReadableDayKey(dayStr)} (${dayStr})`, '');
-        const doc = bundle.days[dayStr];
-        for (const yr of Object.keys(doc.entries).sort()) {
-          const list = getYearEntriesList(doc.entries[yr], yr, dayStr);
-          for (const e of list) {
-            lines.push(`### ${e.diaryDate}${e.title ? ` — ${e.title}` : ''}`, '', e.body, '');
-          }
-        }
+    // Composer Controls
+    document.getElementById('composer-zen-btn')?.addEventListener('click', () =>
+      this.toggleComposerZenMode()
+    );
+    document.getElementById('composer-close-btn')?.addEventListener('click', () =>
+      this.closeComposer()
+    );
+    document.getElementById('entry-cancel-btn')?.addEventListener('click', () =>
+      this.closeComposer()
+    );
+    document.getElementById('entry-form')?.addEventListener('submit', (ev) =>
+      this.handleEntryFormSubmit(ev)
+    );
+    document.getElementById('entry-save-cloud-draft-btn')?.addEventListener('click', () =>
+      this.handleSaveToCloudDraft()
+    );
+    document.getElementById('entry-delete-btn')?.addEventListener('click', () => {
+      if (this.state.editingEntryKey && this.state.editingBaseEntry) {
+        this.handleDeleteEntry(
+          this.state.editingEntryKey.dayStr,
+          this.state.editingEntryKey.yearKey,
+          this.state.editingBaseEntry
+        );
       }
-      this.triggerFileDownload(
-        `perpetual-diary-book-${getTodayIsoDate()}.md`,
-        lines.join('\n'),
-        'text/markdown'
-      );
-    });
-
-    document.getElementById('dossier-year-select')?.addEventListener('change', (e) => {
-      this.state.selectedDossierYear = Number(e.target.value);
-      this.renderAnalyticsAndArcs();
-    });
-
-    document.getElementById('dossier-download-md-btn')?.addEventListener('click', async () => {
-      await this.loadAllIndexedDays();
-      const dossier = generateYearInReviewDossier(
-        this.state.selectedDossierYear,
-        this.state.indexData,
-        Array.from(this.state.decryptedEntryCache.values())
-      );
-      this.triggerFileDownload(
-        `year-in-review-${dossier.year}.md`,
-        renderYearDossierMarkdown(dossier),
-        'text/markdown'
-      );
-    });
-
-    document.getElementById('dossier-print-book-btn')?.addEventListener('click', async () => {
-      await this.loadAllIndexedDays();
-      const yr = Number(this.state.selectedDossierYear);
-      const entries = Array.from(this.state.decryptedEntryCache.values()).filter(
-        (e) => Number(e.year) === yr
-      );
-      this.triggerPrintEdition(
-        openPrintBookWindow,
-        { title: `${yr} — Annual Ledger`, entries },
-        `${yr} Year Book`
-      );
-    });
-
-    document.getElementById('arc-select')?.addEventListener('change', (e) => {
-      this.state.selectedArcSlug = e.target.value;
-      this.renderAnalyticsAndArcs();
-    });
-
-    document.getElementById('arc-print-book-btn')?.addEventListener('click', async () => {
-      await this.loadAllIndexedDays();
-      const book = buildStoryArcBook(
-        this.state.selectedArcSlug,
-        Array.from(this.state.decryptedEntryCache.values())
-      );
-      this.triggerPrintEdition(
-        openPrintBookWindow,
-        {
-          title: book.title,
-          subtitle: `${book.dateSpan} · ${book.chapters.length} Chapters`,
-          entries: book.chapters,
-        },
-        `${book.title} Arc Book`
-      );
-    });
-
-    // Entry Composer Events
-    document.getElementById('composer-close-btn')?.addEventListener('click', () => this.closeComposer());
-    document.getElementById('entry-cancel-btn')?.addEventListener('click', () => this.closeComposer());
-    document.getElementById('composer-zen-btn')?.addEventListener('click', () => this.toggleComposerZenMode());
-    document.getElementById('entry-form')?.addEventListener('submit', (e) => this.handleEntryFormSubmit(e));
-    document.getElementById('entry-save-cloud-draft-btn')?.addEventListener('click', () => this.handleSaveCloudDraft());
-
-    document.getElementById('entry-delete-btn')?.addEventListener('click', async () => {
-      if (!this.state.editingEntryKey) return;
-      const { dayStr, yearKey, entryId } = this.state.editingEntryKey;
-      const doc = await this.getDayDocument(dayStr, false);
-      const list = getYearEntriesList(doc.entries?.[yearKey], yearKey, dayStr);
-      const entry = list.find((e) => e.id === entryId) || list[0];
-      if (entry) await this.handleDeleteEntry(dayStr, yearKey, entry);
-    });
-
-    document.querySelectorAll('.md-btn').forEach((btn) => {
-      btn.addEventListener('click', () => this.applyMarkdownSnippet(btn.dataset.md));
-    });
-
-    document.querySelectorAll('#editor-mode-group .seg-btn').forEach((btn) => {
-      btn.addEventListener('click', () => this.setEditorMode(btn.dataset.editorMode));
     });
 
     document.getElementById('entry-body-input')?.addEventListener('input', () => {
       this.updateComposerCounts();
       this.scheduleDraftAutosave();
     });
-    document.getElementById('entry-verse-checkbox')?.addEventListener('change', () => {
+    document.getElementById('entry-verse-checkbox')?.addEventListener('change', () =>
+      this.updateComposerCounts()
+    );
+
+    document.querySelectorAll('#editor-mode-group .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => this.setEditorMode(btn.dataset.editorMode));
+    });
+    document.querySelectorAll('.md-btn').forEach((btn) => {
+      btn.addEventListener('click', () => this.applyMarkdownSnippet(btn.dataset.md));
+    });
+
+    document.getElementById('entry-template-select')?.addEventListener('change', (ev) => {
+      const id = ev.target.value;
+      if (!id) return;
+      const all = [...loadCustomTemplates(this.state.zeroFootprint), ...BUILT_IN_TEMPLATES];
+      const tpl = all.find((t) => t.id === id);
+      if (tpl) {
+        const ta = document.getElementById('entry-body-input');
+        ta.value = ta.value ? `${ta.value}\n\n${tpl.body}` : tpl.body;
+        if (tpl.mood && !document.getElementById('entry-mood-input').value) {
+          document.getElementById('entry-mood-input').value = tpl.mood;
+        }
+        if (tpl.tags && !document.getElementById('entry-tags-input').value) {
+          document.getElementById('entry-tags-input').value = tpl.tags;
+        }
+        if (tpl.preserveWhitespace) {
+          document.getElementById('entry-verse-checkbox').checked = true;
+        }
+        this.updateComposerCounts();
+      }
+      ev.target.value = '';
+    });
+
+    document.getElementById('entry-save-template-btn')?.addEventListener('click', () => {
+      const body = document.getElementById('entry-body-input').value.trim();
+      if (!body) {
+        this.showToast('Write template prose first.', 'warn');
+        return;
+      }
+      const title =
+        document.getElementById('entry-title-input').value.trim() ||
+        `Template ${new Date().toLocaleDateString()}`;
+      saveCustomTemplate(
+        {
+          name: title,
+          mood: document.getElementById('entry-mood-input').value.trim(),
+          tags: document.getElementById('entry-tags-input').value.trim(),
+          preserveWhitespace: Boolean(document.getElementById('entry-verse-checkbox')?.checked),
+          body,
+        },
+        this.state.zeroFootprint
+      );
+      this.populateComposerTemplates();
+      this.showToast(`Saved "${title}" to your templates.`, 'success');
+    });
+
+    document.getElementById('entry-draw-prompt-btn')?.addEventListener('click', () => {
+      const cat = document.getElementById('entry-prompt-category').value;
+      const drawn = drawRandomPrompt(cat, this.state.activePromptText);
+      if (!drawn) return;
+      this.state.activePromptText = drawn.text;
+      document.getElementById('entry-prompt-text').textContent = drawn.text;
+      document.getElementById('entry-prompt-banner').hidden = false;
+    });
+    document.getElementById('entry-insert-prompt-btn')?.addEventListener('click', () => {
+      if (!this.state.activePromptText) return;
+      const ta = document.getElementById('entry-body-input');
+      const block = `> **Prompt:** ${this.state.activePromptText}\n\n`;
+      ta.value = `${block}${ta.value}`;
       this.updateComposerCounts();
+      ta.focus();
+    });
+
+    document.getElementById('entry-stamp-weather-btn')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      try {
+        const res = await fetchCurrentLocationAndWeather();
+        document.getElementById('entry-location-input').value = res.place;
+        document.getElementById('entry-weather-input').value = res.weather;
+        this.showToast(`Stamped ${res.stampText}.`, 'success');
+      } catch (err) {
+        this.showToast(err.message, 'warn');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('entry-doublelock-checkbox')?.addEventListener('change', (ev) => {
+      document.getElementById('entry-doublelock-fields').hidden = !ev.target.checked;
     });
 
     document.getElementById('draft-restore-btn')?.addEventListener('click', () => {
@@ -5650,126 +5278,38 @@ class PerpetualDiaryApp {
       document.getElementById('draft-recovery-banner').hidden = true;
       this.updateComposerCounts();
     });
-
     document.getElementById('draft-discard-btn')?.addEventListener('click', () => {
       const dateStr = document.getElementById('entry-date-input').value;
       this.storageRemove(`perpetual_diary_draft_${dateStr}`);
       document.getElementById('draft-recovery-banner').hidden = true;
     });
 
-    // Templates & Prompt Decks
-    document.getElementById('entry-template-select')?.addEventListener('change', (e) => {
-      const tplId = e.target.value;
-      if (!tplId) return;
-      const all = [...loadCustomTemplates(this.state.zeroFootprint), ...BUILT_IN_TEMPLATES];
-      const tpl = all.find((t) => t.id === tplId);
-      if (tpl) {
-        const bodyEl = document.getElementById('entry-body-input');
-        bodyEl.value = bodyEl.value.trim() ? `${bodyEl.value.trim()}\n\n${tpl.body}` : tpl.body;
-        if (tpl.mood && !document.getElementById('entry-mood-input').value) {
-          document.getElementById('entry-mood-input').value = tpl.mood;
-        }
-        if (tpl.tags && !document.getElementById('entry-tags-input').value) {
-          document.getElementById('entry-tags-input').value = tpl.tags;
-        }
-        document.getElementById('entry-verse-checkbox').checked = Boolean(tpl.preserveWhitespace);
-        this.updateComposerCounts();
-      }
-      e.target.value = '';
+    // Multi-Photo Upload, Sketch Pad & Voice Note Recorder
+    document.getElementById('entry-webp-preset')?.addEventListener('change', (ev) => {
+      saveWebpPreset(ev.target.value, this.state.zeroFootprint);
     });
 
-    document.getElementById('entry-save-template-btn')?.addEventListener('click', () => {
-      const title = document.getElementById('entry-title-input').value.trim();
-      const body = document.getElementById('entry-body-input').value.trim();
-      if (!body) {
-        this.showToast('Write template structure in the editor first.', 'warn');
-        return;
-      }
-      saveCustomTemplate(
-        {
-        id: 'cmd-print-book',
-        title: 'Print-to-Book (All Loaded Entries)',
-        subtitle: 'Generate a clean paginated book with table of contents',
-        keywords: 'print book pdf',
-        run: async () => {
-          await this.loadAllIndexedDays();
-          this.triggerPrintEdition(
-            openPrintBookWindow,
-            {
-              title: 'Perpetual Side-by-Side Diary',
-              entries: Array.from(this.state.decryptedEntryCache.values()),
-            },
-            'Print Book'
-          );
-        },
-      },
-      {
-        id: 'cmd-mini-zine',
-        title: 'Generate 8-Page Foldable Pocket Mini-Zine',
-        subtitle: '1-sheet landscape imposition for folding a pocket zine',
-        keywords: 'zine mini pocket print fold',
-        run: async () => {
-          await this.loadAllIndexedDays();
-          this.triggerPrintEdition(
-            openMiniZineWindow,
-            {
-              title: 'Perpetual Pocket Zine',
-              entries: Array.from(this.state.decryptedEntryCache.values()).slice(-6),
-            },
-            '8-Page Mini-Zine'
-          );
-        },
-      },
-      {
-        id: 'cmd-drafts',
-      try {
-        const stamp = await fetchCurrentLocationAndWeather();
-        document.getElementById('entry-location-input').value = stamp.place;
-        document.getElementById('entry-weather-input').value = stamp.weather;
-        this.showToast(`Stamped ${stamp.stampText}`, 'success');
-      } catch (err) {
-        this.showToast(err.message || 'Could not fetch weather/location.', 'warn');
-      } finally {
-        btn.disabled = false;
-        btn.textContent = '◎ Stamp Now';
-      }
-    });
-
-    // Double-Lock Toggle in Composer
-    document.getElementById('entry-doublelock-checkbox')?.addEventListener('change', (e) => {
-      document.getElementById('entry-doublelock-fields').hidden = !e.target.checked;
-    });
-
-    // Multi-Photo Gallery Upload, WebP Preset, Ink Sketch Pad & Voice Note Recorder
-    document.getElementById('entry-webp-preset')?.addEventListener('change', (e) => {
-      saveWebpPreset(e.target.value, this.state.zeroFootprint);
-    });
-
-    document.getElementById('entry-photo-file')?.addEventListener('change', async (e) => {
-      const files = Array.from(e.target.files || []);
-      e.target.value = '';
+    document.getElementById('entry-photo-file')?.addEventListener('change', async (ev) => {
+      const files = Array.from(ev.target.files || []);
       if (files.length === 0) return;
-
-      const preset = document.getElementById('entry-webp-preset').value || 'balanced';
-      const archiveOrig = Boolean(document.getElementById('entry-archive-original-checkbox')?.checked);
+      const preset = document.getElementById('entry-webp-preset')?.value || 'balanced';
+      const archiveOrig = Boolean(
+        document.getElementById('entry-archive-original-checkbox')?.checked
+      );
       const dateVal = document.getElementById('entry-date-input').value || getTodayIsoDate();
 
       for (const file of files) {
         try {
-          const processed = await processImageFile(file, { preset });
           let originalRef = null;
           if (archiveOrig) {
-            const shortHash = await computeFileShortHash(file);
-            const archiveFilename = downloadOriginalForColdArchive(file, dateVal, shortHash);
-            originalRef = { archiveFilename, sha256Short: shortHash, originalBytes: file.size };
+            const hash = await computeFileShortHash(file);
+            const archiveFilename = downloadOriginalForColdArchive(file, dateVal, hash);
+            originalRef = { sha256Short: hash, archiveFilename };
           }
-          const statsLabel = `${processed.formatLabel} · ${formatBytesCompact(processed.size)}${
-            processed.savedPercent > 0 ? ` (-${processed.savedPercent}%)` : ''
-          }`;
-
+          const processed = await processImageFile(file, { preset });
           this.state.entryDraftGallery.push({
             id: `img-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`,
-            src: processed.dataUrl,
+            src: '',
             caption: '',
             align: 'full',
             posX: 50,
@@ -5778,81 +5318,70 @@ class PerpetualDiaryApp {
             height: 240,
             kind: 'photo',
             originalRef,
-            _previewUrl: processed.dataUrl,
             _pendingBuffer: processed.arrayBuffer,
-            _mime: processed.mime,
             _ext: processed.ext,
-            _statsLabel: statsLabel,
+            _mime: processed.mime,
+            _previewUrl: processed.dataUrl,
+            _statsLabel: `${processed.formatLabel} · ${formatBytesCompact(processed.size)}`,
           });
-
-          const statsEl = document.getElementById('entry-photo-stats');
-          statsEl.textContent = statsLabel;
-          statsEl.hidden = false;
         } catch (err) {
-          this.showToast(err.message || 'Image processing failed.', 'error');
+          this.showToast(err.message, 'error');
         }
       }
-
       await this.syncPrimaryDraftPhotoStudio();
       this.renderDraftGalleryStrip();
+      ev.target.value = '';
     });
 
     document.getElementById('entry-photo-remove-btn')?.addEventListener('click', () => {
       this.state.entryDraftGallery = [];
-      document.getElementById('entry-photo-stats').hidden = true;
       this.renderDraftGalleryStrip();
     });
 
-    // Ink Sketch Pad
     document.getElementById('entry-sketch-toggle-btn')?.addEventListener('click', () => {
       const panel = document.getElementById('entry-sketch-panel');
-      const willOpen = panel.hidden;
-      panel.hidden = !willOpen;
-      if (willOpen) {
-        if (!this.sketchPad) {
-          this.sketchPad = new InkSketchPad(document.getElementById('entry-sketch-host'));
-        }
+      panel.hidden = !panel.hidden;
+      if (!panel.hidden && !this.sketchPad) {
+        this.sketchPad = new InkSketchPad(document.getElementById('entry-sketch-host'));
         this.sketchPad.mount();
       }
     });
-
     document.getElementById('entry-sketch-close-btn')?.addEventListener('click', () => {
       document.getElementById('entry-sketch-panel').hidden = true;
     });
-
     document.getElementById('entry-sketch-attach-btn')?.addEventListener('click', async () => {
-      if (!this.sketchPad) return;
       try {
+        if (!this.sketchPad) return;
         const exported = await this.sketchPad.exportWebp();
         this.state.entryDraftGallery.push({
           id: `sk-${Date.now().toString(36)}`,
-          src: exported.dataUrl,
-          caption: 'Margin Ink Sketch',
+          src: '',
+          caption: 'Ink Sketch',
           align: 'center',
           posX: 50,
           posY: 50,
-          width: 72,
+          width: 75,
           height: 240,
           kind: 'sketch',
-          _previewUrl: exported.dataUrl,
           _pendingBuffer: exported.arrayBuffer,
-          _mime: exported.mime,
           _ext: exported.ext,
-          _statsLabel: `Sketch WebP · ${formatBytesCompact(exported.size)}`,
+          _mime: exported.mime,
+          _previewUrl: exported.dataUrl,
+          _statsLabel: `Sketch · ${formatBytesCompact(exported.size)}`,
         });
+        this.sketchPad.clear();
         document.getElementById('entry-sketch-panel').hidden = true;
         await this.syncPrimaryDraftPhotoStudio();
         this.renderDraftGalleryStrip();
-        this.showToast('Ink sketch attached to entry gallery.', 'success');
+        this.showToast('Ink sketch attached to entry.', 'success');
       } catch (err) {
-        this.showToast(err.message || 'Could not attach sketch.', 'warn');
+        this.showToast(err.message, 'warn');
       }
     });
 
-    // Encrypted Voice Note Recorder
     document.getElementById('voice-record-btn')?.addEventListener('click', async () => {
       if (!isAudioRecordingSupported()) {
-        this.showToast('Voice recording requires HTTPS (or localhost) and microphone access.', 'warn');
+        this.showToast('Microphone recording is unavailable in this browser.', 'warn');
         return;
       }
       try {
@@ -5863,7 +5392,6 @@ class PerpetualDiaryApp {
           onLevel: (rms) => {
             document.getElementById('voice-meter-fill').style.width = `${Math.round(rms * 100)}%`;
           },
-          onAutoStop: (result) => this.finalizeVoiceRecording(result),
         });
         await this.voiceRecorder.start();
         document.getElementById('voice-record-btn').hidden = true;
@@ -5875,48 +5403,388 @@ class PerpetualDiaryApp {
 
     document.getElementById('voice-stop-btn')?.addEventListener('click', async () => {
       if (!this.voiceRecorder) return;
-      const result = await this.voiceRecorder.stop();
-      this.finalizeVoiceRecording(result);
+      const recorded = await this.voiceRecorder.stop();
+      document.getElementById('voice-record-btn').hidden = false;
+      document.getElementById('voice-stop-btn').hidden = true;
+      document.getElementById('voice-meter-fill').style.width = '0%';
+      if (recorded) {
+        this.state.entryDraftVoice = {
+          _pendingBuffer: recorded.arrayBuffer,
+          _ext: recorded.ext,
+          _mime: recorded.mime,
+          _previewUrl: recorded.previewUrl,
+          durationSec: recorded.durationSec,
+        };
+        const audioEl = document.getElementById('voice-draft-preview');
+        audioEl.src = recorded.previewUrl;
+        audioEl.hidden = false;
+        document.getElementById('voice-remove-btn').hidden = false;
+      }
     });
 
     document.getElementById('voice-remove-btn')?.addEventListener('click', () => {
       this.resetVoiceDraftUi();
     });
 
-    // GitHub Settings Modal Events
+    // Heatmap, Archive, Word Trend, Dossier, Story Arcs & Print Buttons
+    document.getElementById('heatmap-mode-select')?.addEventListener('change', (ev) => {
+      this.state.heatmapMode = ev.target.value;
+      this.renderHeatmap();
+    });
+
+    document.getElementById('load-all-days-btn')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      await this.loadAllIndexedDaysIntoCache(btn);
+      btn.textContent = 'All Days Loaded';
+      btn.disabled = false;
+      await this.renderArchive();
+    });
+
+    document.getElementById('analytics-load-all-btn')?.addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      await this.loadAllIndexedDaysIntoCache(btn);
+      btn.textContent = 'All Days Decrypted';
+      btn.disabled = false;
+      await this.renderAnalyticsAndArcs();
+    });
+
+    document.getElementById('word-trend-input')?.addEventListener('input', (ev) => {
+      this.state.wordTrendQuery = ev.target.value;
+      this.renderWordTrendExplorer();
+    });
+    document.getElementById('word-trend-clear-btn')?.addEventListener('click', () => {
+      this.state.wordTrendQuery = '';
+      this.renderWordTrendExplorer();
+    });
+
+    document.getElementById('archive-search-input')?.addEventListener('input', (ev) => {
+      this.state.archiveSearch = ev.target.value;
+      this.renderArchive();
+    });
+    document.getElementById('archive-year-select')?.addEventListener('change', (ev) => {
+      this.state.archiveYear = ev.target.value;
+      this.renderArchive();
+    });
+
+    document.getElementById('print-book-btn')?.addEventListener('click', () => {
+      this.triggerPrintEdition(
+        openPrintBookWindow,
+        {
+          title: 'Perpetual Side-by-Side Diary',
+          subtitle: 'Archive Print Edition',
+          entries: Array.from(this.state.decryptedEntryCache.values()),
+        },
+        'Print Book'
+      );
+    });
+
+    document.getElementById('print-zine-btn')?.addEventListener('click', () => {
+      this.triggerPrintEdition(
+        openMiniZineWindow,
+        {
+          title: 'Perpetual Pocket Zine',
+          entries: Array.from(this.state.decryptedEntryCache.values()),
+        },
+        '8-Page Mini-Zine'
+      );
+    });
+
+    document.getElementById('export-json-btn')?.addEventListener('click', () => {
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        index: this.state.indexData,
+        days: this.state.dayCache,
+      };
+      const a = document.createElement('a');
+      const url = URL.createObjectURL(
+        new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      );
+      a.href = url;
+      a.download = `perpetual-diary-export-${getTodayIsoDate()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+
+    document.getElementById('export-md-btn')?.addEventListener('click', () => {
+      const entries = Array.from(this.state.decryptedEntryCache.values()).sort((a, b) =>
+        a.diaryDate.localeCompare(b.diaryDate)
+      );
+      const md = entries
+        .map((e) => `# ${e.diaryDate}${e.title ? ` — ${e.title}` : ''}\n\n${e.body}\n`)
+        .join('\n---\n\n');
+      const a = document.createElement('a');
+      const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+      a.href = url;
+      a.download = `perpetual-diary-${getTodayIsoDate()}.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+
+    document.getElementById('import-diary-file')?.addEventListener('change', async (ev) => {
+      const file = ev.target.files?.[0];
+      if (!file) return;
+      try {
+        const parsed = parseImportedDiaryFile(file.name, await file.text());
+        if (parsed.entries.length === 0) {
+          this.showToast('No valid dated entries found in imported file.', 'warn');
+          return;
+        }
+        for (const imp of parsed.entries) {
+          const doc = await this.getDayDocument(imp.dayStr, true);
+          const yrKey = String(imp.year);
+          const list = getYearEntriesList(doc.entries[yrKey], yrKey, imp.dayStr);
+          list.push({
+            id: `imp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            year: imp.year,
+            diaryDate: imp.diaryDate,
+            title: imp.title,
+            body: imp.body,
+            mood: imp.mood,
+            tags: imp.tags,
+            location: imp.location || '',
+            weather: imp.weather || '',
+            artifacts: imp.artifacts || null,
+            metrics: imp.metrics || null,
+            preserveWhitespace: Boolean(imp.preserveWhitespace),
+            wordCount: countWords(stripMarkdown(imp.body)),
+            images: [],
+            image: null,
+            writtenAt: imp.writtenAt,
+            updatedAt: new Date().toISOString(),
+            encrypted: false,
+          });
+          doc.entries[yrKey] = list.length === 1 ? list[0] : list;
+          await this.persistDayDocument(imp.dayStr, doc, `import: ${imp.diaryDate}`);
+        }
+        this.showToast(
+          `Imported ${parsed.entries.length} entries (${parsed.format}).`,
+          'success'
+        );
+        await this.renderActiveView();
+      } catch (err) {
+        this.showToast(err.message || 'Import failed.', 'error');
+      }
+      ev.target.value = '';
+    });
+
+    document.getElementById('dossier-year-select')?.addEventListener('change', (ev) => {
+      this.state.selectedDossierYear = Number(ev.target.value);
+      this.renderAnalyticsAndArcs();
+    });
+    document.getElementById('dossier-download-md-btn')?.addEventListener('click', () => {
+      const dossier = generateYearInReviewDossier(
+        this.state.selectedDossierYear,
+        this.state.indexData,
+        Array.from(this.state.decryptedEntryCache.values())
+      );
+      const md = renderYearDossierMarkdown(dossier);
+      const a = document.createElement('a');
+      const url = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+      a.href = url;
+      a.download = `${dossier.year}-year-in-review.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    document.getElementById('dossier-print-book-btn')?.addEventListener('click', () => {
+      const yr = Number(this.state.selectedDossierYear);
+      const entries = Array.from(this.state.decryptedEntryCache.values()).filter(
+        (e) => Number(e.year) === yr
+      );
+      this.triggerPrintEdition(
+        openPrintBookWindow,
+        { title: `${yr} — Perpetual Year Book`, entries },
+        `${yr} Year Book`
+      );
+    });
+
+    document.getElementById('arc-select')?.addEventListener('change', (ev) => {
+      this.state.selectedArcSlug = ev.target.value;
+      this.renderAnalyticsAndArcs();
+    });
+    document.getElementById('arc-print-book-btn')?.addEventListener('click', () => {
+      if (!this.state.selectedArcSlug) return;
+      const book = buildStoryArcBook(
+        this.state.selectedArcSlug,
+        Array.from(this.state.decryptedEntryCache.values())
+      );
+      this.triggerPrintEdition(
+        openPrintBookWindow,
+        { title: `Story Arc: ${book.title}`, subtitle: book.dateSpan, entries: book.chapters },
+        `Story Arc: ${book.title}`
+      );
+    });
+
+    // Conflict Resolver, Time Machine, Drafts & Share Modals
+    document.getElementById('conflict-close-btn')?.addEventListener('click', () => {
+      document.getElementById('conflict-modal').hidden = true;
+    });
+    document.getElementById('conflict-cancel-btn')?.addEventListener('click', () => {
+      document.getElementById('conflict-modal').hidden = true;
+    });
+    document.getElementById('conflict-pick-local-btn')?.addEventListener('click', () => {
+      if (!this.state.activeConflict) return;
+      document.getElementById('conflict-merged-body').value =
+        this.state.activeConflict.localPlain.body;
+    });
+    document.getElementById('conflict-pick-remote-btn')?.addEventListener('click', () => {
+      if (!this.state.activeConflict) return;
+      document.getElementById('conflict-merged-body').value =
+        this.state.activeConflict.remotePlain.body;
+    });
+    document.getElementById('conflict-pick-merge-btn')?.addEventListener('click', () => {
+      if (!this.state.activeConflict) return;
+      const m = buildThreeWayMerge(
+        this.state.activeConflict.basePlain.body,
+        this.state.activeConflict.localPlain.body,
+        this.state.activeConflict.remotePlain.body
+      );
+      document.getElementById('conflict-merged-body').value = m.mergedText;
+    });
+    document.getElementById('conflict-form')?.addEventListener('submit', (ev) =>
+      this.handleConflictMergeSubmit(ev)
+    );
+
+    document.getElementById('history-close-btn')?.addEventListener('click', () => {
+      document.getElementById('history-modal').hidden = true;
+    });
+    document.getElementById('history-cancel-btn')?.addEventListener('click', () => {
+      document.getElementById('history-modal').hidden = true;
+    });
+    document.querySelectorAll('#history-view-toggle .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => this.setHistoryViewMode(btn.dataset.historyMode));
+    });
+    document.getElementById('history-restore-btn')?.addEventListener('click', async () => {
+      const ctx = this.state.activeHistory;
+      if (!ctx?.selectedEntry) return;
+      document.getElementById('history-modal').hidden = true;
+      await this.openComposer({
+        editEntry: ctx.selectedEntry,
+        dayStr: ctx.dayStr,
+        yearKey: ctx.yearKey,
+      });
+      this.showToast('Historical revision loaded into Composer — review & save to restore.', 'info');
+    });
+
+    document.getElementById('drafts-close-btn')?.addEventListener('click', () => {
+      document.getElementById('drafts-modal').hidden = true;
+    });
+    document.getElementById('drafts-done-btn')?.addEventListener('click', () => {
+      document.getElementById('drafts-modal').hidden = true;
+    });
+    document.getElementById('drafts-refresh-btn')?.addEventListener('click', () =>
+      this.openDraftsModal()
+    );
+    document.getElementById('drafts-new-btn')?.addEventListener('click', () => {
+      document.getElementById('drafts-modal').hidden = true;
+      this.openComposer({ presetDate: getTodayIsoDate() });
+    });
+
+    document.getElementById('share-close-btn')?.addEventListener('click', () => {
+      document.getElementById('share-modal').hidden = true;
+    });
+    document.getElementById('share-cancel-btn')?.addEventListener('click', () => {
+      document.getElementById('share-modal').hidden = true;
+    });
+    document.getElementById('share-form')?.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      if (!this.state.pendingShareEntry) return;
+      const errEl = document.getElementById('share-error');
+      errEl.hidden = true;
+      try {
+        const res = await createRevocableShareLink({
+          entrySnapshot: this.state.pendingShareEntry,
+          expiresInHours: Number(document.getElementById('share-expiry-select').value),
+          ghClient: this.gh,
+          zeroFootprint: this.state.zeroFootprint,
+          usePublicAppRepo: Boolean(
+            document.getElementById('share-public-repo-checkbox')?.checked
+          ),
+        });
+        document.getElementById('share-result-url').value = res.shareUrl;
+        document.getElementById('share-result-box').hidden = false;
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.hidden = false;
+      }
+    });
+    document.getElementById('share-copy-url-btn')?.addEventListener('click', () => {
+      const url = document.getElementById('share-result-url').value;
+      navigator.clipboard?.writeText(url).catch(() => {});
+      this.showToast('Zero-knowledge share link copied.', 'success');
+    });
+    document.getElementById('share-open-preview-btn')?.addEventListener('click', () => {
+      const url = document.getElementById('share-result-url').value;
+      const hash = url.slice(url.indexOf('#'));
+      const parsed = parseShareHash(hash);
+      if (parsed) {
+        document.getElementById('share-modal').hidden = true;
+        this.openSharedEntryViewer(parsed.shareId, parsed.keyB64Url);
+      }
+    });
+
+    document.getElementById('shared-viewer-exit-btn')?.addEventListener('click', () => {
+      document.getElementById('shared-viewer-overlay').hidden = true;
+      window.history.replaceState(null, '', '#today');
+      this.applyHashRoute();
+      this.renderActiveView();
+    });
+
+    // GitHub Sync Settings Modal
     document.getElementById('github-close-btn')?.addEventListener('click', () => {
       document.getElementById('github-modal').hidden = true;
     });
-    document.getElementById('gh-use-private-vault')?.addEventListener('change', (e) => {
-      document.getElementById('split-vault-fields').hidden = !e.target.checked;
+    document.getElementById('gh-use-private-vault')?.addEventListener('change', (ev) => {
+      document.getElementById('split-vault-fields').hidden = !ev.target.checked;
     });
-    document.getElementById('gh-use-media-sharding')?.addEventListener('change', (e) => {
-      document.getElementById('media-shard-fields').hidden = !e.target.checked;
+    document.getElementById('gh-use-media-sharding')?.addEventListener('change', (ev) => {
+      document.getElementById('media-shard-fields').hidden = !ev.target.checked;
     });
-    document.getElementById('gh-media-shard-pattern')?.addEventListener('input', (e) => {
+    document.getElementById('gh-media-shard-pattern')?.addEventListener('input', (ev) => {
       document.getElementById('gh-media-shard-preview').textContent =
-        `Active shard: ${resolveShardRepoName(e.target.value, new Date().getFullYear())}`;
+        `Active shard: ${resolveShardRepoName(ev.target.value, new Date().getFullYear())}`;
     });
-    document.getElementById('gh-zero-footprint-checkbox')?.addEventListener('change', (e) => {
-      this.setZeroFootprintMode(e.target.checked, true);
+    document.getElementById('gh-test-shard-btn')?.addEventListener('click', async () => {
+      const box = document.getElementById('gh-test-result');
+      box.hidden = false;
+      box.className = 'status-callout';
+      box.textContent = 'Testing current year media shard…';
+      try {
+        const res = await this.gh.testMediaShard(new Date().getFullYear());
+        box.className = 'status-callout is-ok';
+        box.textContent = `Connected to shard ${res.fullName} (push: ${res.canPush}).`;
+      } catch (err) {
+        box.className = 'status-callout is-err';
+        box.textContent = err.message;
+      }
     });
 
-    const readGithubFormConfig = () => ({
+    const readGitHubFormConfig = () => ({
       owner: document.getElementById('gh-owner-input').value.trim(),
       repo: document.getElementById('gh-repo-input').value.trim(),
       branch: document.getElementById('gh-branch-input').value.trim() || 'main',
       dataPath: document.getElementById('gh-datapath-input').value.trim() || 'data',
-      usePrivateVault: document.getElementById('gh-use-private-vault').checked,
+      usePrivateVault: Boolean(document.getElementById('gh-use-private-vault').checked),
       vaultOwner: document.getElementById('gh-vault-owner-input').value.trim(),
-      vaultRepo: document.getElementById('gh-vault-repo-input').value.trim() || 'perpetual-diary-vault',
+      vaultRepo:
+        document.getElementById('gh-vault-repo-input').value.trim() || 'perpetual-diary-vault',
       vaultBranch: document.getElementById('gh-vault-branch-input').value.trim() || 'main',
       vaultPath: document.getElementById('gh-vault-path-input').value.trim() || 'data',
-      useMediaSharding: document.getElementById('gh-use-media-sharding').checked,
-      mediaShardPattern: document.getElementById('gh-media-shard-pattern').value.trim() || 'diary-media-{year}',
-      mediaShardBranch: document.getElementById('gh-media-shard-branch').value.trim() || 'main',
+      useMediaSharding: Boolean(document.getElementById('gh-use-media-sharding').checked),
+      mediaShardPattern:
+        document.getElementById('gh-media-shard-pattern').value.trim() || 'diary-media-{year}',
+      mediaShardBranch:
+        document.getElementById('gh-media-shard-branch').value.trim() || 'main',
       token: document.getElementById('gh-token-input').value.trim(),
       tokenExpiresAt: document.getElementById('gh-token-expiry-input').value.trim(),
-      readFromApiWhenAuthed: document.getElementById('gh-read-api-checkbox').checked,
+      readFromApiWhenAuthed: Boolean(document.getElementById('gh-read-api-checkbox').checked),
     });
 
     document.getElementById('gh-test-btn')?.addEventListener('click', async () => {
@@ -5924,66 +5792,54 @@ class PerpetualDiaryApp {
       box.hidden = false;
       box.className = 'status-callout';
       box.textContent = 'Testing GitHub connection…';
+      this.gh.updateConfig(readGitHubFormConfig());
       try {
-        this.gh.updateConfig(readGithubFormConfig());
         const res = await this.gh.testConnection();
         box.className = 'status-callout is-ok';
-        box.textContent = `Connected to ${res.fullName} (${res.isPrivate ? 'Private' : 'Public'} · ${
-          res.canPush ? 'Read & Write verified' : 'Read-only'
-        }).`;
-        await this.refreshRepoHealthRadar();
+        box.textContent = `Connected to ${res.fullName} (${
+          res.isPrivate ? 'Private' : 'Public'
+        } · Write access: ${res.canPush ? 'Verified' : 'Read-only'}).`;
       } catch (err) {
         box.className = 'status-callout is-err';
-        box.textContent = err.message || 'Connection test failed.';
-      }
-    });
-
-    document.getElementById('gh-test-shard-btn')?.addEventListener('click', async () => {
-      const box = document.getElementById('gh-test-result');
-      box.hidden = false;
-      box.className = 'status-callout';
-      try {
-        this.gh.updateConfig(readGithubFormConfig());
-        const res = await this.gh.testMediaShard(new Date().getFullYear());
-        box.className = 'status-callout is-ok';
-        box.textContent = `Media shard ${res.fullName} verified (${res.canPush ? 'Writable' : 'Read-only'}).`;
-      } catch (err) {
-        box.className = 'status-callout is-err';
-        box.textContent = err.message || 'Media shard test failed.';
+        box.textContent = err.message;
       }
     });
 
     document.getElementById('github-form')?.addEventListener('submit', async (ev) => {
       ev.preventDefault();
-      this.gh.updateConfig(readGithubFormConfig());
+      const zf = Boolean(document.getElementById('gh-zero-footprint-checkbox').checked);
+      this.setZeroFootprintMode(zf, false);
+      this.gh.updateConfig(readGitHubFormConfig());
       this.saveGitHubConfigLocally();
-      this.updateModeBadge();
       document.getElementById('github-modal').hidden = true;
+      this.state.dayCache = {};
       await this.loadVaultAndIndex();
+      this.updateModeBadge();
       if (this.state.unlocked) await this.renderActiveView();
       this.showToast('GitHub sync settings saved.', 'success');
     });
 
     document.getElementById('gh-clear-token-btn')?.addEventListener('click', () => {
-      this.gh.updateConfig({ token: '' });
       document.getElementById('gh-token-input').value = '';
+      this.gh.updateConfig({ token: '' });
       this.saveGitHubConfigLocally();
       this.updateModeBadge();
-      this.showToast('GitHub token cleared.', 'info');
+      this.showToast('GitHub PAT cleared.', 'info');
     });
 
     document.getElementById('gh-wipe-local-btn')?.addEventListener('click', async () => {
       const ok = await this.openConfirm({
         title: 'Wipe All Local Browser Traces',
-        message: 'This erases all localStorage keys, sessionStorage, Service Worker caches, and IndexedDB media from this browser. Remote GitHub data is untouched.',
-        confirmLabel: 'Wipe Local Traces',
+        message:
+          'Clears localStorage, sessionStorage, Service Worker caches, and IndexedDB media from this browser. Remote GitHub data is untouched.',
+        confirmLabel: 'Wipe Browser Traces',
       });
       if (!ok) return;
       await this.wipeAllLocalBrowserTraces();
-      this.showToast('All local browser storage & caches wiped.', 'success');
+      this.showToast('All local browser traces wiped.', 'success');
     });
 
-    // Vault Modal Events
+    // Vault & Encryption Modal
     document.getElementById('vault-close-btn')?.addEventListener('click', () => {
       document.getElementById('vault-modal').hidden = true;
     });
@@ -5995,18 +5851,21 @@ class PerpetualDiaryApp {
       ev.preventDefault();
       const errEl = document.getElementById('vault-error');
       errEl.hidden = true;
-      const enabled = document.getElementById('vault-lock-enabled-checkbox').checked;
+
+      const enabled = Boolean(document.getElementById('vault-lock-enabled-checkbox').checked);
       const autoLockMinutes = Number(document.getElementById('vault-autolock-select').value) || 0;
       const curPass = document.getElementById('vault-current-password').value;
       const newPass = document.getElementById('vault-new-password').value;
-      const confPass = document.getElementById('vault-confirm-password').value;
-      const encryptPat = document.getElementById('vault-encrypt-pat-checkbox').checked;
+      const confirmPass = document.getElementById('vault-confirm-password').value;
+      const encryptPat = Boolean(document.getElementById('vault-encrypt-pat-checkbox').checked);
+
+      if (newPass && newPass !== confirmPass) {
+        errEl.textContent = 'New password and confirmation do not match.';
+        errEl.hidden = false;
+        return;
+      }
 
       try {
-        if (newPass && newPass !== confPass) {
-          throw new Error('New password and confirmation do not match.');
-        }
-
         if (!this.hasConfiguredVault()) {
           if (!newPass || newPass.length < 4) {
             throw new Error('Master password must be at least 4 characters.');
@@ -6017,38 +5876,46 @@ class PerpetualDiaryApp {
             patToken: encryptPat ? this.gh.config.token : null,
           });
           this.setActiveKeyring(created.keyring);
+          this.state.unlocked = true;
           await this.persistVaultMeta(created.vaultMeta, 'diary: initialize v2 envelope vault');
         } else if (newPass) {
-          const rotated = this.hasActiveSessionKey() && Number(this.state.vaultMeta?.version) === 2
-            ? await rotateVaultPasswordWithKeyring(this.state.vaultMeta, this.state.keyring, newPass, {
+          const rotated = curPass
+            ? await rotateVaultPassword(this.state.vaultMeta, curPass, newPass, {
                 enabled,
                 autoLockMinutes,
                 encryptPat,
                 patToken: this.gh.config.token,
               })
-            : await rotateVaultPassword(this.state.vaultMeta, curPass, newPass, {
-                enabled,
-                autoLockMinutes,
-                encryptPat,
-                patToken: this.gh.config.token,
-              });
+            : await rotateVaultPasswordWithKeyring(
+                this.state.vaultMeta,
+                this.state.keyring,
+                newPass,
+                {
+                  enabled,
+                  autoLockMinutes,
+                  encryptPat,
+                  patToken: this.gh.config.token,
+                }
+              );
           this.setActiveKeyring(rotated.keyring);
-          await this.persistVaultMeta(rotated.vaultMeta, 'diary: rotate vault password slot');
+          await this.persistVaultMeta(rotated.vaultMeta, 'diary: rotate master password');
         } else {
-          const encryptedPat =
-            encryptPat && this.gh.config.token && this.hasActiveSessionKey()
-              ? await encryptPatToken(this.gh.config.token, this.state.keyring || this.state.cryptoKey)
-              : encryptPat
-                ? this.state.vaultMeta.encryptedPat
-                : null;
-          const nextVault = {
+          const nextMeta = {
             ...this.state.vaultMeta,
             enabled,
             autoLockMinutes,
-            encryptedPat,
+            encryptedPat:
+              encryptPat && this.gh.config.token && this.hasActiveSessionKey()
+                ? await encryptPatToken(
+                    this.gh.config.token,
+                    this.state.keyring || this.state.cryptoKey
+                  )
+                : encryptPat
+                  ? this.state.vaultMeta.encryptedPat || null
+                  : null,
             updatedAt: new Date().toISOString(),
           };
-          await this.persistVaultMeta(nextVault, 'diary: update vault policy');
+          await this.persistVaultMeta(nextMeta, 'diary: update vault policy');
         }
 
         this.state.autoLockMinutes = autoLockMinutes;
@@ -6058,35 +5925,61 @@ class PerpetualDiaryApp {
         document.getElementById('vault-modal').hidden = true;
         this.showToast('Vault settings saved.', 'success');
       } catch (err) {
-        errEl.textContent = err.message || 'Failed to save vault settings.';
+        errEl.textContent = err.message || 'Vault save failed.';
         errEl.hidden = false;
       }
     });
 
     document.getElementById('vault-disable-btn')?.addEventListener('click', async () => {
       if (!this.state.vaultMeta) return;
-      const nextVault = {
+      const nextMeta = {
         ...this.state.vaultMeta,
         enabled: false,
         updatedAt: new Date().toISOString(),
       };
-      await this.persistVaultMeta(nextVault, 'diary: disable lock screen');
+      await this.persistVaultMeta(nextMeta, 'diary: disable lock screen');
       document.getElementById('vault-modal').hidden = true;
-      this.showToast('Lock Screen disabled.', 'info');
+      this.showToast('Lock screen disabled.', 'info');
     });
 
     document.getElementById('vault-upgrade-btn')?.addEventListener('click', async () => {
       const curPass = document.getElementById('vault-current-password').value;
+      const errEl = document.getElementById('vault-error');
+      errEl.hidden = true;
       try {
-        const upg = await upgradeLegacyVaultToEnvelope(this.state.vaultMeta, curPass, {
+        const res = await upgradeLegacyVaultToEnvelope(this.state.vaultMeta, curPass, {
           patToken: this.gh.config.token,
         });
-        this.setActiveKeyring(upg.keyring);
-        await this.persistVaultMeta(upg.vaultMeta, 'diary: upgrade vault to v2 envelope');
+        this.setActiveKeyring(res.keyring);
+        await this.persistVaultMeta(res.vaultMeta, 'diary: upgrade to v2 envelope vault');
         this.openVaultModal();
-        this.showToast('Upgraded to v2 Envelope Cryptography!', 'success');
+        this.showToast('Upgraded to v2 Envelope Encryption.', 'success');
       } catch (err) {
-        this.showToast(err.message || 'Upgrade failed.', 'error');
+        errEl.textContent = err.message;
+        errEl.hidden = false;
+      }
+    });
+
+    document.getElementById('vault-upgrade-argon2-btn')?.addEventListener('click', async () => {
+      const curPass = document.getElementById('vault-current-password').value;
+      const presetKey = document.getElementById('vault-argon2-preset').value;
+      const preset = ARGON2ID_PRESETS[presetKey] || ARGON2ID_PRESETS.balanced;
+      const statusEl = document.getElementById('vault-argon2-status');
+      statusEl.hidden = false;
+      statusEl.textContent = 'Deriving Argon2id slot in background Web Worker…';
+      try {
+        const res = await upgradePasswordSlotKdf(this.state.vaultMeta, curPass, {
+          kdf: 'Argon2id',
+          memoryKiB: preset.memoryKiB,
+          timeCost: preset.timeCost,
+        });
+        this.setActiveKeyring(res.keyring);
+        await this.persistVaultMeta(res.vaultMeta, 'diary: upgrade password slot to Argon2id');
+        statusEl.textContent = `Upgraded to ${preset.label}.`;
+        this.openVaultModal();
+        this.showToast('Password slot upgraded to Argon2id.', 'success');
+      } catch (err) {
+        statusEl.textContent = err.message;
       }
     });
 
@@ -6098,16 +5991,17 @@ class PerpetualDiaryApp {
         document.getElementById('vault-recovery-code-display').textContent = res.recoveryCode;
         document.getElementById('vault-recovery-code-box').hidden = false;
         document.getElementById('vault-print-card-btn').disabled = false;
-        this.renderVaultSlotsList(res.vaultMeta);
-        this.showToast('256-bit Paper Recovery Key generated — print or save it now!', 'success');
+        this.showToast('256-bit Paper Recovery Key generated — print or store it safely.', 'success');
       } catch (err) {
-        this.showToast(err.message || 'Could not generate recovery key.', 'error');
+        this.showToast(err.message, 'error');
       }
     });
 
     document.getElementById('vault-print-card-btn')?.addEventListener('click', () => {
+      if (!this.state.recentRecoveryCode) return;
       openPrintableRecoveryCard({
-        recoveryCode: this.state.recentRecoveryCode || '',
+        recoveryCode: this.state.recentRecoveryCode,
+        dekFingerprint: this.state.vaultMeta?.dekFingerprint || '',
         vaultMeta: this.state.vaultMeta,
         repoConfig: this.gh.config,
       });
@@ -6118,60 +6012,14 @@ class PerpetualDiaryApp {
         vaultMeta: this.state.vaultMeta,
         repoConfig: this.gh.config,
       });
-      this.triggerFileDownload('perpetual-offline-decryptor.html', html, 'text/html');
-    });
-
-    document.getElementById('vault-migrate-entries-btn')?.addEventListener('click', async () => {
-      const statusEl = document.getElementById('vault-migrate-status');
-      statusEl.hidden = false;
-      statusEl.textContent = 'Scanning entries for v1/v2 → v3 AAD upgrade…';
-      try {
-        const dayKeys = Object.keys(this.state.indexData.days || {}).sort();
-        let upgraded = 0;
-        for (const dayStr of dayKeys) {
-          const doc = await this.getDayDocument(dayStr, true);
-          let dirty = false;
-          for (const [yrKey, slot] of Object.entries(doc.entries || {})) {
-            const list = getYearEntriesList(slot, yrKey, dayStr);
-            for (const entry of list) {
-              if (!entry.encrypted) continue;
-              const ver = getPayloadVersion(entry.body);
-              if (ver === 1 || ver === 2) {
-                const expectedDate = `${yrKey}-${dayStr}`;
-                const plainBody = await this.decryptFieldIfNeeded(entry.body, true);
-                const plainTitle = entry.title ? await this.decryptFieldIfNeeded(entry.title, true) : '';
-                if (plainBody !== null) {
-                  entry.body = await encryptText(
-                    plainBody,
-                    this.state.keyring,
-                    buildEntryAad(expectedDate, yrKey, 'body')
-                  );
-                  if (plainTitle) {
-                    entry.title = await encryptText(
-                      plainTitle,
-                      this.state.keyring,
-                      buildEntryAad(expectedDate, yrKey, 'title')
-                    );
-                  }
-                  entry.updatedAt = new Date().toISOString();
-                  dirty = true;
-                  upgraded += 1;
-                }
-              }
-            }
-            if (list.length > 0) {
-              doc.entries[yrKey] = list.length === 1 ? list[0] : list;
-            }
-          }
-          if (dirty) {
-            await this.persistDayDocument(dayStr, doc, `diary: upgrade ${dayStr} entries to v3 AAD`);
-          }
-        }
-        statusEl.textContent = `Completed: upgraded ${upgraded} entry/entries to v3 AAD.`;
-        this.showToast(`Upgraded ${upgraded} entries to v3 AAD.`, 'success');
-      } catch (err) {
-        statusEl.textContent = err.message || 'Batch AAD upgrade failed.';
-      }
+      const a = document.createElement('a');
+      const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+      a.href = url;
+      a.download = `perpetual-offline-decryptor-${getTodayIsoDate()}.html`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1500);
     });
 
     document.getElementById('vault-migrate-media-btn')?.addEventListener('click', async () => {
@@ -6186,9 +6034,8 @@ class PerpetualDiaryApp {
         });
         statusEl.textContent = `Encrypted ${res.encryptedCount} photo(s) across ${res.updatedDays} day(s).`;
         this.showToast(`Encrypted ${res.encryptedCount} photo(s) into .enc vault.`, 'success');
-        await this.renderActiveView();
       } catch (err) {
-        statusEl.textContent = err.message || 'Media encryption migration failed.';
+        statusEl.textContent = err.message;
       }
     });
 
@@ -6204,23 +6051,26 @@ class PerpetualDiaryApp {
         });
         statusEl.textContent = `Cloaked ${res.migratedDays} day(s) into HMAC shards + index.enc.`;
         this.updateModeBadge();
-        this.showToast('Repository migrated to Metadata Cloaking!', 'success');
+        this.openVaultModal();
+        this.showToast('Repository migrated to Metadata Cloaking.', 'success');
       } catch (err) {
-        statusEl.textContent = err.message || 'Metadata cloaking migration failed.';
+        statusEl.textContent = err.message;
       }
     });
 
     document.getElementById('vault-register-passkey-btn')?.addEventListener('click', async () => {
       try {
-        const label = document.getElementById('vault-passkey-label-input').value.trim();
-        const res = await registerPasskeySlot(this.state.vaultMeta, this.state.keyring, { label });
+        const label =
+          document.getElementById('vault-passkey-label-input').value.trim() ||
+          'Biometric Passkey';
+        const res = await registerPasskeySlot(this.state.vaultMeta, this.state.keyring, {
+          label,
+        });
         await this.persistVaultMeta(res.vaultMeta, 'diary: enroll biometric passkey slot');
-        document.getElementById('vault-passkey-label-input').value = '';
-        this.renderPasskeySlotsList(res.vaultMeta);
-        this.renderVaultSlotsList(res.vaultMeta);
-        this.showToast('Biometric / Passkey enrolled!', 'success');
+        this.openVaultModal();
+        this.showToast(`Enrolled passkey "${label}".`, 'success');
       } catch (err) {
-        this.showToast(err.message || 'Passkey enrollment failed.', 'error');
+        this.showToast(err.message, 'error');
       }
     });
 
@@ -6232,234 +6082,72 @@ class PerpetualDiaryApp {
         return;
       }
       try {
-        const res = await configureDecoyVault(this.state.vaultMeta, p1, {
-          includePlaintext: document.getElementById('vault-decoy-include-plain').checked,
-        });
-        await this.persistVaultMeta(res.vaultMeta, 'diary: update vault profile metadata');
+        const includePlaintext = Boolean(
+          document.getElementById('vault-decoy-include-plain').checked
+        );
+        const res = await configureDecoyVault(this.state.vaultMeta, p1, { includePlaintext });
+        await this.persistVaultMeta(res.vaultMeta, 'diary: update vault profile');
         document.getElementById('vault-decoy-password').value = '';
         document.getElementById('vault-decoy-confirm').value = '';
         this.openVaultModal();
-        this.showToast('Plausible Deniability Decoy Vault configured.', 'success');
+        this.showToast('Decoy vault profile saved.', 'success');
       } catch (err) {
-        this.showToast(err.message || 'Failed to configure Decoy Vault.', 'error');
+        this.showToast(err.message, 'error');
       }
     });
 
     document.getElementById('vault-remove-decoy-btn')?.addEventListener('click', async () => {
-      const nextVault = removeDecoyVault(this.state.vaultMeta);
-      await this.persistVaultMeta(nextVault, 'diary: remove secondary profile');
+      const next = removeDecoyVault(this.state.vaultMeta);
+      await this.persistVaultMeta(next, 'diary: remove secondary vault profile');
       this.openVaultModal();
-      this.showToast('Decoy Vault removed.', 'info');
+      this.showToast('Decoy profile removed.', 'info');
     });
 
-    document.getElementById('vault-upgrade-argon2-btn')?.addEventListener('click', async () => {
-      const curPass = document.getElementById('vault-current-password').value;
-      const presetKey = document.getElementById('vault-argon2-preset').value || 'balanced';
-      const preset = ARGON2ID_PRESETS[presetKey] || ARGON2ID_PRESETS.balanced;
-      const statusEl = document.getElementById('vault-argon2-status');
-      statusEl.hidden = false;
-      statusEl.textContent = `Deriving ${preset.label} in Web Worker…`;
-      try {
-        const res = await upgradePasswordSlotKdf(this.state.vaultMeta, curPass, {
-          kdf: 'Argon2id',
-          memoryKiB: preset.memoryKiB,
-          timeCost: preset.timeCost,
-        });
-        this.setActiveKeyring(res.keyring);
-        await this.persistVaultMeta(res.vaultMeta, 'diary: upgrade password slot to Argon2id');
-        statusEl.textContent = `Upgraded Master Password slot to ${preset.label}!`;
-        this.openVaultModal();
-        this.showToast('Password slot upgraded to memory-hard Argon2id!', 'success');
-      } catch (err) {
-        statusEl.textContent = err.message || 'Argon2id upgrade failed.';
-      }
-    });
-
-    // 3-Way Conflict Resolver Events
-    document.getElementById('conflict-close-btn')?.addEventListener('click', () => {
-      document.getElementById('conflict-modal').hidden = true;
-    });
-    document.getElementById('conflict-cancel-btn')?.addEventListener('click', () => {
-      document.getElementById('conflict-modal').hidden = true;
-      document.getElementById('composer-modal').hidden = false;
-    });
-    document.getElementById('conflict-pick-local-btn')?.addEventListener('click', () => {
-      if (this.state.activeConflict) {
-        document.getElementById('conflict-merged-body').value = this.state.activeConflict.localPlain.body;
-      }
-    });
-    document.getElementById('conflict-pick-remote-btn')?.addEventListener('click', () => {
-      if (this.state.activeConflict) {
-        document.getElementById('conflict-merged-body').value = this.state.activeConflict.remotePlain.body;
-      }
-    });
-    document.getElementById('conflict-pick-merge-btn')?.addEventListener('click', () => {
-      const ctx = this.state.activeConflict;
-      if (!ctx) return;
-      const m = buildThreeWayMerge(ctx.basePlain.body, ctx.localPlain.body, ctx.remotePlain.body);
-      document.getElementById('conflict-merged-body').value = m.mergedText;
-    });
-    document.getElementById('conflict-form')?.addEventListener('submit', (e) => this.handleConflictCommit(e));
-
-    // Git Revision Time Machine Events
-    document.getElementById('history-close-btn')?.addEventListener('click', () => {
-      document.getElementById('history-modal').hidden = true;
-    });
-    document.getElementById('history-cancel-btn')?.addEventListener('click', () => {
-      document.getElementById('history-modal').hidden = true;
-    });
-    document.querySelectorAll('#history-view-toggle .seg-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const mode = btn.dataset.historyMode;
-        this.state.historyViewMode = mode;
-        document.querySelectorAll('#history-view-toggle .seg-btn').forEach((b) => {
-          b.classList.toggle('is-active', b === btn);
-        });
-        document.getElementById('history-diff-viewer').hidden = mode !== 'diff';
-        document.getElementById('history-snapshot-viewer').hidden = mode !== 'snapshot';
-      });
-    });
-    document.getElementById('history-restore-btn')?.addEventListener('click', () => {
-      const ctx = this.state.activeHistory;
-      if (!ctx?.selectedSnapshot) return;
-      document.getElementById('history-modal').hidden = true;
-      this.openComposer({
-        editEntry: ctx.selectedSnapshot,
-        dayStr: ctx.dayStr,
-        yearKey: ctx.yearKey,
-      });
-      this.showToast('Historical revision loaded into Composer — review & save to commit.', 'info');
-    });
-
-    // Cross-Device Drafts Modal Events
-    document.getElementById('drafts-close-btn')?.addEventListener('click', () => {
-      document.getElementById('drafts-modal').hidden = true;
-    });
-    document.getElementById('drafts-done-btn')?.addEventListener('click', () => {
-      document.getElementById('drafts-modal').hidden = true;
-    });
-    document.getElementById('drafts-refresh-btn')?.addEventListener('click', () => this.openDraftsModal());
-    document.getElementById('drafts-new-btn')?.addEventListener('click', () => {
-      document.getElementById('drafts-modal').hidden = true;
-      this.openComposer({ presetDate: getTodayIsoDate() });
-    });
-
-    // Zero-Knowledge Share Modal Events
-    document.getElementById('share-close-btn')?.addEventListener('click', () => {
-      document.getElementById('share-modal').hidden = true;
-    });
-    document.getElementById('share-cancel-btn')?.addEventListener('click', () => {
-      document.getElementById('share-modal').hidden = true;
-    });
-    document.getElementById('share-form')?.addEventListener('submit', async (ev) => {
-      ev.preventDefault();
-      const errEl = document.getElementById('share-error');
-      errEl.hidden = true;
-      try {
-        const res = await createRevocableShareLink({
-          entrySnapshot: this.state.pendingShareEntry,
-          expiresInHours: Number(document.getElementById('share-expiry-select').value),
-          ghClient: this.gh,
-          zeroFootprint: this.state.zeroFootprint,
-          usePublicAppRepo: document.getElementById('share-public-repo-checkbox').checked,
-        });
-        document.getElementById('share-result-url').value = res.shareUrl;
-        document.getElementById('share-result-box').hidden = false;
-        this.showToast('Zero-knowledge share link generated!', 'success');
-      } catch (err) {
-        errEl.textContent = err.message || 'Could not generate share link.';
-        errEl.hidden = false;
-      }
-    });
-    document.getElementById('share-copy-url-btn')?.addEventListener('click', async () => {
-      const val = document.getElementById('share-result-url').value;
-      if (val) {
-        await navigator.clipboard.writeText(val).catch(() => {});
-        this.showToast('Share link copied to clipboard.', 'success');
-      }
-    });
-    document.getElementById('share-open-preview-btn')?.addEventListener('click', () => {
-      const val = document.getElementById('share-result-url').value;
-      const hashIdx = val.indexOf('#');
-      if (hashIdx !== -1) {
-        const parsed = parseShareHash(val.slice(hashIdx));
-        if (parsed) {
-          document.getElementById('share-modal').hidden = true;
-          this.openSharedEntryViewer(parsed.shareId, parsed.keyB64Url);
-        }
-      }
-    });
-    document.getElementById('shared-viewer-exit-btn')?.addEventListener('click', () => {
-      document.getElementById('shared-viewer-overlay').hidden = true;
-      window.history.replaceState(null, '', '#today');
-      this.applyHashRoute();
-      if (this.state.unlocked) this.renderActiveView();
-    });
-
-    // Command Palette (`Ctrl+K`) Events
-    document.getElementById('cmdk-modal')?.addEventListener('click', (e) => {
-      if (e.target.id === 'cmdk-modal') e.target.hidden = true;
-    });
-    document.getElementById('cmdk-input')?.addEventListener('input', (e) => {
+    // Command Palette Input & Keyboard Navigation
+    document.getElementById('cmdk-input')?.addEventListener('input', (ev) => {
       this.state.cmdkSelectedIndex = 0;
-      this.renderCommandPaletteResults(e.target.value);
+      this.renderCommandPaletteResults(ev.target.value);
     });
-    document.getElementById('cmdk-input')?.addEventListener('keydown', (e) => {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        this.state.cmdkSelectedIndex = Math.min(
-          this.state.cmdkItems.length - 1,
-          this.state.cmdkSelectedIndex + 1
-        );
-        this.renderCommandPaletteResults(e.target.value);
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        this.state.cmdkSelectedIndex = Math.max(0, this.state.cmdkSelectedIndex - 1);
-        this.renderCommandPaletteResults(e.target.value);
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        const picked = this.state.cmdkItems[this.state.cmdkSelectedIndex];
+    document.getElementById('cmdk-input')?.addEventListener('keydown', (ev) => {
+      const items = this.state.cmdkItems || [];
+      if (ev.key === 'ArrowDown') {
+        ev.preventDefault();
+        this.state.cmdkSelectedIndex = (this.state.cmdkSelectedIndex + 1) % Math.max(1, items.length);
+        this.renderCommandPaletteResults(ev.target.value);
+      } else if (ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        this.state.cmdkSelectedIndex =
+          (this.state.cmdkSelectedIndex - 1 + Math.max(1, items.length)) %
+          Math.max(1, items.length);
+        this.renderCommandPaletteResults(ev.target.value);
+      } else if (ev.key === 'Enter' && items[this.state.cmdkSelectedIndex]) {
+        ev.preventDefault();
         document.getElementById('cmdk-modal').hidden = true;
-        if (picked && typeof picked.run === 'function') picked.run();
+        items[this.state.cmdkSelectedIndex].run();
       }
     });
+    document.getElementById('cmdk-modal')?.addEventListener('click', (ev) => {
+      if (ev.target.id === 'cmdk-modal') ev.target.hidden = true;
+    });
 
-    // Confirmation Dialog Events
-    document.getElementById('confirm-close-btn')?.addEventListener('click', () => this.closeConfirm(false));
-    document.getElementById('confirm-cancel-btn')?.addEventListener('click', () => this.closeConfirm(false));
-    document.getElementById('confirm-ok-btn')?.addEventListener('click', () => this.closeConfirm(true));
-  }
-
-  finalizeVoiceRecording(result) {
-    document.getElementById('voice-record-btn').hidden = false;
-    document.getElementById('voice-stop-btn').hidden = true;
-    document.getElementById('voice-meter-fill').style.width = '0%';
-    if (!result) return;
-
-    this.state.entryDraftVoice = {
-      durationSec: result.durationSec,
-      _previewUrl: result.previewUrl,
-      _pendingBuffer: result.arrayBuffer,
-      _mime: result.mime,
-      _ext: result.ext,
-    };
-
-    const audioEl = document.getElementById('voice-draft-preview');
-    audioEl.src = result.previewUrl;
-    audioEl.hidden = false;
-    document.getElementById('voice-remove-btn').hidden = false;
-    document.getElementById('voice-timer').textContent = formatDurationSec(result.durationSec);
-    this.showToast(
-      `Voice note recorded (${formatDurationSec(result.durationSec)} · ${formatBytesCompact(
-        result.size
-      )}).`,
-      'success'
+    // Confirmation Dialog
+    document.getElementById('confirm-close-btn')?.addEventListener('click', () =>
+      this.closeConfirm(false)
+    );
+    document.getElementById('confirm-cancel-btn')?.addEventListener('click', () =>
+      this.closeConfirm(false)
+    );
+    document.getElementById('confirm-ok-btn')?.addEventListener('click', () =>
+      this.closeConfirm(true)
     );
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', () => {
   const app = new PerpetualDiaryApp();
-  window.perpetualDiaryApp = app;
-  app.init();
+  window.perpetualDiary = app;
+  app.init().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error('PerpetualDiary initialization error:', err);
+  });
 });
