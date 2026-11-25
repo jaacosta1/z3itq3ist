@@ -154,7 +154,7 @@
             type="button"
             id="open-cmdk-btn"
             class="btn btn-ghost btn-sm"
-            title="Command Palette (Ctrl+K / Cmd+K)"
+            title="Command Palette (Ctrl+K / Cmd+K) — or right-click anywhere for shortcuts"
           >
             ⌘K
           </button>
@@ -314,7 +314,7 @@
           <!-- Mobile Year Tabs Bar -->
           <div id="mobile-year-tabs" class="mobile-year-tabs" role="tablist" hidden></div>
 
-          <!-- Parallel Side-by-Side Columns Stage -->
+          <!-- Parallel Side-by-Side Columns Stage (Supports Stacked Multi-Entries per Year) -->
           <div id="columns-stage" class="columns-stage col-mode-fit" tabindex="0"></div>
 
           <!-- Per-Day Margin Comments & Quoted Passages -->
@@ -323,7 +323,7 @@
               <div>
                 <h3 id="comments-heading" class="section-heading">Day Margin Notes &amp; Quotes</h3>
                 <p class="section-subtext">
-                  Highlight any sentence in a year column to quote it here, or add a dated reflection note.
+                  Highlight any sentence in a year column to quote it here (or right-click anywhere for quick shortcuts).
                 </p>
               </div>
               <span id="comments-total-label" class="mono-meta">0 NOTES</span>
@@ -441,7 +441,7 @@
           </div>
           <div id="heatmap-grid" class="heatmap-grid"></div>
           <div id="heatmap-hover-readout" class="heatmap-readout mono-meta">
-            Hover or focus a day cell to inspect recorded years.
+            Hover or focus a day cell to inspect recorded years (right-click any cell for quick actions).
           </div>
         </section>
 
@@ -493,13 +493,13 @@
           <div id="archive-results" class="archive-results"></div>
         </section>
 
-        <!-- VIEW 4: PHASE 13 & 15 — ANALYTICS, YEAR-IN-REVIEW DOSSIER & STORY ARCS -->
-        <section id="view-analytics" class="view-section" aria-label="Insights, Year-in-Review and Story Arcs">
+        <!-- VIEW 4: ANALYTICS, WORD TREND EXPLORER, YEAR-IN-REVIEW DOSSIER & STORY ARCS -->
+        <section id="view-analytics" class="view-section" aria-label="Insights, Word Trends, Year-in-Review and Story Arcs">
           <div class="section-top-bar">
             <div>
-              <h2 class="section-heading">Longitudinal Insights &amp; Story Arcs</h2>
+              <h2 class="section-heading">Longitudinal Insights, Word Trends &amp; Story Arcs</h2>
               <p class="section-subtext">
-                Word velocity, mood patterns, automatic Year-in-Review Dossiers, and chronological Story Arc books (tag entries with <code>arc:project-name</code>).
+                Track recurring words across years, word velocity, mood patterns, Year-in-Review Dossiers, and chronological Story Arc books (<code>arc:project-name</code>).
               </p>
             </div>
             <button type="button" id="analytics-load-all-btn" class="btn btn-outline btn-sm">
@@ -518,6 +518,31 @@
               <div class="mono-label">DOMINANT MOODS MATRIX</div>
               <div id="analytics-moods-chart" class="bar-chart-list"></div>
             </div>
+          </div>
+
+          <!-- Word & Phrase Trend Explorer -->
+          <div class="analytics-card" style="margin-bottom: 1.25rem;">
+            <div class="section-top-bar" style="margin-bottom: 0.75rem;">
+              <div>
+                <div class="mono-label">WORD &amp; PHRASE TREND EXPLORER</div>
+                <h3 class="section-heading" style="font-size: 1.2rem;">Vocabulary Trajectory Across Years</h3>
+              </div>
+              <span id="word-trend-summary-meta" class="mono-meta">Type a word or click a top keyword chip</span>
+            </div>
+            <div class="word-trend-search-row">
+              <input
+                type="search"
+                id="word-trend-input"
+                class="input-text"
+                placeholder="Track any word or phrase across years (e.g., coffee, morning, craft, quiet)..."
+              />
+              <button type="button" id="word-trend-clear-btn" class="btn btn-ghost btn-sm">
+                Clear
+              </button>
+            </div>
+            <div id="word-trend-chips" class="word-trend-chips"></div>
+            <div id="word-trend-chart" class="bar-chart-list"></div>
+            <div id="word-trend-matches" class="word-trend-matches"></div>
           </div>
 
           <!-- Year-in-Review Auto-Dossier -->
@@ -565,6 +590,15 @@
         </section>
       </main>
     </div>
+
+    <!-- Custom Right-Click Context Shortcut Menu -->
+    <div
+      id="context-shortcut-menu"
+      class="context-shortcut-menu"
+      role="menu"
+      aria-label="Quick Shortcut Menu"
+      hidden
+    ></div>
 
     <!-- Floating Highlight-to-Quote Pill -->
     <button type="button" id="selection-quote-pill" class="selection-quote-pill" hidden>
@@ -1529,3 +1563,10 @@
     <script type="module" src="js/app.js"></script>
   </body>
 </html>
+```
+
+**File 4 of 5 (`index.html`) is complete!**
+- Added the **Word & Phrase Trend Explorer** card (`#word-trend-input`, `#word-trend-chips`, `#word-trend-chart`, `#word-trend-matches`) inside **Insights & Arcs**.
+- Added the **Custom Right-Click Context Shortcut Menu** container (`#context-shortcut-menu`) right above the selection pill.
+
+Reply **"5"** (or **"next"**) for the final file — **File 5 of 5: `js/app.js`** (wiring Stacked Multi-Entries per day, Word Trend Explorer, and Context-Aware Right-Click Shortcuts).
