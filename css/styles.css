@@ -76,3 +76,65 @@
   border-radius: var(--radius-sm);
   padding: 0.5rem 0.65rem;
 }
+/* Phase 2: Envelope Encryption (DEK/KEK Key Slots & Legacy Migration) */
+.vault-arch-panel {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.vault-arch-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.vault-slots-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.vault-slot-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  padding: 0.55rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  font-size: 0.84rem;
+}
+
+.vault-upgrade-callout {
+  border: 1px solid rgba(224, 179, 84, 0.35);
+  background: rgba(224, 179, 84, 0.08);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem;
+  margin-bottom: 0.9rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.vault-upgrade-callout .section-subtext {
+  margin-top: 0.25rem;
+  max-width: 44ch;
+}
+
+@media (max-width: 768px) {
+  .columns-stage.mobile-mode-tabs .year-column.mobile-tab-hidden {
+    display: none;
+  }
+}
