@@ -10,8 +10,10 @@ import {
   buildMediaAad,
   isEncryptedMediaPath,
 } from './crypto.js';
+import { isShardPointer, parseShardPointer } from './media-sharding.js';
 
 export const WEBP_PRESETS = Object.freeze({
+  thumb: { maxDim: 480, quality: 0.6, label: 'Thumbnail (480px · ~30 KB)' },
   compact: { maxDim: 960, quality: 0.65, label: 'Compact (960px · 65%)' },
   balanced: { maxDim: 1200, quality: 0.74, label: 'Balanced (1200px · 74%)' },
   high: { maxDim: 1600, quality: 0.82, label: 'High Detail (1600px · 82%)' },
@@ -435,6 +437,64 @@ export async function fetchRawMediaBytes(src, ghClient, mediaStore = null) {
     };
   }
 
+  // Phase 7: Resolve yearly/era sibling media-repo shard pointers (`gh:<repo>/<subpath>`)
+  if (isShardPointer(src)) {
+    const dataTarget = ghClient?.getDataTarget
+      ? ghClient.getDataTarget()
+      : { owner: '', branch: 'main' };
+    const shard = parseShardPointer(
+      src,
+      dataTarget.owner,
+      ghClient?.config?.mediaShardBranch || 'main'
+    );
+    if (!shard || !shard.owner || !shard.repo) {
+      throw new Error(`Invalid media shard pointer: ${src}`);
+    }
+
+    const encodedPath = shard.subpath.split('/').map(encodeURIComponent).join('/');
+    const headers = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    };
+    const tokenVal = ghClient?.config?.token || ghClient?.token || '';
+    if (tokenVal) {
+      headers.Authorization = `Bearer ${String(tokenVal).trim()}`;
+    }
+
+    const metaUrl = `https://api.github.com/repos/${encodeURIComponent(
+      shard.owner
+    )}/${encodeURIComponent(shard.repo)}/contents/${encodedPath}?ref=${encodeURIComponent(
+      shard.branch
+    )}&_t=${Date.now()}`;
+
+    const res = await fetch(metaUrl, { headers, cache: 'no-store' });
+    if (!res.ok) {
+      throw new Error(
+        `Failed to load sharded media (${res.status}): ${shard.repo}/${shard.subpath}`
+      );
+    }
+    const meta = await res.json();
+    let b64 = meta?.content ? String(meta.content).replace(/\s+/g, '') : '';
+
+    if (!b64 && meta?.sha) {
+      const blobUrl = `https://api.github.com/repos/${encodeURIComponent(
+        shard.owner
+      )}/${encodeURIComponent(shard.repo)}/git/blobs/${encodeURIComponent(meta.sha)}`;
+      const blobRes = await fetch(blobUrl, { headers, cache: 'no-store' });
+      if (!blobRes.ok) throw new Error(`Failed to fetch large sharded blob (${blobRes.status}).`);
+      const blobJson = await blobRes.json();
+      b64 = String(blobJson?.content || '').replace(/\s+/g, '');
+    }
+
+    if (!b64) return null;
+    return {
+      bytes: base64ToBytes(b64),
+      mime: mimeFromPath(shard.subpath),
+      subpath: shard.subpath,
+      sha: meta.sha || null,
+    };
+  }
+
   if (/^https?:\/\//i.test(src)) {
     const res = await fetch(src, { cache: 'no-store' });
     if (!res.ok) throw new Error(`Failed to fetch external media (${res.status}).`);
@@ -575,7 +635,13 @@ export async function resolveMediaAsset(
     const hasToken = Boolean(
       ghClient && typeof ghClient.hasToken === 'function' && ghClient.hasToken()
     );
-    if (!isEnc && !src.startsWith('idb:') && !src.startsWith('idb://') && !hasToken) {
+    if (
+      !isEnc &&
+      !src.startsWith('idb:') &&
+      !src.startsWith('idb://') &&
+      !isShardPointer(src) &&
+      !hasToken
+    ) {
       const cleanRel = String(src).replace(/^\.\/+/, '').replace(/^\/+/, '');
       return { status: 'ok', url: `./${cleanRel}?t=${Date.now()}`, encrypted: false };
     }
