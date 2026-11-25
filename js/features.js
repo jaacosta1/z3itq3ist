@@ -1048,6 +1048,86 @@ export class OfflineCommitQueue {
   }
 }
 
+/**
+ * Triggers the native browser Print Preview / Save as PDF dialog using a hidden iframe.
+ * Avoids `window.open(..., 'noopener')` returning null and bypasses async popup blockers
+ * in desktop browsers, mobile browsers, and installed standalone PWAs.
+ *
+ * @param {string} html
+ * @param {string} [fallbackFilename='perpetual-diary-print.html']
+ * @returns {{ ok: boolean, method: 'iframe' | 'download' }}
+ */
+function printHtmlDocument(html, fallbackFilename = 'perpetual-diary-print.html') {
+  try {
+    const existing = document.getElementById('perpetual-print-iframe');
+    if (existing) existing.remove();
+
+    const iframe = document.createElement('iframe');
+    iframe.id = 'perpetual-print-iframe';
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.style.visibility = 'hidden';
+
+    let printed = false;
+    const cleanup = () => {
+      window.setTimeout(() => {
+        if (iframe.parentNode) iframe.remove();
+      }, 1000);
+    };
+
+    const runPrint = () => {
+      if (printed) return;
+      printed = true;
+      try {
+        const win = iframe.contentWindow;
+        if (!win) throw new Error('Print frame unavailable.');
+        win.addEventListener('afterprint', cleanup, { once: true });
+        win.focus();
+        win.print();
+        // Safety cleanup in case a browser does not fire afterprint
+        window.setTimeout(cleanup, 60000);
+      } catch {
+        cleanup();
+      }
+    };
+
+    iframe.onload = () => {
+      window.requestAnimationFrame(() => window.setTimeout(runPrint, 60));
+    };
+
+    document.body.appendChild(iframe);
+    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (doc) {
+      doc.open();
+      doc.write(html);
+      doc.close();
+      // Fallback trigger if onload already fired synchronously on doc.close()
+      window.setTimeout(runPrint, 180);
+    } else {
+      iframe.srcdoc = html;
+    }
+
+    return { ok: true, method: 'iframe' };
+  } catch {
+    // Fallback: download a self-contained print-ready HTML file
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fallbackFilename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+    return { ok: true, method: 'download' };
+  }
+}
+
 export function openPrintBookWindow({
   title = 'Perpetual Side-by-Side Diary',
   subtitle = '',
@@ -1058,6 +1138,10 @@ export function openPrintBookWindow({
       String(a.diaryDate || '').localeCompare(String(b.diaryDate || '')) ||
       String(a.writtenAt || '').localeCompare(String(b.writtenAt || ''))
   );
+  if (sorted.length === 0) {
+    return { ok: false, count: 0, reason: 'empty' };
+  }
+
   const generatedAt = new Date().toLocaleDateString(undefined, {
     year: 'numeric',
     month: 'long',
@@ -1102,42 +1186,25 @@ export function openPrintBookWindow({
   <meta charset="UTF-8" />
   <title>${escapeHtml(title)} — Print Edition</title>
   <style>
+    @page { margin: 18mm; }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      padding: 28px;
+      padding: 0;
       font-family: Georgia, "Times New Roman", serif;
       color: #161513;
-      background: #f4f2ec;
+      background: #ffffff;
       line-height: 1.65;
-    }
-    .toolbar {
-      max-width: 740px;
-      margin: 0 auto 16px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-family: system-ui, sans-serif;
-    }
-    .print-btn {
-      background: #161513;
-      color: #ffffff;
-      border: none;
-      padding: 8px 16px;
-      border-radius: 4px;
-      cursor: pointer;
     }
     .book-sheet {
       max-width: 740px;
       margin: 0 auto;
       background: #ffffff;
-      padding: 48px 54px;
-      border: 1px solid #dcd8ce;
     }
     .title-page {
       border-bottom: 2px solid #161513;
-      padding-bottom: 28px;
-      margin-bottom: 28px;
+      padding-bottom: 24px;
+      margin-bottom: 24px;
     }
     .kicker {
       font-family: ui-monospace, monospace;
@@ -1146,23 +1213,23 @@ export function openPrintBookWindow({
       text-transform: uppercase;
       color: #666;
     }
-    h1 { font-size: 30px; margin: 8px 0 6px; font-weight: 500; }
-    .toc { margin-bottom: 34px; font-size: 13.5px; }
+    h1 { font-size: 28px; margin: 8px 0 6px; font-weight: 500; }
+    .toc { margin-bottom: 28px; font-size: 13px; }
     .toc ol { padding-left: 20px; columns: 2; column-gap: 24px; }
     .toc li { margin-bottom: 4px; break-inside: avoid; }
-    .toc-date { font-family: ui-monospace, monospace; font-size: 12px; }
+    .toc-date { font-family: ui-monospace, monospace; font-size: 11.5px; }
     .book-entry {
-      padding: 20px 0;
+      padding: 18px 0;
       border-top: 1px solid #e4e0d6;
       break-inside: avoid-page;
     }
     .book-entry-meta {
       font-family: ui-monospace, monospace;
-      font-size: 11.5px;
+      font-size: 11px;
       color: #5f5b52;
       margin-bottom: 4px;
     }
-    .book-entry h2 { font-size: 20px; margin: 2px 0 10px; font-weight: 600; }
+    .book-entry h2 { font-size: 19px; margin: 2px 0 10px; font-weight: 600; }
     .book-prose blockquote {
       margin: 12px 0;
       padding-left: 14px;
@@ -1170,18 +1237,9 @@ export function openPrintBookWindow({
       font-style: italic;
       color: #3a3730;
     }
-    @media print {
-      body { background: #ffffff; padding: 0; }
-      .toolbar { display: none; }
-      .book-sheet { border: none; padding: 0; max-width: none; }
-    }
   </style>
 </head>
 <body>
-  <div class="toolbar">
-    <span>${sorted.length} entries · Ready for Print / Save as PDF</span>
-    <button class="print-btn" onclick="window.print()">Print Book / Save PDF</button>
-  </div>
   <main class="book-sheet">
     <header class="title-page">
       <div class="kicker">PERPETUAL ARCHIVE EDITION · ${escapeHtml(generatedAt)}</div>
@@ -1197,16 +1255,19 @@ export function openPrintBookWindow({
 </body>
 </html>`;
 
-  const popup = window.open('', '_blank', 'noopener,noreferrer');
-  if (popup) {
-    popup.document.open();
-    popup.document.write(html);
-    popup.document.close();
-  }
+  const result = printHtmlDocument(
+    html,
+    `perpetual-book-${new Date().toISOString().slice(0, 10)}.html`
+  );
+  return { ...result, count: sorted.length };
 }
 
 export function openMiniZineWindow({ title = 'Perpetual Mini-Zine', entries = [] }) {
   const chosen = [...entries].slice(0, 6);
+  if (chosen.length === 0) {
+    return { ok: false, count: 0, reason: 'empty' };
+  }
+
   const pages = new Array(8).fill(null).map((_, idx) => ({
     pageNum: idx + 1,
     heading: idx === 0 ? title : idx === 7 ? 'Colophon' : '',
@@ -1246,26 +1307,15 @@ export function openMiniZineWindow({ title = 'Perpetual Mini-Zine', entries = []
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      padding: 14px;
+      padding: 0;
       font-family: Georgia, serif;
-      background: #efefef;
+      background: #ffffff;
       color: #111111;
     }
-    .bar {
-      max-width: 1020px;
-      margin: 0 auto 10px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-family: system-ui, sans-serif;
-      font-size: 13px;
-    }
     .zine-sheet {
-      max-width: 1020px;
-      margin: 0 auto;
-      aspect-ratio: 11 / 8.5;
+      width: 100vw;
+      height: 96vh;
       background: #ffffff;
-      border: 1px solid #999999;
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       grid-template-rows: repeat(2, 1fr);
@@ -1290,18 +1340,9 @@ export function openMiniZineWindow({ title = 'Perpetual Mini-Zine', entries = []
       font-size: 9px;
       color: #777;
     }
-    @media print {
-      body { background: #ffffff; padding: 0; }
-      .bar { display: none; }
-      .zine-sheet { max-width: none; width: 100vw; height: 96vh; border: none; }
-    }
   </style>
 </head>
 <body>
-  <div class="bar">
-    <span>Print Landscape (100% scale, no margins) → Fold &amp; slit center spine into an 8-page pocket zine.</span>
-    <button onclick="window.print()">Print Mini-Zine</button>
-  </div>
   <main class="zine-sheet">
     ${renderPanel(pages[4], true)}
     ${renderPanel(pages[3], true)}
@@ -1315,12 +1356,11 @@ export function openMiniZineWindow({ title = 'Perpetual Mini-Zine', entries = []
 </body>
 </html>`;
 
-  const popup = window.open('', '_blank', 'noopener,noreferrer');
-  if (popup) {
-    popup.document.open();
-    popup.document.write(html);
-    popup.document.close();
-  }
+  const result = printHtmlDocument(
+    html,
+    `perpetual-mini-zine-${new Date().toISOString().slice(0, 10)}.html`
+  );
+  return { ...result, count: chosen.length };
 }
 
 export function parseImportedDiaryFile(filename, rawText) {
