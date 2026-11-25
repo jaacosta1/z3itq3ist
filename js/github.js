@@ -126,6 +126,7 @@ const DEFAULT_CONFIG = Object.freeze({
   useMediaSharding: false,
   mediaShardPattern: 'diary-media-{year}',
   mediaShardBranch: 'main',
+  genericCommitMessages: false,
 });
 
 const STORAGE_KEY = 'perpetual_diary_gh_config_v1';
@@ -216,6 +217,17 @@ export class GitHubClient {
   }
 
   /**
+   * Returns a generic non-profiling commit message ("sync: update") when
+   * generic commit cloaking is enabled in config or on the active transaction.
+   */
+  resolveCommitMessage(rawMessage, forceGeneric = false) {
+    if (forceGeneric || this.config.genericCommitMessages) {
+      return 'sync: update';
+    }
+    return String(rawMessage || 'diary: update');
+  }
+
+  /**
    * Resolves the target repository for binary media uploads for a given calendar year.
    * When Media Sharding is disabled, falls back to the active data target.
    */
@@ -295,7 +307,9 @@ export class GitHubClient {
     }
 
     const payload = {
-      message: commitMessage || `diary: upload sharded media ${repoPath}`,
+      message: this.resolveCommitMessage(
+        commitMessage || `diary: upload sharded media ${repoPath}`
+      ),
       content: base64,
       branch: target.branch,
     };
@@ -339,7 +353,9 @@ export class GitHubClient {
     await this._apiRequest(endpoint, {
       method: 'DELETE',
       body: JSON.stringify({
-        message: commitMessage || `diary: delete sharded media ${cleanSub}`,
+        message: this.resolveCommitMessage(
+          commitMessage || `diary: delete sharded media ${cleanSub}`
+        ),
         sha,
         branch: branch || 'main',
       }),
@@ -609,7 +625,7 @@ export class GitHubClient {
       }
 
       const payload = {
-        message: commitMessage || `diary: update ${repoPath}`,
+        message: this.resolveCommitMessage(commitMessage || `diary: update ${repoPath}`),
         content: base64Content,
         branch: target.branch,
       };
@@ -682,7 +698,7 @@ export class GitHubClient {
     const out = await this._apiRequest(endpoint, {
       method: 'DELETE',
       body: JSON.stringify({
-        message: commitMessage || `diary: delete ${repoPath}`,
+        message: this.resolveCommitMessage(commitMessage || `diary: delete ${repoPath}`),
         sha,
         branch: target.branch,
       }),
@@ -735,10 +751,10 @@ export class GitHubClient {
     } catch (err) {
       if (err.status === 404 || err.status === 409) {
         headCommitSha = null;
-      } else {
-        throw err;
-      }
-    }
+    const finalMessage = this.resolveCommitMessage(
+      commitMessage || 'diary: atomic sync',
+      Boolean(options.genericCommit)
+    );
 
     // Empty repository bootstrap fallback (Git Data API requires at least one initial commit)
     if (!headCommitSha) {
@@ -748,7 +764,7 @@ export class GitHubClient {
         if (ch.delete) continue;
         const isB64 = Boolean(ch.isBase64 || ch.isBinary);
         const payload = ch.isBinary ? arrayBufferToBase64(ch.content) : ch.content;
-        const putRes = await this.putFile(ch.subpath, payload, commitMessage, {
+        const putRes = await this.putFile(ch.subpath, payload, finalMessage, {
           target,
           isBase64: isB64,
         });
@@ -824,7 +840,7 @@ export class GitHubClient {
     const newCommit = await this._apiRequest(`${repoApiBase}/git/commits`, {
       method: 'POST',
       body: JSON.stringify({
-        message: commitMessage || 'diary: atomic sync',
+        message: finalMessage,
         tree: newTree.sha,
         parents: [headCommitSha],
       }),
@@ -878,37 +894,87 @@ export class GitHubClient {
     const dayMutations = Array.isArray(tx.dayMutations) ? tx.dayMutations : [];
     const mediaUploads = Array.isArray(tx.mediaUploads) ? tx.mediaUploads : [];
     const mediaDeletes = Array.isArray(tx.mediaDeletes) ? tx.mediaDeletes : [];
+    const cloak = tx.cloak && tx.cloak.enabled ? tx.cloak : null;
 
     // Collect unique calendar days touched by this transaction
     const uniqueDays = Array.from(new Set(dayMutations.map((m) => m.dayStr).filter(Boolean)));
 
-    // Fetch fresh remote state + SHA for each touched day and for index.json
+    // Fetch fresh remote state + SHA for each touched day and for index manifest
     const remoteDayMap = {};
     for (const dayStr of uniqueDays) {
-      const meta = await this.readJsonWithMeta(`days/${dayStr}.json`, null);
+      const targetSubpath = cloak
+        ? await cloak.getDaySubpath(dayStr)
+        : `days/${dayStr}.json`;
+
+      let meta = await this.getFileMeta(targetSubpath);
+      let loadedLegacyFallback = false;
+
+      // Backward-compatible read fallback if migrating gradually from days/MM-DD.json
+      if (!meta.exists && cloak) {
+        const legacyMeta = await this.getFileMeta(`days/${dayStr}.json`);
+        if (legacyMeta.exists) {
+          meta = legacyMeta;
+          loadedLegacyFallback = true;
+        }
+      }
+
+      let parsedDoc = null;
+      if (meta.exists && meta.content) {
+        try {
+          parsedDoc = cloak
+            ? await cloak.deserializeDay(dayStr, meta.content)
+            : JSON.parse(meta.content);
+        } catch {
+          parsedDoc = null;
+        }
+      }
+
       const doc =
-        meta.exists && meta.data && typeof meta.data === 'object'
+        parsedDoc && typeof parsedDoc === 'object'
           ? {
               day: dayStr,
               entries:
-                meta.data.entries && typeof meta.data.entries === 'object'
-                  ? { ...meta.data.entries }
+                parsedDoc.entries && typeof parsedDoc.entries === 'object'
+                  ? { ...parsedDoc.entries }
                   : {},
-              comments: Array.isArray(meta.data.comments) ? [...meta.data.comments] : [],
+              comments: Array.isArray(parsedDoc.comments) ? [...parsedDoc.comments] : [],
             }
           : { day: dayStr, entries: {}, comments: [] };
 
       remoteDayMap[dayStr] = {
+        subpath: targetSubpath,
+        deleteLegacyPath: loadedLegacyFallback ? `days/${dayStr}.json` : null,
         doc,
         sha: meta.sha || null,
         exists: meta.exists,
       };
     }
 
-    const indexMeta = await this.readJsonWithMeta('index.json', null);
+    const indexSubpath = cloak ? cloak.indexSubpath || 'index.enc' : 'index.json';
+    let indexMeta = await this.getFileMeta(indexSubpath);
+    let loadedLegacyIndex = false;
+    if (!indexMeta.exists && cloak) {
+      const legacyIdx = await this.getFileMeta('index.json');
+      if (legacyIdx.exists) {
+        indexMeta = legacyIdx;
+        loadedLegacyIndex = true;
+      }
+    }
+
+    let parsedIdx = null;
+    if (indexMeta.exists && indexMeta.content) {
+      try {
+        parsedIdx = cloak
+          ? await cloak.deserializeIndex(indexMeta.content)
+          : JSON.parse(indexMeta.content);
+      } catch {
+        parsedIdx = null;
+      }
+    }
+
     let workingIndex =
-      indexMeta.exists && indexMeta.data && typeof indexMeta.data === 'object'
-        ? indexMeta.data
+      parsedIdx && typeof parsedIdx === 'object' && parsedIdx.days
+        ? parsedIdx
         : { version: 1, updatedAt: new Date().toISOString(), days: {} };
 
     // Apply each mutation with strict entry-level conflict detection
@@ -968,21 +1034,42 @@ export class GitHubClient {
     const outDocs = {};
 
     for (const dayStr of uniqueDays) {
-      const updatedDoc = remoteDayMap[dayStr].doc;
+      const slot = remoteDayMap[dayStr];
+      const updatedDoc = slot.doc;
       outDocs[dayStr] = updatedDoc;
       workingIndex = recalculateIndexForDay(workingIndex, dayStr, updatedDoc);
+
+      const serializedDay = cloak
+        ? await cloak.serializeDay(dayStr, updatedDoc)
+        : `${JSON.stringify(updatedDoc, null, 2)}\n`;
+
       changes.push({
-        subpath: `days/${dayStr}.json`,
-        content: `${JSON.stringify(updatedDoc, null, 2)}\n`,
+        subpath: slot.subpath,
+        content: serializedDay,
         isBase64: false,
       });
+
+      if (slot.deleteLegacyPath) {
+        changes.push({
+          subpath: slot.deleteLegacyPath,
+          delete: true,
+        });
+      }
     }
 
+    const serializedIndex = cloak
+      ? await cloak.serializeIndex(workingIndex)
+      : `${JSON.stringify(workingIndex, null, 2)}\n`;
+
     changes.push({
-      subpath: 'index.json',
-      content: `${JSON.stringify(workingIndex, null, 2)}\n`,
+      subpath: indexSubpath,
+      content: serializedIndex,
       isBase64: false,
     });
+
+    if (loadedLegacyIndex && cloak) {
+      changes.push({ subpath: 'index.json', delete: true });
+    }
 
     for (const upload of mediaUploads) {
       changes.push({
@@ -1000,10 +1087,13 @@ export class GitHubClient {
     }
 
     try {
-      const res = await this.commitBatch(changes, tx.commitMessage || 'diary: atomic update');
+      const res = await this.commitBatch(changes, tx.commitMessage || 'diary: atomic update', {
+        genericCommit: Boolean(cloak?.genericCommits),
+      });
       const dayShas = {};
       for (const dayStr of uniqueDays) {
-        const sha = res.fileShas[`days/${dayStr}.json`];
+        const targetSub = remoteDayMap[dayStr].subpath;
+        const sha = res.fileShas[targetSub];
         if (sha) dayShas[dayStr] = sha;
       }
       return {
@@ -1022,29 +1112,51 @@ export class GitHubClient {
   }
 
   /**
-   * Atomically updates one calendar day file and index.json in a single Git commit.
+   * Atomically updates one calendar day file and index manifest in a single Git commit.
    */
-  async updateDayAndIndex(dayStr, dayDoc, commitMessage) {
-    const indexMeta = await this.readJsonWithMeta('index.json', null);
-    const nextIndex = recalculateIndexForDay(indexMeta.data, dayStr, dayDoc);
+  async updateDayAndIndex(dayStr, dayDoc, commitMessage, cloak = null) {
+    const activeCloak = cloak && cloak.enabled ? cloak : null;
+    const indexSubpath = activeCloak ? activeCloak.indexSubpath || 'index.enc' : 'index.json';
+    const daySubpath = activeCloak
+      ? await activeCloak.getDaySubpath(dayStr)
+      : `days/${dayStr}.json`;
+
+    let indexMeta = await this.getFileMeta(indexSubpath);
+    if (!indexMeta.exists && activeCloak) {
+      indexMeta = await this.getFileMeta('index.json');
+    }
+
+    let currentIdx = null;
+    if (indexMeta.exists && indexMeta.content) {
+      try {
+        currentIdx = activeCloak
+          ? await activeCloak.deserializeIndex(indexMeta.content)
+          : JSON.parse(indexMeta.content);
+      } catch {
+        currentIdx = null;
+      }
+    }
+
+    const nextIndex = recalculateIndexForDay(currentIdx, dayStr, dayDoc);
+
+    const serializedDay = activeCloak
+      ? await activeCloak.serializeDay(dayStr, dayDoc)
+      : `${JSON.stringify(dayDoc, null, 2)}\n`;
+    const serializedIndex = activeCloak
+      ? await activeCloak.serializeIndex(nextIndex)
+      : `${JSON.stringify(nextIndex, null, 2)}\n`;
 
     const changes = [
-      {
-        subpath: `days/${dayStr}.json`,
-        content: `${JSON.stringify(dayDoc, null, 2)}\n`,
-        isBase64: false,
-      },
-      {
-        subpath: 'index.json',
-        content: `${JSON.stringify(nextIndex, null, 2)}\n`,
-        isBase64: false,
-      },
+      { subpath: daySubpath, content: serializedDay, isBase64: false },
+      { subpath: indexSubpath, content: serializedIndex, isBase64: false },
     ];
 
-    const res = await this.commitBatch(changes, commitMessage || `diary: update ${dayStr}`);
+    const res = await this.commitBatch(changes, commitMessage || `diary: update ${dayStr}`, {
+      genericCommit: Boolean(activeCloak?.genericCommits),
+    });
     return {
       commitSha: res.commitSha,
-      daySha: res.fileShas[`days/${dayStr}.json`] || null,
+      daySha: res.fileShas[daySubpath] || null,
       index: nextIndex,
     };
   }
