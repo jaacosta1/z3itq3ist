@@ -1,0 +1,64 @@
+{
+"id": "./",
+"name": "Perpetual — Side-by-Side Web Diary",
+"short_name": "Perpetual",
+"description": "Zero-knowledge, GitHub-backed perpetual side-by-side web diary for comparing every recorded year of any calendar date.",
+"lang": "en",
+"dir": "ltr",
+"start_url": "./#today",
+"scope": "./",
+"display": "standalone",
+"display_override": [
+"window-controls-overlay",
+"standalone",
+"minimal-ui"
+],
+"orientation": "any",
+"background_color": "#0d0d0d",
+"theme_color": "#0d0d0d",
+"categories": [
+"lifestyle",
+"productivity",
+"books"
+],
+"icons": [
+{
+"src": "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20512%20512%22%3E%3Crect%20width%3D%22512%22%20height%3D%22512%22%20rx%3D%2296%22%20fill%3D%22%230d0d0d%22%2F%3E%3Crect%20x%3D%2228%22%20y%3D%2228%22%20width%3D%22456%22%20height%3D%22456%22%20rx%3D%2272%22%20fill%3D%22none%22%20stroke%3D%22%23e0b354%22%20stroke-width%3D%2210%22%20stroke-opacity%3D%220.45%22%2F%3E%3Cline%20x1%3D%22176%22%20y1%3D%22112%22%20x2%3D%22176%22%20y2%3D%22400%22%20stroke%3D%22%23e0b354%22%20stroke-width%3D%228%22%20stroke-opacity%3D%220.35%22%2F%3E%3Cline%20x1%3D%22336%22%20y1%3D%22112%22%20x2%3D%22336%22%20y2%3D%22400%22%20stroke%3D%22%23e0b354%22%20stroke-width%3D%228%22%20stroke-opacity%3D%220.35%22%2F%3E%3Ctext%20x%3D%22256%22%20y%3D%22328%22%20text-anchor%3D%22middle%22%20font-family%3D%22Georgia%2C%20serif%22%20font-size%3D%22248%22%20font-weight%3D%22600%22%20fill%3D%22%23e0b354%22%3EP%3C%2Ftext%3E%3C%2Fsvg%3E",
+"sizes": "any",
+"type": "image/svg+xml",
+"purpose": "any"
+},
+{
+"src": "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20512%20512%22%3E%3Crect%20width%3D%22512%22%20height%3D%22512%22%20fill%3D%22%230d0d0d%22%2F%3E%3Crect%20x%3D%2264%22%20y%3D%2264%22%20width%3D%22384%22%20height%3D%22384%22%20rx%3D%2248%22%20fill%3D%22none%22%20stroke%3D%22%23e0b354%22%20stroke-width%3D%2210%22%20stroke-opacity%3D%220.5%22%2F%3E%3Ctext%20x%3D%22256%22%20y%3D%22322%22%20text-anchor%3D%22middle%22%20font-family%3D%22Georgia%2C%20serif%22%20font-size%3D%22216%22%20font-weight%3D%22600%22%20fill%3D%22%23e0b354%22%3EP%3C%2Ftext%3E%3C%2Fsvg%3E",
+"sizes": "512x512",
+"type": "image/svg+xml",
+"purpose": "maskable"
+}
+],
+"shortcuts": [
+{
+"name": "Open Today Side-by-Side",
+"short_name": "Today",
+"description": "Jump straight to today's calendar date across all recorded years.",
+"url": "./#today"
+},
+{
+"name": "Write New Entry",
+"short_name": "Write",
+"description": "Open the diary composer for today's date.",
+"url": "./#compose"
+},
+{
+"name": "366-Day Heatmap",
+"short_name": "366 Days",
+"description": "View your 366-day perpetual density calendar.",
+"url": "./#heatmap"
+},
+{
+"name": "Archive & Analytics",
+"short_name": "Archive",
+"description": "Search entries, story arcs, analytics, and exports.",
+"url": "./#archive"
+}
+]
+}
