@@ -1,0 +1,252 @@
+==============================================================================
+
+Perpetual Side-by-Side Web Diary — Phase 12: Automated 3-2-1 Off-Site Backups
+
+==============================================================================
+
+HOW THIS IMPLEMENTS THE 3-2-1 BACKUP RULE:
+
+- Copy 1 (Primary):   Your live GitHub Vault repository (perpetual-diary-vault)
+
+- Copy 2 (Secondary): Downloadable GitHub Actions Backup Artifact (90-day retention)
+
+- Copy 3 (Off-Site):  Optional S3-compatible cloud mirror (Cloudflare R2, Backblaze B2,
+
+AWS S3, Wasabi, or MinIO) — automatically runs when S3 secrets exist.
+
+WHERE TO PLACE THIS FILE:
+
+- Recommended: Inside your Private Vault repo (perpetual-diary-vault/.github/workflows/backup.yml)
+
+- Alternative: Inside your Public App repo if you configure VAULT_REPO & VAULT_READ_PAT below.
+
+OPTIONAL REPOSITORY SECRETS (Settings -> Secrets and variables -> Actions):
+
+Outer Archive Encryption (recommended if any entries/media are unencrypted):
+
+- BACKUP_PASSPHRASE            : Strong passphrase for OpenSSL AES-256-CBC (PBKDF2 250k iter)
+
+Split-Repo Cross-Checkout (only needed if running this workflow from the Public App repo):
+
+- VAULT_REPO                   : e.g. "your-username/perpetual-diary-vault"
+
+- VAULT_READ_PAT               : Fine-Grained PAT with Contents: Read-only on vault repo
+
+Off-Site S3 / Cloudflare R2 / Backblaze B2 Mirror (all optional):
+
+- BACKUP_S3_BUCKET             : Bucket name (e.g. "my-diary-backups")
+
+- BACKUP_S3_ACCESS_KEY_ID      : Access Key ID
+
+- BACKUP_S3_SECRET_ACCESS_KEY  : Secret Access Key
+
+- BACKUP_S3_ENDPOINT           : Optional custom endpoint URL for R2 / B2 / Wasabi
+
+e.g. "https://.r2.cloudflarestorage.com"
+
+or   "https://s3.us-west-004.backblazeb2.com"
+
+- BACKUP_S3_REGION             : Optional region (defaults to "auto" for R2, or "us-east-1")
+
+- BACKUP_S3_PREFIX             : Optional folder prefix inside bucket (default: "perpetual-diary")
+
+HOW TO DECRYPT AN OUTER-ENCRYPTED BACKUP OFFLINE (Decades Later):
+
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 250000 -salt \
+
+-in perpetual-backup-YYYYMMDD-HHMMSS.tar.gz.enc \
+
+-out perpetual-backup.tar.gz
+
+tar -xzf perpetual-backup.tar.gz
+
+==============================================================================
+
+name: 3-2-1 Off-Site Diary Backup
+
+on:
+schedule:
+# Runs automatically every Sunday at 03:00 UTC
+- cron: '0 3 * * 0'
+workflow_dispatch:
+inputs:
+snapshot_label:
+description: 'Optional label for this manual backup snapshot (alphanumeric/hyphens)'
+required: false
+default: 'manual'
+include_git_bundle:
+description: 'Include full .git history bundle (all branches including main & drafts)'
+type: boolean
+required: false
+default: true
+
+concurrency:
+group: perpetual-diary-backup
+cancel-in-progress: false
+
+permissions:
+contents: read
+
+jobs:
+backup:
+name: Create & Mirror Encrypted 3-2-1 Backup
+runs-on: ubuntu-latest
+
+steps:
+  - name: Determine checkout target (Current Repo vs Split Vault Repo)
+    id: target
+    env:
+      CUSTOM_VAULT_REPO: ${{ secrets.VAULT_REPO }}
+      CUSTOM_VAULT_PAT: ${{ secrets.VAULT_READ_PAT }}
+    run: |
+      if [ -n "$CUSTOM_VAULT_REPO" ] && [ -n "$CUSTOM_VAULT_PAT" ]; then
+        echo "repo=$CUSTOM_VAULT_REPO" >> "$GITHUB_OUTPUT"
+        echo "use_custom=true" >> "$GITHUB_OUTPUT"
+      else
+        echo "repo=${GITHUB_REPOSITORY}" >> "$GITHUB_OUTPUT"
+        echo "use_custom=false" >> "$GITHUB_OUTPUT"
+      fi
+
+  - name: Checkout Diary Repository (Full Git History & Branches)
+    uses: actions/checkout@v4
+    with:
+      repository: ${{ steps.target.outputs.repo }}
+      token: ${{ steps.target.outputs.use_custom == 'true' && secrets.VAULT_READ_PAT || secrets.GITHUB_TOKEN }}
+      fetch-depth: 0
+      path: diary-src
+
+  - name: Build Timestamped Archive & Optional Full Git Bundle
+    id: package
+    env:
+      RAW_LABEL: ${{ github.event.inputs.snapshot_label || 'weekly' }}
+      INCLUDE_BUNDLE: ${{ github.event.inputs.include_git_bundle || 'true' }}
+      BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+    run: |
+      set -euo pipefail
+
+      # Sanitize label for clean filenames
+      SAFE_LABEL=$(echo "$RAW_LABEL" | tr -cd 'a-zA-Z0-9_-' | cut -c1-32)
+      if [ -z "$SAFE_LABEL" ]; then
+        SAFE_LABEL="snapshot"
+      fi
+
+      STAMP=$(date -u +"%Y%m%d-%H%M%S")
+      BASE_NAME="perpetual-backup-${STAMP}-${SAFE_LABEL}"
+      OUT_DIR="${RUNNER_TEMP}/backup-out"
+      STAGE_DIR="${RUNNER_TEMP}/backup-stage"
+
+      mkdir -p "$OUT_DIR" "$STAGE_DIR"
+
+      # Fetch all remote branches (including `drafts`) so nothing is missed
+      git -C diary-src fetch --all --tags --prune || true
+
+      # Copy data directory if present (supports vault.json, index.json/enc, days/, shards/, media/)
+      if [ -d "diary-src/data" ]; then
+        cp -a diary-src/data "$STAGE_DIR/data"
+      else
+        echo "Warning: diary-src/data directory not found; archiving entire repository tree."
+        rsync -a --exclude='.git' diary-src/ "$STAGE_DIR/repo-files/"
+      fi
+
+      # Create a lossless single-file Git bundle containing every commit & branch (Time Machine + drafts)
+      if [ "$INCLUDE_BUNDLE" = "true" ]; then
+        git -C diary-src bundle create "$STAGE_DIR/repository-full-history.bundle" --all || true
+      fi
+
+      # Write a non-secret backup metadata manifest
+      cat > "$STAGE_DIR/BACKUP_MANIFEST.txt" <<EOF
+      Perpetual Side-by-Side Web Diary — 3-2-1 Backup Snapshot
+      ========================================================
+      Timestamp (UTC): $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+      Source Repo    : ${{ steps.target.outputs.repo }}
+      Head Commit    : $(git -C diary-src rev-parse HEAD 2>/dev/null || echo "none")
+      Snapshot Label : ${SAFE_LABEL}
+      Git Bundle     : ${INCLUDE_BUNDLE}
+      Outer Cipher   : $( [ -n "${BACKUP_PASSPHRASE:-}" ] && echo "OpenSSL AES-256-CBC PBKDF2-SHA256 (250000 iter)" || echo "None (relies on client-side AES-256-GCM vault)" )
+      EOF
+
+      TAR_PATH="${OUT_DIR}/${BASE_NAME}.tar.gz"
+      tar -czf "$TAR_PATH" -C "$STAGE_DIR" .
+
+      FINAL_FILE="$TAR_PATH"
+
+      # Optional Outer Encryption Layer (protects plaintext metadata or unencrypted entries off-site)
+      if [ -n "${BACKUP_PASSPHRASE:-}" ]; then
+        ENC_PATH="${TAR_PATH}.enc"
+        openssl enc -aes-256-cbc -pbkdf2 -iter 250000 -salt \
+          -in "$TAR_PATH" \
+          -out "$ENC_PATH" \
+          -pass env:BACKUP_PASSPHRASE
+        rm -f "$TAR_PATH"
+        FINAL_FILE="$ENC_PATH"
+        echo "encrypted=true" >> "$GITHUB_OUTPUT"
+      else
+        echo "encrypted=false" >> "$GITHUB_OUTPUT"
+      fi
+
+      # Generate SHA-256 integrity checksum alongside the archive
+      (cd "$OUT_DIR" && sha256sum "$(basename "$FINAL_FILE")" > "${BASE_NAME}.sha256")
+
+      ARCHIVE_SIZE=$(du -h "$FINAL_FILE" | cut -f1)
+      echo "out_dir=$OUT_DIR" >> "$GITHUB_OUTPUT"
+      echo "archive_path=$FINAL_FILE" >> "$GITHUB_OUTPUT"
+      echo "archive_name=$(basename "$FINAL_FILE")" >> "$GITHUB_OUTPUT"
+      echo "checksum_path=${OUT_DIR}/${BASE_NAME}.sha256" >> "$GITHUB_OUTPUT"
+      echo "checksum_name=${BASE_NAME}.sha256" >> "$GITHUB_OUTPUT"
+      echo "archive_size=$ARCHIVE_SIZE" >> "$GITHUB_OUTPUT"
+
+      echo "Created backup archive: $(basename "$FINAL_FILE") (${ARCHIVE_SIZE})"
+
+  - name: Upload Copy 2 — GitHub Actions Artifact (90-Day Retention)
+    uses: actions/upload-artifact@v4
+    with:
+      name: ${{ steps.package.outputs.archive_name }}
+      path: |
+        ${{ steps.package.outputs.archive_path }}
+        ${{ steps.package.outputs.checksum_path }}
+      retention-days: 90
+      if-no-files-found: error
+
+  - name: Upload Copy 3 — Optional Off-Site S3 / Cloudflare R2 / Backblaze B2 Mirror
+    if: ${{ secrets.BACKUP_S3_BUCKET != '' && secrets.BACKUP_S3_ACCESS_KEY_ID != '' && secrets.BACKUP_S3_SECRET_ACCESS_KEY != '' }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.BACKUP_S3_REGION || 'auto' }}
+      S3_BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+      S3_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
+      S3_PREFIX: ${{ secrets.BACKUP_S3_PREFIX || 'perpetual-diary' }}
+      ARCHIVE_PATH: ${{ steps.package.outputs.archive_path }}
+      ARCHIVE_NAME: ${{ steps.package.outputs.archive_name }}
+      CHECKSUM_PATH: ${{ steps.package.outputs.checksum_path }}
+      CHECKSUM_NAME: ${{ steps.package.outputs.checksum_name }}
+    run: |
+      set -euo pipefail
+
+      CLEAN_PREFIX=$(echo "$S3_PREFIX" | sed 's:^/*::; s:/*$::')
+      DEST_BASE="s3://${S3_BUCKET}/${CLEAN_PREFIX}"
+      ENDPOINT_ARGS=()
+      if [ -n "$S3_ENDPOINT" ]; then
+        ENDPOINT_ARGS=(--endpoint-url "$S3_ENDPOINT")
+      fi
+
+      aws s3 cp "$ARCHIVE_PATH" "${DEST_BASE}/${ARCHIVE_NAME}" "${ENDPOINT_ARGS[@]}" --only-show-errors
+      aws s3 cp "$CHECKSUM_PATH" "${DEST_BASE}/${CHECKSUM_NAME}" "${ENDPOINT_ARGS[@]}" --only-show-errors
+
+      echo "Successfully mirrored backup + SHA-256 checksum to ${DEST_BASE}/${ARCHIVE_NAME}"
+
+  - name: Publish Job Summary
+    run: |
+      {
+        echo "### Perpetual Diary 3-2-1 Backup Summary"
+        echo "- **Source Repository:** \`${{ steps.target.outputs.repo }}\`"
+        echo "- **Archive Filename:** \`${{ steps.package.outputs.archive_name }}\`"
+        echo "- **Archive Size:** \`${{ steps.package.outputs.archive_size }}\`"
+        echo "- **Outer OpenSSL Encryption:** \`${{ steps.package.outputs.encrypted }}\`"
+        echo "- **Copy 2 (GitHub Artifact):** Uploaded (90-day retention)"
+        if [ -n "${{ secrets.BACKUP_S3_BUCKET }}" ]; then
+          echo "- **Copy 3 (Off-Site S3/R2/B2):** Mirrored"
+        else
+          echo "- **Copy 3 (Off-Site S3/R2/B2):** Skipped (configure \`BACKUP_S3_BUCKET\` secrets to enable)"
+        fi
+      } >> "$GITHUB_STEP_SUMMARY"
