@@ -1,78 +1,100 @@
 /**
- * Perpetual Side-by-Side Web Diary — Media Engine & Hold-and-Drag Alignment Studio
- * Handles IndexedDB binary storage for Local Sandbox Mode, safe image validation &
- * client-side compression, static/GitHub/IndexedDB URL resolution, the interactive
- * Pointer Events Alignment Studio (snap zones, focal panning, corner resizing),
- * and on-page live photo re-alignment.
+ * js/media.js — Browser-Side WebP Compression, Split-Repo Loader, Encrypted Media Vault (.enc),
+ * RAM Blob URL Registry, IndexedDB Store, and Interactive Hold-and-Drag Alignment Studio.
  */
 
-import { sanitizeUrl } from './markdown.js';
+import {
+  base64ToBytes,
+  encryptBinary,
+  decryptBinary,
+  buildMediaAad,
+  isEncryptedMediaPath,
+} from './crypto.js';
+
+export const WEBP_PRESETS = Object.freeze({
+  compact: { maxDim: 960, quality: 0.65, label: 'Compact (960px · 65%)' },
+  balanced: { maxDim: 1200, quality: 0.74, label: 'Balanced (1200px · 74%)' },
+  high: { maxDim: 1600, quality: 0.82, label: 'High Detail (1600px · 82%)' },
+  original: { maxDim: 0, quality: 1, label: 'Original (No Resize)' },
+});
 
 export const DEFAULT_IMAGE_META = Object.freeze({
   src: '',
   caption: '',
-  align: 'left',
+  align: 'full',
   posX: 50,
   posY: 50,
-  width: 52,
-  height: 220,
+  width: 100,
+  height: 240,
 });
 
 export const ALLOWED_IMAGE_TYPES = Object.freeze([
-  'image/jpeg',
   'image/png',
+  'image/jpeg',
   'image/webp',
   'image/gif',
 ]);
 
-export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4 MB
+export const MAX_IMAGE_BYTES = 25 * 1024 * 1024; // 25 MB pre-compression ceiling
 
+const ALLOWED_MIMES = new Set(ALLOWED_IMAGE_TYPES);
 const VALID_ALIGNS = new Set(['left', 'center', 'right', 'full']);
-const IDB_NAME = 'perpetual_diary_media_v1';
-const IDB_STORE = 'blobs';
-const IDB_VERSION = 1;
+const PRESET_STORAGE_KEY = 'perpetual_diary_webp_preset_v1';
 
-const MIME_TO_EXT = {
-  'image/jpeg': 'jpg',
-  'image/png': 'png',
-  'image/webp': 'webp',
-  'image/gif': 'gif',
-};
+// In-memory registry of decrypted/fetched Blob URLs — wiped cleanly on Lock / Panic Lock / Unload
+const managedBlobUrlCache = new Map();
 
-const SAMPLE_STUDIO_PROSE = [
-  'The morning light shifted across the desk while the kettle finished boiling. Holding and dragging the amber bar above lets you snap this photograph into Left Wrap, Center, Right Wrap, or Full Width.',
-  'Hold and drag directly inside the photo viewport to pan the focal point, or drag the bottom-right amber corner grip to adjust width and frame height smoothly.',
-];
-
-// Session cache for media fetched directly via the GitHub API
-const githubMediaUrlCache = new Map();
-
-/**
- * Clamps a numeric value between min and max.
- * @param {number} value
- * @param {number} min
- * @param {number} max
- * @returns {number}
- */
-function clamp(value, min, max) {
-  const num = Number(value);
-  if (!Number.isFinite(num)) return min;
-  return Math.min(max, Math.max(min, num));
+export function revokeAllManagedMediaUrls() {
+  for (const url of managedBlobUrlCache.values()) {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // ignore revoke errors
+    }
+  }
+  managedBlobUrlCache.clear();
 }
 
-/**
- * Normalizes and validates an image metadata object against the schema.
- * Returns null if no valid image src is present.
- * @param {any} raw
- * @returns {{ src: string, caption: string, align: 'left'|'center'|'right'|'full', posX: number, posY: number, width: number, height: number } | null}
- */
+export function formatBytesCompact(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+export function getSavedWebpPreset(zeroFootprint = false) {
+  if (zeroFootprint) return 'balanced';
+  try {
+    const val = window.localStorage.getItem(PRESET_STORAGE_KEY);
+    return val && WEBP_PRESETS[val] ? val : 'balanced';
+  } catch {
+    return 'balanced';
+  }
+}
+
+export function saveWebpPreset(presetKey, zeroFootprint = false) {
+  const valid = WEBP_PRESETS[presetKey] ? presetKey : 'balanced';
+  if (!zeroFootprint) {
+    try {
+      window.localStorage.setItem(PRESET_STORAGE_KEY, valid);
+    } catch {
+      // ignore storage errors
+    }
+  }
+  return valid;
+}
+
+function clamp(v, min, max) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return min;
+  return Math.min(max, Math.max(min, n));
+}
+
 export function normalizeImageMeta(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const src = typeof raw.src === 'string' ? raw.src.trim() : '';
   if (!src) return null;
-
   const align = VALID_ALIGNS.has(raw.align) ? raw.align : DEFAULT_IMAGE_META.align;
-
   return {
     src,
     caption: typeof raw.caption === 'string' ? raw.caption : '',
@@ -81,202 +103,53 @@ export function normalizeImageMeta(raw) {
     posY: Math.round(clamp(raw.posY ?? DEFAULT_IMAGE_META.posY, 0, 100)),
     width: Math.round(clamp(raw.width ?? DEFAULT_IMAGE_META.width, 30, 100)),
     height: Math.round(clamp(raw.height ?? DEFAULT_IMAGE_META.height, 110, 420)),
+    encrypted: Boolean(raw.encrypted || isEncryptedMediaPath(src)),
   };
 }
 
-/**
- * Builds a deterministic, Neocities-safe relative path for an uploaded photo.
- * Example: data/media/2026-11-24-1732460000123.jpg
- * @param {string} diaryDate - YYYY-MM-DD
- * @param {string} ext
- * @returns {string}
- */
-export function buildMediaFilename(diaryDate, ext) {
+export function buildMediaFilename(diaryDate, ext = 'webp', encrypted = false) {
   const safeDate = /^\d{4}-\d{2}-\d{2}$/.test(String(diaryDate || ''))
     ? diaryDate
     : new Date().toISOString().slice(0, 10);
-
-  const cleanExt = String(ext || 'jpg')
+  const cleanExt = String(ext || 'webp')
     .toLowerCase()
-    .replace(/^\.+/, '')
     .replace(/[^a-z0-9]/g, '');
-
-  const allowedExt = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(cleanExt)
-    ? cleanExt === 'jpeg'
-      ? 'jpg'
-      : cleanExt
-    : 'jpg';
-
-  return `data/media/${safeDate}-${Date.now()}.${allowedExt}`;
+  const suffix = encrypted ? `${cleanExt}.enc` : cleanExt;
+  return `data/media/${safeDate}-${Date.now()}.${suffix}`;
 }
 
-/**
- * IndexedDB binary store for uploaded images in Local Sandbox Mode
- * (and instant local preview caching before GitHub/Neocities deploy completes).
- */
-export class LocalMediaStore {
-  constructor() {
-    /** @type {Promise<IDBDatabase> | null} */
-    this._dbPromise = null;
-    /** @type {Map<string, string>} */
-    this._urlCache = new Map();
+let cachedWebpSupport = null;
+function supportsWebpEncoding() {
+  if (cachedWebpSupport !== null) return cachedWebpSupport;
+  try {
+    const c = document.createElement('canvas');
+    c.width = 2;
+    c.height = 2;
+    cachedWebpSupport = c.toDataURL('image/webp').startsWith('data:image/webp');
+  } catch {
+    cachedWebpSupport = false;
   }
-
-  /**
-   * Opens (or creates) the IndexedDB media database.
-   * @returns {Promise<IDBDatabase>}
-   */
-  open() {
-    if (this._dbPromise) return this._dbPromise;
-
-    this._dbPromise = new Promise((resolve, reject) => {
-      if (typeof indexedDB === 'undefined') {
-        reject(new Error('IndexedDB is unavailable in this browser context.'));
-        return;
-      }
-
-      const request = indexedDB.open(IDB_NAME, IDB_VERSION);
-
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(IDB_STORE)) {
-          db.createObjectStore(IDB_STORE, { keyPath: 'key' });
-        }
-      };
-
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => {
-        this._dbPromise = null;
-        reject(request.error || new Error('Failed to open local media store.'));
-      };
-    });
-
-    return this._dbPromise;
-  }
-
-  /**
-   * Saves a Blob under a unique key (e.g. "idb://data/media/..." or "data/media/...").
-   * @param {string} key
-   * @param {Blob} blob
-   * @returns {Promise<string>}
-   */
-  async saveBlob(key, blob) {
-    const db = await this.open();
-    const cleanKey = String(key);
-
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(IDB_STORE, 'readwrite');
-      const store = tx.objectStore(IDB_STORE);
-      store.put({
-        key: cleanKey,
-        blob,
-        updatedAt: Date.now(),
-      });
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || new Error('Failed to save media blob.'));
-    });
-
-    if (this._urlCache.has(cleanKey)) {
-      URL.revokeObjectURL(this._urlCache.get(cleanKey));
-      this._urlCache.delete(cleanKey);
-    }
-
-    return cleanKey;
-  }
-
-  /**
-   * Retrieves a stored Blob by key.
-   * @param {string} key
-   * @returns {Promise<Blob | null>}
-   */
-  async getBlob(key) {
-    const db = await this.open();
-    const cleanKey = String(key);
-
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(IDB_STORE, 'readonly');
-      const store = tx.objectStore(IDB_STORE);
-      const req = store.get(cleanKey);
-
-      req.onsuccess = () => {
-        resolve(req.result ? req.result.blob : null);
-      };
-      req.onerror = () => reject(req.error || new Error('Failed to read media blob.'));
-    });
-  }
-
-  /**
-   * Deletes a stored Blob and revokes any cached object URL.
-   * @param {string} key
-   * @returns {Promise<boolean>}
-   */
-  async deleteBlob(key) {
-    const db = await this.open();
-    const cleanKey = String(key);
-
-    if (this._urlCache.has(cleanKey)) {
-      URL.revokeObjectURL(this._urlCache.get(cleanKey));
-      this._urlCache.delete(cleanKey);
-    }
-
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(IDB_STORE, 'readwrite');
-      const store = tx.objectStore(IDB_STORE);
-      store.delete(cleanKey);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || new Error('Failed to delete media blob.'));
-    });
-
-    return true;
-  }
-
-  /**
-   * Returns a cached or newly created blob: object URL for the stored key.
-   * @param {string} key
-   * @returns {Promise<string | null>}
-   */
-  async getObjectUrl(key) {
-    const cleanKey = String(key);
-    if (this._urlCache.has(cleanKey)) {
-      return this._urlCache.get(cleanKey);
-    }
-
-    const blob = await this.getBlob(cleanKey);
-    if (!blob) return null;
-
-    const url = URL.createObjectURL(blob);
-    this._urlCache.set(cleanKey, url);
-    return url;
-  }
-
-  /**
-   * Clears all locally stored sandbox images and revokes cached object URLs.
-   * @returns {Promise<void>}
-   */
-  async clearAll() {
-    for (const url of this._urlCache.values()) {
-      URL.revokeObjectURL(url);
-    }
-    this._urlCache.clear();
-
-    const db = await this.open();
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).clear();
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error || new Error('Failed to clear local media store.'));
-    });
-  }
+  return cachedWebpSupport;
 }
 
-/**
- * Loads a Blob/File into an HTMLImageElement to read its natural dimensions.
- * @param {Blob} blob
- * @returns {Promise<HTMLImageElement>}
- */
-function loadImageElement(blob) {
+function extFromMime(mime) {
+  if (mime === 'image/webp') return 'webp';
+  if (mime === 'image/png') return 'png';
+  if (mime === 'image/gif') return 'gif';
+  return 'jpg';
+}
+
+function mimeFromPath(pathStr) {
+  const clean = String(pathStr || '').split('?')[0].toLowerCase();
+  if (clean.endsWith('.webp')) return 'image/webp';
+  if (clean.endsWith('.png')) return 'image/png';
+  if (clean.endsWith('.gif')) return 'image/gif';
+  return 'image/jpeg';
+}
+
+function loadImageElementFromFile(file) {
   return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
       URL.revokeObjectURL(url);
@@ -284,936 +157,819 @@ function loadImageElement(blob) {
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(new Error('Could not decode image file. Make sure it is a valid PNG, JPG, WebP, or GIF.'));
+      reject(new Error('Could not decode image file.'));
     };
     img.src = url;
   });
 }
 
-/**
- * Encodes an HTMLCanvasElement into a Blob of the requested MIME type and quality.
- * @param {HTMLCanvasElement} canvas
- * @param {string} mimeType
- * @param {number} quality
- * @returns {Promise<Blob>}
- */
-function canvasToBlob(canvas, mimeType, quality) {
+function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => {
-        if (blob) {
-          resolve(blob);
-        } else {
-          reject(new Error('Browser failed to encode compressed image.'));
-        }
-      },
-      mimeType,
-      quality
-    );
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Could not read image preview.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function canvasToBlob(canvas, mime, quality) {
+  return new Promise((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), mime, quality);
   });
 }
 
 /**
- * Validates and optionally downscales/compresses an uploaded image file so GitHub
- * commits remain fast and lightweight. Preserves animated GIFs untouched.
- * @param {File} file
- * @param {{ maxDimension?: number, quality?: number, maxBytes?: number, compress?: boolean }} [options]
- * @returns {Promise<{ blob: Blob, arrayBuffer: ArrayBuffer, ext: string, mimeType: string, width: number, height: number, size: number }>}
+ * Compresses and resizes an uploaded photo in the browser to WebP (or JPEG fallback).
+ * Preserves animated GIFs untouched so animation frames are never lost.
  */
 export async function processImageFile(file, options = {}) {
-  if (!file || !(file instanceof Blob)) {
-    throw new Error('No image file provided.');
+  if (!file) throw new Error('No file selected.');
+  if (!ALLOWED_MIMES.has(file.type)) {
+    throw new Error('Unsupported image format. Please choose PNG, JPG, WebP, or GIF.');
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    throw new Error('Image exceeds 25 MB maximum upload limit.');
   }
 
-  const mimeType = file.type;
-  if (!ALLOWED_IMAGE_TYPES.includes(mimeType)) {
-    throw new Error('Unsupported image type. Please upload a JPG, PNG, WebP, or GIF image.');
-  }
+  const presetKey = WEBP_PRESETS[options.preset] ? options.preset : 'balanced';
+  const preset = WEBP_PRESETS[presetKey];
+  const originalBytes = file.size;
 
-  const maxDimension = Number(options.maxDimension) || 1800;
-  const quality = Number(options.quality) || 0.86;
-  const maxBytes = Number(options.maxBytes) || MAX_IMAGE_BYTES;
-  const shouldCompress = options.compress !== false;
-
-  const img = await loadImageElement(file);
-  const naturalW = img.naturalWidth || 0;
-  const naturalH = img.naturalHeight || 0;
-
-  // Preserve animated GIFs directly without canvas re-encoding
-  if (mimeType === 'image/gif') {
-    if (file.size > maxBytes) {
-      throw new Error(
-        `GIF file is too large (${(file.size / (1024 * 1024)).toFixed(2)} MB). Maximum allowed size is ${(
-          maxBytes /
-          (1024 * 1024)
-        ).toFixed(0)} MB.`
-      );
-    }
+  if (file.type === 'image/gif' || presetKey === 'original') {
     const arrayBuffer = await file.arrayBuffer();
+    const dataUrl = await blobToDataUrl(file);
     return {
       blob: file,
       arrayBuffer,
-      ext: 'gif',
-      mimeType: 'image/gif',
-      width: naturalW,
-      height: naturalH,
-      size: file.size,
+      bytes: new Uint8Array(arrayBuffer),
+      dataUrl,
+      ext: extFromMime(file.type),
+      mime: file.type,
+      mimeType: file.type,
+      size: arrayBuffer.byteLength,
+      originalBytes,
+      compressedBytes: arrayBuffer.byteLength,
+      savedPercent: 0,
+      preset: presetKey,
+      formatLabel: file.type === 'image/gif' ? 'GIF (animated preserved)' : 'Original',
     };
   }
 
-  const needsResize = naturalW > maxDimension || naturalH > maxDimension;
-  const needsSizeShrink = file.size > Math.min(maxBytes, 1.4 * 1024 * 1024);
+  const img = await loadImageElementFromFile(file);
+  const srcW = img.naturalWidth || img.width;
+  const srcH = img.naturalHeight || img.height;
 
-  if (!shouldCompress || (!needsResize && !needsSizeShrink)) {
-    if (file.size > maxBytes) {
-      throw new Error(
-        `Image exceeds maximum size of ${(maxBytes / (1024 * 1024)).toFixed(0)} MB.`
-      );
-    }
-    const arrayBuffer = await file.arrayBuffer();
-    return {
-      blob: file,
-      arrayBuffer,
-      ext: MIME_TO_EXT[mimeType] || 'jpg',
-      mimeType,
-      width: naturalW,
-      height: naturalH,
-      size: file.size,
-    };
+  let targetW = srcW;
+  let targetH = srcH;
+  if (preset.maxDim > 0 && Math.max(srcW, srcH) > preset.maxDim) {
+    const scale = preset.maxDim / Math.max(srcW, srcH);
+    targetW = Math.max(1, Math.round(srcW * scale));
+    targetH = Math.max(1, Math.round(srcH * scale));
   }
-
-  // Proportional downscale
-  const scale = Math.min(1, maxDimension / Math.max(naturalW || 1, naturalH || 1));
-  const targetW = Math.max(1, Math.round(naturalW * scale));
-  const targetH = Math.max(1, Math.round(naturalH * scale));
 
   const canvas = document.createElement('canvas');
   canvas.width = targetW;
   canvas.height = targetH;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error('Unable to acquire 2D canvas context for image processing.');
-  }
-
+  const ctx = canvas.getContext('2d', { alpha: true });
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(img, 0, 0, targetW, targetH);
 
-  // Use WebP/JPEG when shrinking large PNGs, otherwise retain original format
-  let outputMime = mimeType;
-  if (mimeType === 'image/png' && file.size > 1.5 * 1024 * 1024) {
-    outputMime = 'image/webp';
-  }
+  const targetMime = supportsWebpEncoding() ? 'image/webp' : 'image/jpeg';
+  const compressedBlob = await canvasToBlob(canvas, targetMime, preset.quality);
 
-  let outBlob = await canvasToBlob(canvas, outputMime, quality);
-
-  // Fallback to JPEG if browser does not support WebP encoding
-  if (outputMime === 'image/webp' && outBlob.type !== 'image/webp') {
-    outputMime = 'image/jpeg';
-    outBlob = await canvasToBlob(canvas, outputMime, quality);
-  }
-
-  // Second compression pass if still above maxBytes
-  if (outBlob.size > maxBytes) {
-    outputMime = 'image/jpeg';
-    outBlob = await canvasToBlob(canvas, outputMime, 0.72);
-  }
-
-  if (outBlob.size > maxBytes) {
-    throw new Error(
-      `Image is still too large after compression (${(outBlob.size / (1024 * 1024)).toFixed(2)} MB). Please choose a smaller image.`
-    );
-  }
-
-  // If compressed result is somehow larger than original and original already fits bounds, keep original
-  if (!needsResize && outBlob.size >= file.size && file.size <= maxBytes) {
-    const arrayBuffer = await file.arrayBuffer();
+  if (!compressedBlob || compressedBlob.size >= originalBytes) {
+    const fallbackBuf = await file.arrayBuffer();
+    const fallbackUrl = await blobToDataUrl(file);
     return {
       blob: file,
-      arrayBuffer,
-      ext: MIME_TO_EXT[mimeType] || 'jpg',
-      mimeType,
-      width: naturalW,
-      height: naturalH,
-      size: file.size,
+      arrayBuffer: fallbackBuf,
+      bytes: new Uint8Array(fallbackBuf),
+      dataUrl: fallbackUrl,
+      ext: extFromMime(file.type),
+      mime: file.type,
+      mimeType: file.type,
+      width: srcW,
+      height: srcH,
+      size: fallbackBuf.byteLength,
+      originalBytes,
+      compressedBytes: fallbackBuf.byteLength,
+      savedPercent: 0,
+      preset: presetKey,
+      formatLabel: `${extFromMime(file.type).toUpperCase()} (already optimal)`,
     };
   }
 
-  const finalMime = outBlob.type || outputMime;
-  const arrayBuffer = await outBlob.arrayBuffer();
+  const arrayBuffer = await compressedBlob.arrayBuffer();
+  const dataUrl = await blobToDataUrl(compressedBlob);
+  const savedPercent = Math.max(
+    0,
+    Math.round(((originalBytes - arrayBuffer.byteLength) / originalBytes) * 100)
+  );
 
   return {
-    blob: outBlob,
+    blob: compressedBlob,
     arrayBuffer,
-    ext: MIME_TO_EXT[finalMime] || 'jpg',
-    mimeType: finalMime,
+    bytes: new Uint8Array(arrayBuffer),
+    dataUrl,
+    ext: extFromMime(targetMime),
+    mime: targetMime,
+    mimeType: targetMime,
     width: targetW,
     height: targetH,
-    size: outBlob.size,
+    size: arrayBuffer.byteLength,
+    originalBytes,
+    compressedBytes: arrayBuffer.byteLength,
+    savedPercent,
+    preset: presetKey,
+    formatLabel: `${targetMime === 'image/webp' ? 'WebP' : 'JPEG'} ${targetW}×${targetH}`,
   };
 }
 
 /**
- * Resolves a stored media src into a browser-renderable URL across:
- * 1. Local IndexedDB sandbox blobs ("idb://...")
- * 2. Safe external https:// URLs
- * 3. Direct GitHub API blobs (when authenticated, so uploads render immediately before Neocities deploy finishes)
- * 4. Static relative Neocities paths ("./data/media/...")
- * @param {string} src
- * @param {{ localStore?: LocalMediaStore | null, githubClient?: any }} [context]
- * @returns {Promise<string>}
+ * Prepares a compressed image buffer for either plaintext or AES-256-GCM .enc storage.
  */
-export async function resolveMediaSrc(src, context = {}) {
-  if (typeof src !== 'string') return '';
-  const trimmed = src.trim();
-  if (!trimmed) return '';
-
-  const { localStore = null, githubClient = null } = context;
-
-  // Already a live browser blob or inline data image
-  if (trimmed.startsWith('blob:') || trimmed.startsWith('data:image/')) {
-    return trimmed;
-  }
-
-  // IndexedDB sandbox image
-  if (trimmed.startsWith('idb://')) {
-    if (!localStore) return '';
-    try {
-      const objUrl = await localStore.getObjectUrl(trimmed);
-      return objUrl || '';
-    } catch {
-      return '';
+export async function prepareMediaPayloadForStorage({
+  buffer,
+  mime = 'image/webp',
+  ext = 'webp',
+  datePrefix = '2026-11-24',
+  encrypt = false,
+  keyring = null,
+}) {
+  const stamp = `${datePrefix}-${Date.now()}`;
+  if (encrypt) {
+    if (!keyring?.dek && !keyring?.legacyKey) {
+      throw new Error('Unlock your Vault first to encrypt photos (.enc).');
     }
+    const mediaSubpath = `media/${stamp}.${ext}.enc`;
+    const aad = buildMediaAad(mediaSubpath);
+    const encBytes = await encryptBinary(buffer, keyring, { mime, aad });
+    return {
+      mediaSubpath,
+      uploadBuffer: encBytes.buffer,
+      uploadMime: 'application/octet-stream',
+      encrypted: true,
+    };
   }
 
-  // External HTTP/HTTPS URL
-  if (/^https?:\/\//i.test(trimmed)) {
-    return sanitizeUrl(trimmed) || '';
-  }
-
-  // Relative repository media path (e.g., data/media/2026-11-24-12345.jpg)
-  const cleanPath = trimmed.replace(/^\.\/+/, '').replace(/^\/+/, '');
-  if (!cleanPath || cleanPath.includes('..')) return '';
-
-  // Check IndexedDB cache first (gives instant zero-latency preview right after upload)
-  if (localStore) {
-    try {
-      const cachedLocal = await localStore.getObjectUrl(cleanPath);
-      if (cachedLocal) return cachedLocal;
-    } catch {
-      // Ignore local store miss and proceed
-    }
-  }
-
-  // In Live Authenticated Mode, read newly committed photos directly from GitHub API
-  if (githubClient && typeof githubClient.canWrite === 'function' && githubClient.canWrite() && githubClient.readFromApi) {
-    const cacheKey = `${githubClient.owner}/${githubClient.repo}@${githubClient.branch}:${cleanPath}`;
-    if (githubMediaUrlCache.has(cacheKey)) {
-      return githubMediaUrlCache.get(cacheKey);
-    }
-    try {
-      const blobUrl = await githubClient.fetchRawMediaBlobUrl(cleanPath);
-      githubMediaUrlCache.set(cacheKey, blobUrl);
-      return blobUrl;
-    } catch {
-      // Fall back to static Neocities path
-    }
-  }
-
-  return `./${cleanPath}`;
+  const mediaSubpath = `media/${stamp}.${ext}`;
+  const outBuf = buffer instanceof Uint8Array ? buffer.buffer : buffer;
+  return {
+    mediaSubpath,
+    uploadBuffer: outBuf,
+    uploadMime: mime,
+    encrypted: false,
+  };
 }
 
 /**
- * Interactive Hold-and-Drag Alignment Studio mounted inside the Entry Composer
- * and Comment Composer. Supports:
- * - Dragging the amber handle bar to snap into Left Wrap, Center, Right Wrap, or Full Width
- * - Holding and dragging inside the viewport to pan focal point (object-position)
- * - Holding and dragging the bottom-right corner grip to resize width % and height px
- * - Quick preset buttons, Reset Focus, and optional caption editing
+ * IndexedDB binary store for Sandbox Mode (supports both raw ArrayBuffer and Blob records).
  */
-export class AlignmentStudio {
-  /**
-   * @param {HTMLElement} mountEl
-   * @param {{ onChange?: (meta: Object | null) => void, sampleText?: string }} [options]
-   */
-  constructor(mountEl, options = {}) {
-    this.mountEl = mountEl;
-    this.onChange = typeof options.onChange === 'function' ? options.onChange : () => {};
-    this.sampleText = options.sampleText || '';
-
-    /** @type {Object | null} */
-    this.meta = null;
-    /** @type {string} */
-    this.displayUrl = '';
-
-    /** @type {Array<() => void>} */
-    this._cleanups = [];
-
-    // Cached DOM refs populated on render
-    this._els = {};
+export class LocalMediaStore {
+  constructor(dbName = 'PerpetualDiaryMediaDB', storeName = 'images') {
+    this.dbName = dbName;
+    this.storeName = storeName;
+    this.db = null;
   }
 
-  /**
-   * Loads an image and its alignment metadata into the studio.
-   * Passing null clears the studio.
-   * @param {Object | null} meta
-   * @param {string} [previewDisplayUrl]
-   */
-  setImage(meta, previewDisplayUrl) {
-    const normalized = normalizeImageMeta(meta);
-    if (!normalized) {
+  open() {
+    if (this.db) return Promise.resolve(this.db);
+    return new Promise((resolve, reject) => {
+      if (typeof indexedDB === 'undefined') {
+        reject(new Error('IndexedDB is unavailable.'));
+        return;
+      }
+      const req = window.indexedDB.open(this.dbName, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(this.storeName)) {
+          db.createObjectStore(this.storeName, { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => {
+        this.db = req.result;
+        resolve(this.db);
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async putImage(id, arrayBufferOrBytes, mime = 'image/webp') {
+    const db = await this.open();
+    const buf =
+      arrayBufferOrBytes instanceof Uint8Array
+        ? arrayBufferOrBytes.slice().buffer
+        : arrayBufferOrBytes instanceof Blob
+          ? await arrayBufferOrBytes.arrayBuffer()
+          : arrayBufferOrBytes;
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(this.storeName, 'readwrite');
+      tx.objectStore(this.storeName).put({
+        id,
+        buffer: buf,
+        mime,
+        savedAt: new Date().toISOString(),
+      });
+      tx.oncomplete = () => resolve(id);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async saveBlob(id, blob) {
+    return this.putImage(id, blob, blob?.type || 'image/webp');
+  }
+
+  async getImageRecord(id) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(this.storeName, 'readonly');
+      const req = tx.objectStore(this.storeName).get(id);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async getBlob(id) {
+    const rec = await this.getImageRecord(id);
+    if (!rec || !rec.buffer) return null;
+    return new Blob([rec.buffer], { type: rec.mime || 'image/webp' });
+  }
+
+  async getObjectUrl(id) {
+    const blob = await this.getBlob(id);
+    return blob ? URL.createObjectURL(blob) : null;
+  }
+
+  async deleteImage(id) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(this.storeName, 'readwrite');
+      tx.objectStore(this.storeName).delete(id);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async deleteBlob(id) {
+    return this.deleteImage(id);
+  }
+}
+
+/**
+ * Fetches raw binary bytes from IndexedDB, Split-Repo/Vault GitHub API (with >1 MB Git Blobs fallback),
+ * or static hosted path.
+ */
+export async function fetchRawMediaBytes(src, ghClient, mediaStore = null) {
+  if (!src) return null;
+
+  if (src.startsWith('idb://') || src.startsWith('idb:')) {
+    if (!mediaStore) return null;
+    const key = src.startsWith('idb://') ? src.slice(6) : src.slice(4);
+    const rec = (await mediaStore.getImageRecord(key)) || (await mediaStore.getImageRecord(src));
+    if (!rec?.buffer) return null;
+    return {
+      bytes: new Uint8Array(rec.buffer),
+      mime: rec.mime || mimeFromPath(key),
+      subpath: key.replace(/^data\//i, ''),
+    };
+  }
+
+  if (/^https?:\/\//i.test(src)) {
+    const res = await fetch(src, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`Failed to fetch external media (${res.status}).`);
+    const buf = await res.arrayBuffer();
+    return {
+      bytes: new Uint8Array(buf),
+      mime: res.headers.get('content-type') || mimeFromPath(src),
+      subpath: src,
+    };
+  }
+
+  const cleanRel = String(src).replace(/^\.\/+/, '').replace(/^\/+/, '');
+  const target = ghClient?.getDataTarget ? ghClient.getDataTarget() : null;
+  const basePrefix = target?.basePath ? `${target.basePath}/` : 'data/';
+  const subpath = cleanRel.startsWith(basePrefix) ? cleanRel.slice(basePrefix.length) : cleanRel;
+
+  const hasGhAuth = Boolean(
+    ghClient &&
+      ((typeof ghClient.hasToken === 'function' && ghClient.hasToken()) ||
+        (typeof ghClient.canWrite === 'function' && ghClient.canWrite()))
+  );
+
+  if (hasGhAuth && target?.owner && target?.repo) {
+    const fullRepoPath = cleanRel.startsWith(basePrefix) ? cleanRel : `${basePrefix}${cleanRel}`;
+    const encodedPath = fullRepoPath.split('/').map(encodeURIComponent).join('/');
+    const tokenVal = ghClient.config?.token || ghClient.token || '';
+    const headers = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      Authorization: `Bearer ${String(tokenVal).trim()}`,
+    };
+    const metaUrl = `https://api.github.com/repos/${encodeURIComponent(
+      target.owner
+    )}/${encodeURIComponent(target.repo)}/contents/${encodedPath}?ref=${encodeURIComponent(
+      target.branch
+    )}&_t=${Date.now()}`;
+
+    const res = await fetch(metaUrl, { headers, cache: 'no-store' });
+    if (!res.ok) {
+      throw new Error(`Failed to load vault media (${res.status}): ${fullRepoPath}`);
+    }
+    const meta = await res.json();
+    let b64 = meta?.content ? String(meta.content).replace(/\s+/g, '') : '';
+
+    if (!b64 && meta?.sha) {
+      const blobUrl = `https://api.github.com/repos/${encodeURIComponent(
+        target.owner
+      )}/${encodeURIComponent(target.repo)}/git/blobs/${encodeURIComponent(meta.sha)}`;
+      const blobRes = await fetch(blobUrl, { headers, cache: 'no-store' });
+      if (!blobRes.ok) throw new Error(`Failed to fetch large media blob (${blobRes.status}).`);
+      const blobJson = await blobRes.json();
+      b64 = String(blobJson?.content || '').replace(/\s+/g, '');
+    }
+
+    if (!b64) return null;
+    return {
+      bytes: base64ToBytes(b64),
+      mime: mimeFromPath(fullRepoPath),
+      subpath,
+      sha: meta.sha || null,
+    };
+  }
+
+  const staticUrl = `./${cleanRel}?t=${Date.now()}`;
+  const staticRes = await fetch(staticUrl, { cache: 'no-store' });
+  if (!staticRes.ok) return null;
+  const buf = await staticRes.arrayBuffer();
+  return {
+    bytes: new Uint8Array(buf),
+    mime: staticRes.headers.get('content-type') || mimeFromPath(cleanRel),
+    subpath,
+  };
+}
+
+/**
+ * Resolves a media path (plaintext or encrypted .enc) into a managed RAM blob: URL
+ * and returns a structured status so locked/tampered photos display clean states.
+ */
+export async function resolveMediaAsset(
+  src,
+  ghClient,
+  mediaStore = null,
+  keyring = null,
+  ramMap = null
+) {
+  if (!src) return { status: 'empty', url: '', encrypted: false };
+  const isEnc = isEncryptedMediaPath(src);
+
+  if (src.startsWith('data:image/') || src.startsWith('blob:')) {
+    return { status: 'ok', url: src, encrypted: false };
+  }
+
+  if (src.startsWith('ram:')) {
+    if (!isEnc) {
+      const url = ramMap?.get(src) || '';
+      return { status: url ? 'ok' : 'error', url, encrypted: false };
+    }
+    if (!keyring?.dek && !keyring?.legacyKey) {
+      return { status: 'locked', url: '', encrypted: true };
+    }
+    const cacheKey = `${src}::${keyring.dekFingerprint || 'key'}`;
+    if (managedBlobUrlCache.has(cacheKey)) {
+      return { status: 'ok', url: managedBlobUrlCache.get(cacheKey), encrypted: true };
+    }
+    const rawEncBytes = ramMap?.get(src);
+    if (!rawEncBytes) return { status: 'error', url: '', encrypted: true };
+    try {
+      const decrypted = await decryptBinary(rawEncBytes, keyring, {
+        aad: buildMediaAad(src.slice(4)),
+      });
+      const blobUrl = URL.createObjectURL(new Blob([decrypted.bytes], { type: decrypted.mime }));
+      managedBlobUrlCache.set(cacheKey, blobUrl);
+      return { status: 'ok', url: blobUrl, encrypted: true };
+    } catch (err) {
+      return {
+        status: err?.code === 'AAD_TAMPER_ERROR' ? 'tampered' : 'error',
+        url: '',
+        encrypted: true,
+        error: err.message,
+      };
+    }
+  }
+
+  if (/^https:\/\//i.test(src) && !isEnc) {
+    return { status: 'ok', url: src, encrypted: false };
+  }
+
+  if (isEnc && !keyring?.dek && !keyring?.legacyKey) {
+    return { status: 'locked', url: '', encrypted: true };
+  }
+
+  const cacheKey = isEnc ? `${src}::${keyring?.dekFingerprint || 'key'}` : src;
+  if (managedBlobUrlCache.has(cacheKey)) {
+    return { status: 'ok', url: managedBlobUrlCache.get(cacheKey), encrypted: isEnc };
+  }
+
+  try {
+    const hasToken = Boolean(
+      ghClient && typeof ghClient.hasToken === 'function' && ghClient.hasToken()
+    );
+    if (!isEnc && !src.startsWith('idb:') && !src.startsWith('idb://') && !hasToken) {
+      const cleanRel = String(src).replace(/^\.\/+/, '').replace(/^\/+/, '');
+      return { status: 'ok', url: `./${cleanRel}?t=${Date.now()}`, encrypted: false };
+    }
+
+    const fetched = await fetchRawMediaBytes(src, ghClient, mediaStore);
+    if (!fetched || !fetched.bytes) {
+      return { status: 'error', url: '', encrypted: isEnc };
+    }
+
+    if (isEnc) {
+      const decrypted = await decryptBinary(fetched.bytes, keyring, {
+        aad: buildMediaAad(fetched.subpath),
+      });
+      const blobUrl = URL.createObjectURL(new Blob([decrypted.bytes], { type: decrypted.mime }));
+      managedBlobUrlCache.set(cacheKey, blobUrl);
+      return { status: 'ok', url: blobUrl, encrypted: true };
+    }
+
+    const blobUrl = URL.createObjectURL(new Blob([fetched.bytes], { type: fetched.mime }));
+    managedBlobUrlCache.set(cacheKey, blobUrl);
+    return { status: 'ok', url: blobUrl, encrypted: false };
+  } catch (err) {
+    return {
+      status: err?.code === 'AAD_TAMPER_ERROR' ? 'tampered' : 'error',
+      url: '',
+      encrypted: isEnc,
+      error: err.message,
+    };
+  }
+}
+
+export async function resolveMediaSrc(src, ghOrContext = null, mediaStore = null, keyring = null, ramMap = null) {
+  if (ghOrContext && (ghOrContext.localStore !== undefined || ghOrContext.githubClient !== undefined)) {
+    const asset = await resolveMediaAsset(
+      src,
+      ghOrContext.githubClient || null,
+      ghOrContext.localStore || null,
+      ghOrContext.keyring || null,
+      ghOrContext.ramMap || null
+    );
+    return asset.status === 'ok' ? asset.url : '';
+  }
+  const asset = await resolveMediaAsset(src, ghOrContext, mediaStore, keyring, ramMap);
+  return asset.status === 'ok' ? asset.url : '';
+}
+
+/**
+ * Interactive Hold-and-Drag Alignment Studio (Pointer Events: Mouse & Touch).
+ */
+export class AlignmentStudio {
+  constructor(hostEl, { onChange = null } = {}) {
+    this.hostEl = hostEl;
+    this.onChange = onChange;
+    this.layout = { align: 'full', posX: 50, posY: 50, width: 100, height: 220 };
+    this.src = '';
+    this.metaNote = '';
+  }
+
+  setMedia(src, layout = {}, metaNote = '') {
+    this.src = src || '';
+    this.metaNote = metaNote || '';
+    this.layout = {
+      align: VALID_ALIGNS.has(layout.align) ? layout.align : 'full',
+      posX: Math.round(clamp(layout.posX ?? 50, 0, 100)),
+      posY: Math.round(clamp(layout.posY ?? 50, 0, 100)),
+      width: Math.round(clamp(layout.width ?? 100, 30, 100)),
+      height: Math.round(clamp(layout.height ?? 220, 110, 420)),
+    };
+    this.render();
+  }
+
+  setImage(meta, previewUrl) {
+    if (!meta) {
+      this.clear();
+      return;
+    }
+    this.setMedia(previewUrl || meta.src, meta);
+  }
+
+  getMeta() {
+    return this.src ? { src: this.src, ...this.layout } : null;
+  }
+
+  clear() {
+    this.src = '';
+    this.metaNote = '';
+    if (this.hostEl) {
+      this.hostEl.innerHTML = '';
+      this.hostEl.hidden = true;
+    }
+  }
+
+  emitChange() {
+    if (typeof this.onChange === 'function') {
+      this.onChange({ ...this.layout });
+    }
+  }
+
+  render() {
+    if (!this.hostEl) return;
+    if (!this.src) {
       this.clear();
       return;
     }
 
-    this.meta = normalized;
-    this.displayUrl = previewDisplayUrl || normalized.src;
-    this._render();
-  }
+    this.hostEl.hidden = false;
+    this.hostEl.innerHTML = `
+      <div class="align-studio">
+        <div class="align-studio-top">
+          <div class="align-preset-group" role="group" aria-label="Layout Preset">
+            <button type="button" class="btn btn-ghost btn-sm align-preset-btn" data-align="left">Left Wrap</button>
+            <button type="button" class="btn btn-ghost btn-sm align-preset-btn" data-align="center">Center</button>
+            <button type="button" class="btn btn-ghost btn-sm align-preset-btn" data-align="right">Right Wrap</button>
+            <button type="button" class="btn btn-ghost btn-sm align-preset-btn" data-align="full">Full Width</button>
+          </div>
+          <div class="align-hud-group">
+            ${this.metaNote ? `<span class="media-stats-pill">${this.metaNote}</span>` : ''}
+            <span class="mono-meta align-hud-readout">PAN: ${Math.round(this.layout.posX)}% × ${Math.round(this.layout.posY)}%</span>
+            <button type="button" class="btn btn-ghost btn-sm align-reset-btn">Reset Focus</button>
+          </div>
+        </div>
 
-  /**
-   * Returns a normalized copy of the current image metadata, or null if empty.
-   * @returns {Object | null}
-   */
-  getMeta() {
-    return this.meta ? { ...this.meta } : null;
-  }
+        <div class="align-canvas">
+          <div class="snap-zones-overlay" hidden>
+            <div class="snap-zone" data-zone="left">LEFT WRAP</div>
+            <div class="snap-zone" data-zone="center">CENTER</div>
+            <div class="snap-zone" data-zone="right">RIGHT WRAP</div>
+            <div class="snap-zone" data-zone="full">FULL WIDTH</div>
+          </div>
 
-  /**
-   * Updates layout alignment mode ('left' | 'center' | 'right' | 'full').
-   * @param {'left' | 'center' | 'right' | 'full'} align
-   */
-  setAlign(align) {
-    if (!this.meta || !VALID_ALIGNS.has(align)) return;
-    this.meta.align = align;
-    this._syncVisuals();
-    this.onChange(this.getMeta());
-  }
+          <div class="align-preview-box">
+            <div class="align-drag-bar" title="Hold & drag to snap layout (Left / Center / Right / Full)">
+              <span>⋮⋮ DRAG TO SNAP LAYOUT</span>
+            </div>
+            <div class="align-img-viewport" title="Hold & drag inside photo to pan focal point">
+              <img src="${this.src}" alt="Alignment preview" draggable="false" />
+              <div class="align-resize-grip" title="Hold & drag corner to resize">↘</div>
+            </div>
+          </div>
 
-  /**
-   * Resets focal panning to center (50% × 50%).
-   */
-  resetFocus() {
-    if (!this.meta) return;
-    this.meta.posX = 50;
-    this.meta.posY = 50;
-    this._syncVisuals();
-    this.onChange(this.getMeta());
-  }
+          <p class="align-dummy-prose">
+            Hold the amber bar above to snap between Left Wrap, Center, Right Wrap, and Full Width. Hold directly inside the image to pan the focal crop, or drag the bottom-right corner grip to adjust width and frame height.
+          </p>
+        </div>
+      </div>
+    `;
 
-  /**
-   * Clears the active image and unmounts studio DOM/listeners.
-   */
-  clear() {
-    this._teardownListeners();
-    this.meta = null;
-    this.displayUrl = '';
-    this._els = {};
-    if (this.mountEl) {
-      this.mountEl.innerHTML = '';
-    }
-  }
+    const studioEl = this.hostEl.querySelector('.align-studio');
+    const canvasEl = studioEl.querySelector('.align-canvas');
+    const overlayEl = studioEl.querySelector('.snap-zones-overlay');
+    const previewBox = studioEl.querySelector('.align-preview-box');
+    const dragBar = studioEl.querySelector('.align-drag-bar');
+    const viewportEl = studioEl.querySelector('.align-img-viewport');
+    const imgEl = viewportEl.querySelector('img');
+    const resizeGrip = studioEl.querySelector('.align-resize-grip');
+    const hudEl = studioEl.querySelector('.align-hud-readout');
 
-  /**
-   * Permanently destroys the studio instance.
-   */
-  destroy() {
-    this.clear();
-  }
+    const applyVisuals = () => {
+      previewBox.className = `align-preview-box align-${this.layout.align}`;
+      previewBox.style.width =
+        this.layout.align === 'full' ? '100%' : `${clamp(this.layout.width, 30, 100)}%`;
+      viewportEl.style.height = `${clamp(this.layout.height, 110, 420)}px`;
+      imgEl.style.objectPosition = `${this.layout.posX}% ${this.layout.posY}%`;
+      hudEl.textContent = `PAN: ${Math.round(this.layout.posX)}% × ${Math.round(
+        this.layout.posY
+      )}% · W:${Math.round(this.layout.width)}% H:${Math.round(this.layout.height)}px`;
 
-  _teardownListeners() {
-    while (this._cleanups.length > 0) {
-      const fn = this._cleanups.pop();
-      try {
-        fn();
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
-  }
-
-  _addListener(target, eventName, handler, options) {
-    target.addEventListener(eventName, handler, options);
-    this._cleanups.push(() => target.removeEventListener(eventName, handler, options));
-  }
-
-  _render() {
-    if (!this.mountEl || !this.meta) return;
-    this._teardownListeners();
-    this.mountEl.innerHTML = '';
-
-    const shell = document.createElement('div');
-    shell.className = 'studio-shell';
-
-    // Top toolbar: quick alignment presets + reset focus + live HUD readout
-    const toolbar = document.createElement('div');
-    toolbar.className = 'studio-toolbar';
-
-    const presets = document.createElement('div');
-    presets.className = 'studio-presets';
-
-    const presetDefs = [
-      { key: 'left', label: 'Left Wrap' },
-      { key: 'center', label: 'Center' },
-      { key: 'right', label: 'Right Wrap' },
-      { key: 'full', label: 'Full Width' },
-    ];
-
-    const presetButtons = {};
-    for (const def of presetDefs) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'btn btn-ghost btn-xs';
-      btn.dataset.alignPreset = def.key;
-      btn.textContent = def.label;
-      this._addListener(btn, 'click', () => this.setAlign(def.key));
-      presets.appendChild(btn);
-      presetButtons[def.key] = btn;
-    }
-
-    const resetBtn = document.createElement('button');
-    resetBtn.type = 'button';
-    resetBtn.className = 'btn btn-ghost btn-xs';
-    resetBtn.textContent = 'Reset Focus';
-    this._addListener(resetBtn, 'click', () => this.resetFocus());
-    presets.appendChild(resetBtn);
-
-    const hudReadout = document.createElement('span');
-    hudReadout.className = 'studio-hud-readout';
-
-    toolbar.appendChild(presets);
-    toolbar.appendChild(hudReadout);
-
-    // Live Prose Preview Canvas
-    const canvas = document.createElement('div');
-    canvas.className = 'studio-canvas';
-
-    // Draggable Frame
-    const frame = document.createElement('div');
-    frame.className = 'studio-frame';
-
-    // 1. Amber Handle Bar for Hold-and-Drag Snap Zones
-    const dragHandle = document.createElement('div');
-    dragHandle.className = 'studio-drag-handle';
-    dragHandle.title = 'Hold and drag to snap layout (Left, Center, Right, Full)';
-    dragHandle.innerHTML = '<span>⠿ HOLD &amp; DRAG TO ALIGN</span><span data-role="align-tag"></span>';
-    const alignTagEl = dragHandle.querySelector('[data-role="align-tag"]');
-
-    // 2. Focal Pan Viewport
-    const viewport = document.createElement('div');
-    viewport.className = 'studio-viewport';
-    viewport.title = 'Hold and drag inside image to pan focal point';
-
-    const img = document.createElement('img');
-    img.alt = this.meta.caption || 'Diary photo preview';
-    img.draggable = false;
-    img.src = this.displayUrl;
-
-    const panHud = document.createElement('div');
-    panHud.className = 'studio-pan-hud';
-
-    viewport.appendChild(img);
-    viewport.appendChild(panHud);
-
-    // 3. Bottom-Right Corner Resize Grip
-    const resizeGrip = document.createElement('div');
-    resizeGrip.className = 'studio-resize-grip';
-    resizeGrip.title = 'Drag corner to resize width & height';
-
-    frame.appendChild(dragHandle);
-    frame.appendChild(viewport);
-    frame.appendChild(resizeGrip);
-
-    // Sample Editorial Prose wrapping around the frame
-    const prose = document.createElement('div');
-    prose.className = 'studio-prose-sample';
-    const paragraphs = this.sampleText
-      ? [this.sampleText, SAMPLE_STUDIO_PROSE[1]]
-      : SAMPLE_STUDIO_PROSE;
-    for (const pText of paragraphs) {
-      const p = document.createElement('p');
-      p.textContent = pText;
-      prose.appendChild(p);
-    }
-
-    // Translucent 4-Zone Snap Overlay (visible only while dragging the amber bar)
-    const snapOverlay = document.createElement('div');
-    snapOverlay.className = 'studio-snap-overlay';
-    snapOverlay.hidden = true;
-
-    const zoneDefs = [
-      { zone: 'left', label: 'Left Wrap' },
-      { zone: 'center', label: 'Center' },
-      { zone: 'right', label: 'Right Wrap' },
-      { zone: 'full', label: 'Full Width' },
-    ];
-    const snapZones = [];
-    for (const z of zoneDefs) {
-      const zoneEl = document.createElement('div');
-      zoneEl.className = 'snap-zone';
-      zoneEl.dataset.zone = z.zone;
-      zoneEl.textContent = z.label;
-      snapOverlay.appendChild(zoneEl);
-      snapZones.push(zoneEl);
-    }
-
-    canvas.appendChild(frame);
-    canvas.appendChild(prose);
-    canvas.appendChild(snapOverlay);
-
-    // Caption Input Row
-    const captionRow = document.createElement('div');
-    captionRow.className = 'studio-caption-row';
-
-    const captionInput = document.createElement('input');
-    captionInput.type = 'text';
-    captionInput.className = 'input input-sm';
-    captionInput.placeholder = 'Optional photo caption…';
-    captionInput.maxLength = 180;
-    captionInput.value = this.meta.caption || '';
-    this._addListener(captionInput, 'input', () => {
-      if (!this.meta) return;
-      this.meta.caption = captionInput.value;
-      img.alt = this.meta.caption || 'Diary photo preview';
-      this.onChange(this.getMeta());
-    });
-
-    captionRow.appendChild(captionInput);
-
-    shell.appendChild(toolbar);
-    shell.appendChild(canvas);
-    shell.appendChild(captionRow);
-    this.mountEl.appendChild(shell);
-
-    this._els = {
-      presetButtons,
-      hudReadout,
-      canvas,
-      frame,
-      dragHandle,
-      alignTagEl,
-      viewport,
-      img,
-      panHud,
-      resizeGrip,
-      snapOverlay,
-      snapZones,
-      captionInput,
+      studioEl.querySelectorAll('.align-preset-btn').forEach((b) => {
+        b.classList.toggle('is-active', b.dataset.align === this.layout.align);
+      });
     };
 
-    this._bindDragAlign();
-    this._bindFocalPan();
-    this._bindCornerResize();
-    this._syncVisuals();
-  }
+    applyVisuals();
 
-  _syncVisuals() {
-    if (!this.meta || !this._els.frame) return;
-
-    const { align, posX, posY, width, height } = this.meta;
-    const { frame, viewport, img, panHud, hudReadout, alignTagEl, presetButtons } = this._els;
-
-    frame.classList.remove('align-left', 'align-center', 'align-right', 'align-full');
-    frame.classList.add(`align-${align}`);
-    frame.style.width = align === 'full' ? '100%' : `${width}%`;
-
-    viewport.style.height = `${height}px`;
-    img.style.objectPosition = `${posX}% ${posY}%`;
-
-    panHud.textContent = `PAN: ${posX}% × ${posY}%`;
-    if (alignTagEl) {
-      alignTagEl.textContent = align.toUpperCase();
-    }
-
-    const displayW = align === 'full' ? 100 : width;
-    hudReadout.textContent = `${align.toUpperCase()} · W:${displayW}% · H:${height}px · PAN:${posX}%×${posY}%`;
-
-    for (const [key, btn] of Object.entries(presetButtons)) {
-      btn.classList.toggle('is-active', key === align);
-    }
-  }
-
-  /**
-   * 1. Drag-to-Align Snap Zones via Pointer Events on the amber drag handle.
-   */
-  _bindDragAlign() {
-    const { dragHandle, snapOverlay, snapZones } = this._els;
-    let dragging = false;
-    let activeZone = null;
-
-    const hitTestZone = (clientX, clientY) => {
-      for (const zEl of snapZones) {
-        const rect = zEl.getBoundingClientRect();
-        if (
-          clientX >= rect.left &&
-          clientX <= rect.right &&
-          clientY >= rect.top &&
-          clientY <= rect.bottom
-        ) {
-          return zEl.dataset.zone;
-        }
-      }
-      return null;
-    };
-
-    const setHoveredZone = (zoneName) => {
-      activeZone = zoneName;
-      for (const zEl of snapZones) {
-        zEl.classList.toggle('is-hovered', zEl.dataset.zone === zoneName);
-      }
-    };
-
-    this._addListener(dragHandle, 'pointerdown', (e) => {
-      if (!this.meta || e.button > 0) return;
-      e.preventDefault();
-      dragging = true;
-      dragHandle.setPointerCapture(e.pointerId);
-      snapOverlay.hidden = false;
-      setHoveredZone(this.meta.align);
+    studioEl.querySelectorAll('.align-preset-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.layout.align = btn.dataset.align;
+        if (this.layout.align === 'full') this.layout.width = 100;
+        else if (this.layout.width > 75) this.layout.width = 52;
+        applyVisuals();
+        this.emitChange();
+      });
     });
 
-    this._addListener(dragHandle, 'pointermove', (e) => {
-      if (!dragging) return;
-      const hit = hitTestZone(e.clientX, e.clientY);
-      if (hit) {
-        setHoveredZone(hit);
-      }
+    studioEl.querySelector('.align-reset-btn').addEventListener('click', () => {
+      this.layout.posX = 50;
+      this.layout.posY = 50;
+      applyVisuals();
+      this.emitChange();
     });
 
-    const finishDrag = (e, commit) => {
-      if (!dragging) return;
-      dragging = false;
-      try {
-        if (dragHandle.hasPointerCapture(e.pointerId)) {
-          dragHandle.releasePointerCapture(e.pointerId);
-        }
-      } catch {
-        // Ignore capture release errors
-      }
-      snapOverlay.hidden = true;
-      const chosen = activeZone;
-      setHoveredZone(null);
-      if (commit && chosen && VALID_ALIGNS.has(chosen)) {
-        this.setAlign(chosen);
-      }
-    };
+    // 1. Hold-and-Drag Snap Zones via Amber Bar
+    dragBar.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      dragBar.setPointerCapture(ev.pointerId);
+      overlayEl.hidden = false;
+      let hoveredZone = this.layout.align;
 
-    this._addListener(dragHandle, 'pointerup', (e) => finishDrag(e, true));
-    this._addListener(dragHandle, 'pointercancel', (e) => finishDrag(e, false));
-  }
+      const onMove = (moveEv) => {
+        const rect = canvasEl.getBoundingClientRect();
+        const relX = (moveEv.clientX - rect.left) / Math.max(1, rect.width);
+        const relY = (moveEv.clientY - rect.top) / Math.max(1, rect.height);
+        if (relY > 0.72) hoveredZone = 'full';
+        else if (relX < 0.33) hoveredZone = 'left';
+        else if (relX > 0.66) hoveredZone = 'right';
+        else hoveredZone = 'center';
 
-  /**
-   * 2. Hold-and-Drag Focal Panning via Pointer Events inside the image viewport.
-   */
-  _bindFocalPan() {
-    const { viewport } = this._els;
-    let panning = false;
-    let startX = 0;
-    let startY = 0;
-    let startPosX = 50;
-    let startPosY = 50;
+        overlayEl.querySelectorAll('.snap-zone').forEach((z) => {
+          z.classList.toggle('is-hovered', z.dataset.zone === hoveredZone);
+        });
+      };
 
-    this._addListener(viewport, 'pointerdown', (e) => {
-      if (!this.meta || e.button > 0) return;
-      e.preventDefault();
-      panning = true;
-      startX = e.clientX;
-      startY = e.clientY;
-      startPosX = this.meta.posX;
-      startPosY = this.meta.posY;
-      viewport.classList.add('is-panning');
-      viewport.setPointerCapture(e.pointerId);
+      const onUp = () => {
+        overlayEl.hidden = true;
+        this.layout.align = hoveredZone;
+        if (hoveredZone === 'full') this.layout.width = 100;
+        else if (this.layout.width > 75) this.layout.width = 52;
+        applyVisuals();
+        this.emitChange();
+        dragBar.removeEventListener('pointermove', onMove);
+        dragBar.removeEventListener('pointerup', onUp);
+        dragBar.removeEventListener('pointercancel', onUp);
+      };
+
+      dragBar.addEventListener('pointermove', onMove);
+      dragBar.addEventListener('pointerup', onUp);
+      dragBar.addEventListener('pointercancel', onUp);
     });
 
-    this._addListener(viewport, 'pointermove', (e) => {
-      if (!panning || !this.meta) return;
-      const rect = viewport.getBoundingClientRect();
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
+    // 2. Hold-and-Drag Focal Point Panning
+    viewportEl.addEventListener('pointerdown', (ev) => {
+      if (ev.target === resizeGrip) return;
+      ev.preventDefault();
+      viewportEl.setPointerCapture(ev.pointerId);
+      const startX = ev.clientX;
+      const startY = ev.clientY;
+      const origPosX = this.layout.posX;
+      const origPosY = this.layout.posY;
+      const boxRect = viewportEl.getBoundingClientRect();
 
-      // Dragging the photo naturally moves the image under the pointer
-      const nextX = clamp(startPosX - (dx / Math.max(rect.width, 80)) * 100, 0, 100);
-      const nextY = clamp(startPosY - (dy / Math.max(rect.height, 80)) * 100, 0, 100);
+      const onMove = (moveEv) => {
+        const dxPct = ((moveEv.clientX - startX) / Math.max(40, boxRect.width)) * 100;
+        const dyPct = ((moveEv.clientY - startY) / Math.max(40, boxRect.height)) * 100;
+        this.layout.posX = Math.round(clamp(origPosX - dxPct, 0, 100));
+        this.layout.posY = Math.round(clamp(origPosY - dyPct, 0, 100));
+        applyVisuals();
+      };
 
-      this.meta.posX = Math.round(nextX);
-      this.meta.posY = Math.round(nextY);
-      this._syncVisuals();
+      const onUp = () => {
+        this.emitChange();
+        viewportEl.removeEventListener('pointermove', onMove);
+        viewportEl.removeEventListener('pointerup', onUp);
+        viewportEl.removeEventListener('pointercancel', onUp);
+      };
+
+      viewportEl.addEventListener('pointermove', onMove);
+      viewportEl.addEventListener('pointerup', onUp);
+      viewportEl.addEventListener('pointercancel', onUp);
     });
 
-    const finishPan = (e) => {
-      if (!panning) return;
-      panning = false;
-      viewport.classList.remove('is-panning');
-      try {
-        if (viewport.hasPointerCapture(e.pointerId)) {
-          viewport.releasePointerCapture(e.pointerId);
-        }
-      } catch {
-        // Ignore capture release errors
-      }
-      this.onChange(this.getMeta());
-    };
+    // 3. Hold-and-Drag Bottom-Right Corner Resize
+    resizeGrip.addEventListener('pointerdown', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      resizeGrip.setPointerCapture(ev.pointerId);
+      const startX = ev.clientX;
+      const startY = ev.clientY;
+      const origW = this.layout.width;
+      const origH = this.layout.height;
+      const canvasWidth = Math.max(200, canvasEl.getBoundingClientRect().width);
 
-    this._addListener(viewport, 'pointerup', finishPan);
-    this._addListener(viewport, 'pointercancel', finishPan);
-  }
+      const onMove = (moveEv) => {
+        const deltaWPct = ((moveEv.clientX - startX) / canvasWidth) * 100;
+        const deltaHPx = moveEv.clientY - startY;
+        this.layout.width = Math.round(clamp(origW + deltaWPct, 30, 100));
+        this.layout.height = Math.round(clamp(origH + deltaHPx, 110, 420));
+        applyVisuals();
+      };
 
-  /**
-   * 3. Hold-and-Drag Corner Resizing via Pointer Events on the bottom-right grip.
-   */
-  _bindCornerResize() {
-    const { resizeGrip, canvas } = this._els;
-    let resizing = false;
-    let startX = 0;
-    let startY = 0;
-    let startWidth = 52;
-    let startHeight = 220;
-    let canvasWidth = 400;
+      const onUp = () => {
+        this.emitChange();
+        resizeGrip.removeEventListener('pointermove', onMove);
+        resizeGrip.removeEventListener('pointerup', onUp);
+        resizeGrip.removeEventListener('pointercancel', onUp);
+      };
 
-    this._addListener(resizeGrip, 'pointerdown', (e) => {
-      if (!this.meta || e.button > 0) return;
-      e.preventDefault();
-      e.stopPropagation();
-      resizing = true;
-      startX = e.clientX;
-      startY = e.clientY;
-      startWidth = this.meta.width;
-      startHeight = this.meta.height;
-      const rect = canvas.getBoundingClientRect();
-      canvasWidth = Math.max(rect.width - 28, 200);
-      resizeGrip.setPointerCapture(e.pointerId);
+      resizeGrip.addEventListener('pointermove', onMove);
+      resizeGrip.addEventListener('pointerup', onUp);
+      resizeGrip.addEventListener('pointercancel', onUp);
     });
-
-    this._addListener(resizeGrip, 'pointermove', (e) => {
-      if (!resizing || !this.meta) return;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-
-      if (this.meta.align !== 'full') {
-        const deltaPct = (dx / canvasWidth) * 100;
-        this.meta.width = Math.round(clamp(startWidth + deltaPct, 30, 100));
-      }
-
-      this.meta.height = Math.round(clamp(startHeight + dy, 110, 420));
-      this._syncVisuals();
-    });
-
-    const finishResize = (e) => {
-      if (!resizing) return;
-      resizing = false;
-      try {
-        if (resizeGrip.hasPointerCapture(e.pointerId)) {
-          resizeGrip.releasePointerCapture(e.pointerId);
-        }
-      } catch {
-        // Ignore capture release errors
-      }
-      this.onChange(this.getMeta());
-    };
-
-    this._addListener(resizeGrip, 'pointerup', finishResize);
-    this._addListener(resizeGrip, 'pointercancel', finishResize);
   }
 }
 
 /**
- * Attaches an on-page live re-alignment controller directly to a rendered
- * .diary-figure inside a diary column or comment card.
- * Lets the user hold-and-drag pan the focal point or switch Left/Center/Right/Full
- * alignment and click Save to commit the updated coordinates directly to GitHub.
- *
- * @param {HTMLElement} figureEl
- * @param {Object} imageMeta
- * @param {{ onSave: (updatedMeta: Object) => Promise<void> | void, onCancel?: () => void }} callbacks
- * @returns {{ destroy: () => void }}
+ * On-Page Live Photo Re-Alignment Controller for rendered entry/comment figures.
  */
-export function attachInlineAlignController(figureEl, imageMeta, callbacks = {}) {
-  const original = normalizeImageMeta(imageMeta);
-  if (!figureEl || !original) {
-    return { destroy: () => {} };
-  }
+export function attachInlineAlignController(figureEl, currentLayout, onSaveOrCallbacks) {
+  if (!figureEl) return () => {};
+  const frameEl =
+    figureEl.querySelector('.entry-figure-frame') || figureEl.querySelector('.diary-figure-viewport');
+  const imgEl = figureEl.querySelector('img');
+  if (!frameEl || !imgEl) return () => {};
 
-  // Prevent attaching duplicate controllers to the same figure
-  if (figureEl.classList.contains('is-inline-aligning')) {
-    return { destroy: () => {} };
-  }
+  const onSave =
+    typeof onSaveOrCallbacks === 'function' ? onSaveOrCallbacks : onSaveOrCallbacks?.onSave;
 
-  const draft = { ...original };
-  const viewport = figureEl.querySelector('.diary-figure-viewport');
-  const img = figureEl.querySelector('img');
-  const triggerBtn = figureEl.querySelector('.figure-align-trigger');
-
-  if (!viewport || !img) {
-    return { destroy: () => {} };
-  }
-
-  const cleanups = [];
-  const addEvt = (el, type, fn, opts) => {
-    el.addEventListener(type, fn, opts);
-    cleanups.push(() => el.removeEventListener(type, fn, opts));
+  const draft = {
+    align: VALID_ALIGNS.has(currentLayout.align) ? currentLayout.align : 'full',
+    posX: Math.round(clamp(currentLayout.posX ?? 50, 0, 100)),
+    posY: Math.round(clamp(currentLayout.posY ?? 50, 0, 100)),
+    width: Math.round(clamp(currentLayout.width ?? 100, 30, 100)),
+    height: Math.round(clamp(currentLayout.height ?? 240, 110, 420)),
   };
 
   figureEl.classList.add('is-inline-aligning');
-  if (triggerBtn) triggerBtn.hidden = true;
-
-  // Live PAN coordinate HUD
-  const hud = document.createElement('div');
-  hud.className = 'inline-align-hud';
-  viewport.appendChild(hud);
-
-  // Control Bar (Left / Center / Right / Full + Reset + Cancel / Save)
   const bar = document.createElement('div');
   bar.className = 'inline-align-bar';
+  bar.innerHTML = `
+    <div class="inline-align-btns">
+      <button type="button" class="btn btn-ghost btn-sm" data-al="left">L</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-al="center">C</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-al="right">R</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-al="full">Full</button>
+    </div>
+    <span class="mono-meta inline-pan-hud">PAN ${draft.posX}%×${draft.posY}%</span>
+    <div class="inline-align-btns">
+      <button type="button" class="btn btn-primary btn-sm inline-save-btn">Save</button>
+      <button type="button" class="btn btn-ghost btn-sm inline-cancel-btn">Cancel</button>
+    </div>
+  `;
+  figureEl.prepend(bar);
 
-  const modesWrap = document.createElement('div');
-  modesWrap.className = 'inline-align-modes';
+  const hud = bar.querySelector('.inline-pan-hud');
+  const apply = () => {
+    figureEl.className = `entry-figure is-inline-aligning align-${draft.align}`;
+    figureEl.style.width = draft.align === 'full' ? '100%' : `${draft.width}%`;
+    frameEl.style.height = `${draft.height}px`;
+    imgEl.style.objectPosition = `${draft.posX}% ${draft.posY}%`;
+    hud.textContent = `PAN ${Math.round(draft.posX)}%×${Math.round(draft.posY)}%`;
+  };
+  apply();
 
-  const modeBtns = {};
-  for (const mode of ['left', 'center', 'right', 'full']) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'btn btn-ghost btn-xs';
-    btn.textContent = mode[0].toUpperCase() + mode.slice(1);
-    addEvt(btn, 'click', () => {
-      draft.align = mode;
-      applyDraft(draft);
+  bar.querySelectorAll('[data-al]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      draft.align = btn.dataset.al;
+      if (draft.align === 'full') draft.width = 100;
+      else if (draft.width > 75) draft.width = 52;
+      apply();
     });
-    modesWrap.appendChild(btn);
-    modeBtns[mode] = btn;
-  }
-
-  const resetBtn = document.createElement('button');
-  resetBtn.type = 'button';
-  resetBtn.className = 'btn btn-ghost btn-xs';
-  resetBtn.textContent = 'Reset';
-  addEvt(resetBtn, 'click', () => {
-    draft.posX = 50;
-    draft.posY = 50;
-    applyDraft(draft);
-  });
-  modesWrap.appendChild(resetBtn);
-
-  const actionWrap = document.createElement('div');
-  actionWrap.className = 'inline-align-modes';
-
-  const cancelBtn = document.createElement('button');
-  cancelBtn.type = 'button';
-  cancelBtn.className = 'btn btn-ghost btn-xs';
-  cancelBtn.textContent = 'Cancel';
-
-  const saveBtn = document.createElement('button');
-  saveBtn.type = 'button';
-  saveBtn.className = 'btn btn-primary btn-xs';
-  saveBtn.textContent = 'Save';
-
-  actionWrap.appendChild(cancelBtn);
-  actionWrap.appendChild(saveBtn);
-
-  bar.appendChild(modesWrap);
-  bar.appendChild(actionWrap);
-  figureEl.appendChild(bar);
-
-  function applyDraft(state) {
-    figureEl.classList.remove('align-left', 'align-center', 'align-right', 'align-full');
-    figureEl.classList.add(`align-${state.align}`);
-    figureEl.style.width = state.align === 'full' ? '100%' : `${state.width}%`;
-    viewport.style.height = `${state.height}px`;
-    img.style.objectPosition = `${state.posX}% ${state.posY}%`;
-    hud.textContent = `PAN: ${state.posX}% × ${state.posY}% · ${state.align.toUpperCase()}`;
-
-    for (const [mode, btn] of Object.entries(modeBtns)) {
-      btn.classList.toggle('is-active', mode === state.align);
-    }
-  }
-
-  // Interactive Pointer Events panning inside the rendered image viewport
-  let panning = false;
-  let startX = 0;
-  let startY = 0;
-  let startPosX = draft.posX;
-  let startPosY = draft.posY;
-
-  addEvt(viewport, 'pointerdown', (e) => {
-    if (e.button > 0) return;
-    e.preventDefault();
-    panning = true;
-    startX = e.clientX;
-    startY = e.clientY;
-    startPosX = draft.posX;
-    startPosY = draft.posY;
-    viewport.classList.add('is-panning');
-    viewport.setPointerCapture(e.pointerId);
   });
 
-  addEvt(viewport, 'pointermove', (e) => {
-    if (!panning) return;
-    const rect = viewport.getBoundingClientRect();
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
-    draft.posX = Math.round(clamp(startPosX - (dx / Math.max(rect.width, 80)) * 100, 0, 100));
-    draft.posY = Math.round(clamp(startPosY - (dy / Math.max(rect.height, 80)) * 100, 0, 100));
-    applyDraft(draft);
-  });
+  const onPointerDown = (ev) => {
+    ev.preventDefault();
+    frameEl.setPointerCapture(ev.pointerId);
+    const sx = ev.clientX;
+    const sy = ev.clientY;
+    const ox = draft.posX;
+    const oy = draft.posY;
+    const r = frameEl.getBoundingClientRect();
 
-  const endPan = (e) => {
-    if (!panning) return;
-    panning = false;
-    viewport.classList.remove('is-panning');
-    try {
-      if (viewport.hasPointerCapture(e.pointerId)) {
-        viewport.releasePointerCapture(e.pointerId);
-      }
-    } catch {
-      // Ignore pointer capture release errors
-    }
+    const onMove = (m) => {
+      draft.posX = Math.round(clamp(ox - ((m.clientX - sx) / Math.max(40, r.width)) * 100, 0, 100));
+      draft.posY = Math.round(clamp(oy - ((m.clientY - sy) / Math.max(40, r.height)) * 100, 0, 100));
+      apply();
+    };
+    const onUp = () => {
+      frameEl.removeEventListener('pointermove', onMove);
+      frameEl.removeEventListener('pointerup', onUp);
+    };
+    frameEl.addEventListener('pointermove', onMove);
+    frameEl.addEventListener('pointerup', onUp);
   };
 
-  addEvt(viewport, 'pointerup', endPan);
-  addEvt(viewport, 'pointercancel', endPan);
+  frameEl.addEventListener('pointerdown', onPointerDown);
 
-  let destroyed = false;
-  function destroy() {
-    if (destroyed) return;
-    destroyed = true;
-    while (cleanups.length > 0) {
-      const fn = cleanups.pop();
-      try {
-        fn();
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
+  const cleanup = () => {
+    frameEl.removeEventListener('pointerdown', onPointerDown);
     figureEl.classList.remove('is-inline-aligning');
-    viewport.classList.remove('is-panning');
-    hud.remove();
     bar.remove();
-    if (triggerBtn) triggerBtn.hidden = false;
-  }
+  };
 
-  addEvt(cancelBtn, 'click', () => {
-    applyDraft(original);
-    destroy();
-    if (typeof callbacks.onCancel === 'function') {
-      callbacks.onCancel();
+  bar.querySelector('.inline-cancel-btn').addEventListener('click', () => {
+    cleanup();
+    figureEl.className = `entry-figure align-${currentLayout.align || 'full'}`;
+    figureEl.style.width = `${currentLayout.width ?? 100}%`;
+    imgEl.style.objectPosition = `${currentLayout.posX ?? 50}% ${currentLayout.posY ?? 50}%`;
+  });
+
+  bar.querySelector('.inline-save-btn').addEventListener('click', async () => {
+    cleanup();
+    if (typeof onSave === 'function') {
+      await onSave({ ...draft });
     }
   });
 
-  addEvt(saveBtn, 'click', async () => {
-    saveBtn.disabled = true;
-    cancelBtn.disabled = true;
-    saveBtn.textContent = 'Saving…';
-    try {
-      if (typeof callbacks.onSave === 'function') {
-        await callbacks.onSave({ ...draft });
-      }
-      destroy();
-    } catch {
-      saveBtn.disabled = false;
-      cancelBtn.disabled = false;
-      saveBtn.textContent = 'Save';
-    }
-  });
-
-  applyDraft(draft);
-  return { destroy };
+  return cleanup;
 }
