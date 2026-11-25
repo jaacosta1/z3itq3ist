@@ -17,6 +17,35 @@
     <link rel="stylesheet" href="css/styles.css" />
   </head>
   <body>
+    <!-- Phase 10: Zero-Knowledge Shared Memory Reader Overlay (works even when Diary is Locked) -->
+    <section
+      id="shared-viewer-overlay"
+      class="shared-viewer-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="shared-viewer-title"
+      hidden
+    >
+      <div class="shared-viewer-card">
+        <div class="shared-viewer-top">
+          <div>
+            <div class="lock-kicker">ZERO-KNOWLEDGE SHARED ENTRY · AES-256-GCM URL FRAGMENT</div>
+            <h1 id="shared-viewer-title" class="shared-viewer-title">Decrypting shared memory…</h1>
+            <div id="shared-viewer-meta" class="mono-meta"></div>
+          </div>
+          <button type="button" id="shared-viewer-exit-btn" class="btn btn-ghost btn-sm">
+            Open Main Diary
+          </button>
+        </div>
+        <div id="shared-viewer-error" class="form-error" role="alert" hidden></div>
+        <div id="shared-viewer-tags" class="entry-meta-chips"></div>
+        <article id="shared-viewer-body" class="prose-body shared-viewer-body"></article>
+        <footer class="shared-viewer-footer mono-meta">
+          Decrypted strictly inside your browser from the URL #fragment key. Zero access to other entries.
+        </footer>
+      </div>
+    </section>
+
     <!-- Full Lock Screen Overlay -->
     <section
       id="lock-screen"
@@ -907,6 +936,37 @@
           </div>
         </div>
 
+        <!-- Phase 10: Memory-Hard KDF Upgrade (Argon2id Web Worker) -->
+        <div id="vault-argon2-panel" class="vault-argon2-panel" hidden>
+          <div class="vault-arch-header">
+            <span class="mono-label">MEMORY-HARD KEY DERIVATION · ARGON2ID WEB WORKER</span>
+            <span id="vault-kdf-status-pill" class="health-pill">PBKDF2-SHA256</span>
+          </div>
+          <p class="section-subtext">
+            Upgrade your Master Password key slot from PBKDF2 to genuine RFC 9106 <strong>Argon2id</strong> (running off-thread in a Web Worker) for strong resistance against offline GPU cracking — 1 instant commit, 0 entries re-encrypted.
+          </p>
+          <div class="passkey-enroll-row">
+            <select id="vault-argon2-preset" class="select-compact">
+              <option value="balanced" selected>Argon2id Balanced (16 MB · t=2)</option>
+              <option value="hardened">Argon2id Hardened (32 MB · t=3)</option>
+              <option value="mobile">Argon2id Fast / Mobile (8 MB · t=2)</option>
+            </select>
+            <button type="button" id="vault-upgrade-argon2-btn" class="btn btn-primary btn-sm">
+              Upgrade Slot → Argon2id
+            </button>
+          </div>
+          <div id="vault-argon2-status" class="mono-meta" hidden></div>
+        </div>
+
+        <!-- Phase 10: Active Zero-Knowledge Share Links Manager -->
+        <div id="vault-shares-panel" class="vault-shares-panel" hidden>
+          <div class="vault-arch-header">
+            <span class="mono-label">ZERO-KNOWLEDGE REVOCABLE SHARE LINKS</span>
+            <span id="vault-shares-count" class="mono-meta">0 active</span>
+          </div>
+          <div id="vault-shares-list" class="vault-slots-list"></div>
+        </div>
+
         <form id="vault-form" class="settings-form" autocomplete="off">
           <label class="checkbox-inline">
             <input type="checkbox" id="vault-lock-enabled-checkbox" />
@@ -1055,6 +1115,60 @@
           <button type="button" id="confirm-cancel-btn" class="btn btn-ghost">Cancel</button>
           <button type="button" id="confirm-ok-btn" class="btn btn-danger">Confirm</button>
         </div>
+      </div>
+    </div>
+
+    <!-- MODAL 6: ZERO-KNOWLEDGE REVOCABLE SHARE LINK COMPOSER -->
+    <div id="share-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="share-modal-title" hidden>
+      <div class="modal-card modal-card-sm">
+        <div class="modal-header">
+          <div>
+            <div class="modal-kicker">ZERO-KNOWLEDGE ONE-TIME KEY · URL #FRAGMENT</div>
+            <h2 id="share-modal-title" class="modal-title">Share Single Entry</h2>
+          </div>
+          <button type="button" id="share-close-btn" class="icon-btn" aria-label="Close Share Dialog">✕</button>
+        </div>
+
+        <p id="share-entry-summary" class="section-subtext"></p>
+
+        <form id="share-form" class="settings-form">
+          <label class="field-group">
+            <span class="field-label">Link Expiration</span>
+            <select id="share-expiry-select" class="select-compact">
+              <option value="24">24 hours</option>
+              <option value="168" selected>7 days</option>
+              <option value="720">30 days</option>
+              <option value="0">Never (until manually revoked)</option>
+            </select>
+          </label>
+
+          <label class="checkbox-inline">
+            <input type="checkbox" id="share-public-repo-checkbox" checked />
+            <span>Publish encrypted blob to Public App Repo so recipient needs no GitHub token</span>
+          </label>
+
+          <div id="share-result-box" class="recovery-code-box" hidden>
+            <div class="mono-label">ZERO-KNOWLEDGE SHARE LINK (KEY STAYS IN #FRAGMENT)</div>
+            <input type="text" id="share-result-url" class="input-text" readonly />
+            <div class="recovery-actions">
+              <button type="button" id="share-copy-url-btn" class="btn btn-primary btn-sm">
+                Copy Share Link
+              </button>
+              <button type="button" id="share-open-preview-btn" class="btn btn-ghost btn-sm">
+                Preview
+              </button>
+            </div>
+          </div>
+
+          <div id="share-error" class="form-error" role="alert" hidden></div>
+
+          <div class="modal-footer">
+            <button type="button" id="share-cancel-btn" class="btn btn-ghost">Close</button>
+            <button type="submit" id="share-generate-btn" class="btn btn-primary">
+              Generate Encrypted Link
+            </button>
+          </div>
+        </form>
       </div>
     </div>
 
