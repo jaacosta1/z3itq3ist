@@ -495,6 +495,33 @@ class PerpetualDiaryApp {
     }
   }
 
+  /**
+   * Executes a print edition helper (`openPrintBookWindow` or `openMiniZineWindow`)
+   * with user feedback for empty archives, popup/iframe blockers, or HTML fallback downloads.
+   */
+  triggerPrintEdition(printFn, payload, label = 'Print edition') {
+    try {
+      const res = printFn(payload);
+      if (!res || !res.ok) {
+        this.showToast(
+          `No entries available to print for ${label}. Write or load entries first.`,
+          'warn'
+        );
+        return;
+      }
+      if (res.method === 'download') {
+        this.showToast(
+          `Print dialog was blocked; downloaded ${label} as an HTML file to open and print.`,
+          'warn'
+        );
+      } else {
+        this.showToast(`Preparing ${label} print preview…`, 'info');
+      }
+    } catch (err) {
+      this.showToast(err?.message || `Failed to open ${label} print preview.`, 'error');
+    }
+  }
+
   setZeroFootprintMode(enabled, notify = false) {
     const next = Boolean(enabled);
     this.state.zeroFootprint = next;
@@ -5474,18 +5501,26 @@ class PerpetualDiaryApp {
 
     document.getElementById('print-book-btn')?.addEventListener('click', async () => {
       await this.loadAllIndexedDays();
-      openPrintBookWindow({
-        title: 'Perpetual Side-by-Side Diary',
-        entries: Array.from(this.state.decryptedEntryCache.values()),
-      });
+      this.triggerPrintEdition(
+        openPrintBookWindow,
+        {
+          title: 'Perpetual Side-by-Side Diary',
+          entries: Array.from(this.state.decryptedEntryCache.values()),
+        },
+        'Print Book'
+      );
     });
 
     document.getElementById('print-zine-btn')?.addEventListener('click', async () => {
       await this.loadAllIndexedDays();
-      openMiniZineWindow({
-        title: 'Perpetual Pocket Zine',
-        entries: Array.from(this.state.decryptedEntryCache.values()).slice(-6),
-      });
+      this.triggerPrintEdition(
+        openMiniZineWindow,
+        {
+          title: 'Perpetual Pocket Zine',
+          entries: Array.from(this.state.decryptedEntryCache.values()).slice(-6),
+        },
+        '8-Page Mini-Zine'
+      );
     });
 
     document.getElementById('export-json-btn')?.addEventListener('click', async () => {
@@ -5542,7 +5577,11 @@ class PerpetualDiaryApp {
       const entries = Array.from(this.state.decryptedEntryCache.values()).filter(
         (e) => Number(e.year) === yr
       );
-      openPrintBookWindow({ title: `${yr} — Annual Ledger`, entries });
+      this.triggerPrintEdition(
+        openPrintBookWindow,
+        { title: `${yr} — Annual Ledger`, entries },
+        `${yr} Year Book`
+      );
     });
 
     document.getElementById('arc-select')?.addEventListener('change', (e) => {
@@ -5556,11 +5595,15 @@ class PerpetualDiaryApp {
         this.state.selectedArcSlug,
         Array.from(this.state.decryptedEntryCache.values())
       );
-      openPrintBookWindow({
-        title: book.title,
-        subtitle: `${book.dateSpan} · ${book.chapters.length} Chapters`,
-        entries: book.chapters,
-      });
+      this.triggerPrintEdition(
+        openPrintBookWindow,
+        {
+          title: book.title,
+          subtitle: `${book.dateSpan} · ${book.chapters.length} Chapters`,
+          entries: book.chapters,
+        },
+        `${book.title} Arc Book`
+      );
     });
 
     // Entry Composer Events
@@ -5644,41 +5687,41 @@ class PerpetualDiaryApp {
       }
       saveCustomTemplate(
         {
-          name: title || `Template ${new Date().toLocaleDateString()}`,
-          mood: document.getElementById('entry-mood-input').value.trim(),
-          tags: document.getElementById('entry-tags-input').value.trim(),
-          preserveWhitespace: document.getElementById('entry-verse-checkbox').checked,
-          body,
+        id: 'cmd-print-book',
+        title: 'Print-to-Book (All Loaded Entries)',
+        subtitle: 'Generate a clean paginated book with table of contents',
+        keywords: 'print book pdf',
+        run: async () => {
+          await this.loadAllIndexedDays();
+          this.triggerPrintEdition(
+            openPrintBookWindow,
+            {
+              title: 'Perpetual Side-by-Side Diary',
+              entries: Array.from(this.state.decryptedEntryCache.values()),
+            },
+            'Print Book'
+          );
         },
-        this.state.zeroFootprint
-      );
-      this.populateComposerTemplates();
-      this.showToast('Saved custom template locally.', 'success');
-    });
-
-    document.getElementById('entry-draw-prompt-btn')?.addEventListener('click', () => {
-      const cat = document.getElementById('entry-prompt-category').value;
-      const drawn = drawRandomPrompt(cat, this.state.activePromptText);
-      if (drawn) {
-        this.state.activePromptText = drawn.text;
-        document.getElementById('entry-prompt-text').textContent = `[${drawn.categoryLabel}] ${drawn.text}`;
-        document.getElementById('entry-prompt-banner').hidden = false;
-      }
-    });
-
-    document.getElementById('entry-insert-prompt-btn')?.addEventListener('click', () => {
-      if (!this.state.activePromptText) return;
-      const bodyEl = document.getElementById('entry-body-input');
-      const block = `> [!question] Prompt\n> ${this.state.activePromptText}\n\n`;
-      bodyEl.value = `${block}${bodyEl.value}`;
-      this.updateComposerCounts();
-    });
-
-    // Location & Weather Stamp
-    document.getElementById('entry-stamp-weather-btn')?.addEventListener('click', async (e) => {
-      const btn = e.currentTarget;
-      btn.disabled = true;
-      btn.textContent = 'Locating…';
+      },
+      {
+        id: 'cmd-mini-zine',
+        title: 'Generate 8-Page Foldable Pocket Mini-Zine',
+        subtitle: '1-sheet landscape imposition for folding a pocket zine',
+        keywords: 'zine mini pocket print fold',
+        run: async () => {
+          await this.loadAllIndexedDays();
+          this.triggerPrintEdition(
+            openMiniZineWindow,
+            {
+              title: 'Perpetual Pocket Zine',
+              entries: Array.from(this.state.decryptedEntryCache.values()).slice(-6),
+            },
+            '8-Page Mini-Zine'
+          );
+        },
+      },
+      {
+        id: 'cmd-drafts',
       try {
         const stamp = await fetchCurrentLocationAndWeather();
         document.getElementById('entry-location-input').value = stamp.place;
