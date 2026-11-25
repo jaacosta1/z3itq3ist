@@ -129,6 +129,14 @@
         </div>
 
         <div class="header-right">
+          <button
+            type="button"
+            id="open-drafts-btn"
+            class="btn btn-outline btn-sm"
+            title="Cross-Device Drafts Branch (works-in-progress synced before publishing)"
+          >
+            Drafts <span id="cloud-drafts-count" class="count-pill" hidden>0</span>
+          </button>
           <button type="button" id="open-composer-btn" class="btn btn-primary">
             + Write Entry
           </button>
@@ -583,6 +591,14 @@
             </button>
             <div class="modal-footer-right">
               <button type="button" id="entry-cancel-btn" class="btn btn-ghost">Cancel</button>
+              <button
+                type="button"
+                id="entry-save-cloud-draft-btn"
+                class="btn btn-outline"
+                title="Sync unfinished entry to the dedicated Git 'drafts' branch without publishing to main"
+              >
+                Save to Drafts Branch
+              </button>
               <button type="submit" id="entry-save-btn" class="btn btn-primary">Save Atomically</button>
             </div>
           </div>
@@ -1169,6 +1185,90 @@
             </button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- MODAL 7: GIT REVISION "TIME MACHINE" (EDIT HISTORY, DIFFS & RESTORE) -->
+    <div id="history-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="history-modal-title" hidden>
+      <div class="modal-card modal-card-xl">
+        <div class="modal-header">
+          <div>
+            <div class="modal-kicker">GIT REVISION TIME MACHINE · VERSION DIFFS &amp; RESTORE</div>
+            <h2 id="history-modal-title" class="modal-title">Entry Revision History</h2>
+          </div>
+          <button type="button" id="history-close-btn" class="icon-btn" aria-label="Close Revision History">✕</button>
+        </div>
+
+        <div id="history-status-banner" class="status-callout" hidden></div>
+
+        <div class="history-layout">
+          <aside class="history-timeline-pane" aria-label="Commit Timeline">
+            <div class="conflict-pane-header">
+              <span class="mono-label">COMMIT TIMELINE</span>
+              <span id="history-count-label" class="mono-meta">0</span>
+            </div>
+            <div id="history-timeline-list" class="history-timeline-list"></div>
+          </aside>
+
+          <section class="history-detail-pane">
+            <div class="conflict-pane-header">
+              <div>
+                <span id="history-selected-sha" class="mono-label">SELECT A REVISION</span>
+                <span id="history-selected-meta" class="mono-meta"></span>
+              </div>
+              <div id="history-view-toggle" class="segmented-control" role="group" aria-label="Revision View Mode">
+                <button type="button" class="seg-btn is-active" data-history-mode="diff">Diff vs Current</button>
+                <button type="button" class="seg-btn" data-history-mode="snapshot">Snapshot</button>
+              </div>
+            </div>
+
+            <div id="history-entry-meta" class="history-entry-meta mono-meta" hidden></div>
+            <div id="history-diff-viewer" class="diff-viewer history-diff-viewer"></div>
+            <article id="history-snapshot-viewer" class="prose-body history-snapshot-viewer" hidden></article>
+          </section>
+        </div>
+
+        <div class="modal-footer">
+          <span class="mono-meta">Restoring loads the chosen revision into the Composer so you can review before committing.</span>
+          <div class="modal-footer-right">
+            <button type="button" id="history-cancel-btn" class="btn btn-ghost">Close</button>
+            <button type="button" id="history-restore-btn" class="btn btn-primary" disabled>
+              Restore This Revision into Composer
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL 8: CROSS-DEVICE `drafts` BRANCH MANAGER -->
+    <div id="drafts-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="drafts-modal-title" hidden>
+      <div class="modal-card">
+        <div class="modal-header">
+          <div>
+            <div class="modal-kicker">CROSS-DEVICE SYNC · DEDICATED GIT `drafts` BRANCH</div>
+            <h2 id="drafts-modal-title" class="modal-title">Synced Works-in-Progress</h2>
+          </div>
+          <button type="button" id="drafts-close-btn" class="icon-btn" aria-label="Close Drafts Drawer">✕</button>
+        </div>
+
+        <div class="drafts-toolbar">
+          <span id="drafts-branch-pill" class="health-pill">BRANCH: drafts</span>
+          <button type="button" id="drafts-refresh-btn" class="btn btn-ghost btn-sm">
+            ↻ Refresh Drafts
+          </button>
+        </div>
+
+        <p class="section-subtext drafts-intro">
+          Drafts saved here live on a separate <code>drafts</code> branch (encrypted with AES-256-GCM AAD when your Vault is unlocked) so you can start writing on your phone and finish on desktop without publishing to <code>main</code>.
+        </p>
+
+        <div id="drafts-error" class="form-error" role="alert" hidden></div>
+        <div id="drafts-list" class="drafts-list"></div>
+
+        <div class="modal-footer">
+          <button type="button" id="drafts-new-btn" class="btn btn-outline btn-sm">+ New Entry</button>
+          <button type="button" id="drafts-done-btn" class="btn btn-ghost">Close</button>
+        </div>
       </div>
     </div>
 
