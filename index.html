@@ -31,17 +31,21 @@
         <h1 id="lock-title" class="lock-title">Diary Locked</h1>
         <div id="lock-reason-badge" class="lock-reason-badge" hidden></div>
         <p class="lock-subtitle">
-          Enter your master password to unwrap your Data Encryption Key locally in browser memory.
+          Enter your master password or 64-character Paper Recovery Key to unwrap your DEK locally in browser memory.
         </p>
         <form id="lock-form" class="lock-form" autocomplete="off">
-          <label for="lock-password-input" class="sr-only">Master Password</label>
+          <label for="lock-password-input" class="sr-only">Master Password or Paper Recovery Key</label>
           <input
             id="lock-password-input"
             type="password"
             class="input-text"
-            placeholder="Enter master password"
+            placeholder="Master password or Paper Recovery Key"
             required
           />
+          <label class="checkbox-inline lock-zf-toggle">
+            <input type="checkbox" id="lock-zero-footprint-checkbox" />
+            <span>Shared-Computer Zero-Footprint Mode (RAM only — blocks all browser storage writes)</span>
+          </label>
           <div id="lock-error" class="form-error" role="alert" hidden></div>
           <button type="submit" id="lock-unlock-btn" class="btn btn-primary btn-full">
             Unlock Diary
@@ -63,6 +67,14 @@
             <span class="brand-title">PERPETUAL</span>
             <span id="mode-badge" class="mode-badge">SANDBOX</span>
           </a>
+          <span
+            id="zero-footprint-badge"
+            class="zf-badge"
+            title="Zero-Footprint Mode active: keys, PAT, drafts, and cache stay strictly in volatile RAM and wipe on close."
+            hidden
+          >
+            RAM ONLY
+          </span>
           <nav class="primary-nav" aria-label="Primary Views">
             <button type="button" id="nav-reader-btn" class="nav-tab is-active" data-view="reader">
               Side-by-Side
@@ -92,8 +104,8 @@
             type="button"
             id="vault-btn"
             class="icon-btn"
-            title="Diary Password & Envelope Vault"
-            aria-label="Diary Password & Envelope Vault"
+            title="Diary Password, Envelope Vault & Paper Recovery Kit"
+            aria-label="Diary Password, Envelope Vault & Paper Recovery Kit"
           >
             <span aria-hidden="true">⛨</span>
           </button>
@@ -488,12 +500,12 @@
       </div>
     </div>
 
-    <!-- MODAL 2: GITHUB SYNC, SPLIT-REPO VAULT & REPO HEALTH -->
+    <!-- MODAL 2: GITHUB SYNC, SPLIT-REPO VAULT & ZERO-FOOTPRINT CONTROLS -->
     <div id="github-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="github-modal-title" hidden>
       <div class="modal-card">
         <div class="modal-header">
           <div>
-            <div class="modal-kicker">GITHUB PERSISTENCE · SPLIT-REPO VAULT</div>
+            <div class="modal-kicker">GITHUB PERSISTENCE · SPLIT-REPO VAULT · ZERO-FOOTPRINT</div>
             <h2 id="github-modal-title" class="modal-title">GitHub Sync &amp; Vault Health</h2>
           </div>
           <button type="button" id="github-close-btn" class="icon-btn" aria-label="Close GitHub Settings">✕</button>
@@ -568,14 +580,14 @@
             </div>
           </div>
 
-          <div class="settings-section-label">3. Fine-Grained Token &amp; Read Mode</div>
+          <div class="settings-section-label">3. Fine-Grained Token &amp; Shared-Computer Privacy</div>
           <label class="field-group">
             <span class="field-label">Fine-Grained Personal Access Token (Contents: Read &amp; Write)</span>
             <input
               type="password"
               id="gh-token-input"
               class="input-text"
-              placeholder="github_pat_... (stored in session/local browser state)"
+              placeholder="github_pat_... (kept in RAM only when Zero-Footprint is active)"
               autocomplete="off"
             />
           </label>
@@ -590,12 +602,22 @@
             <span>Read directly from GitHub API when authenticated (instant edits before Pages rebuilds)</span>
           </label>
 
+          <label class="checkbox-inline">
+            <input type="checkbox" id="gh-zero-footprint-checkbox" />
+            <span>Shared-Computer Zero-Footprint Mode (RAM only — never save config, PAT, or drafts to this browser)</span>
+          </label>
+
           <div id="gh-test-result" class="status-callout" hidden></div>
 
           <div class="modal-footer">
-            <button type="button" id="gh-clear-token-btn" class="btn btn-danger btn-sm">
-              Clear Token
-            </button>
+            <div class="modal-footer-left">
+              <button type="button" id="gh-clear-token-btn" class="btn btn-danger btn-sm">
+                Clear Token
+              </button>
+              <button type="button" id="gh-wipe-local-btn" class="btn btn-ghost btn-sm" title="Erase all diary localStorage, sessionStorage, and IndexedDB traces from this browser">
+                Wipe Local Traces
+              </button>
+            </div>
             <div class="modal-footer-right">
               <button type="button" id="gh-test-btn" class="btn btn-ghost">Test Connection</button>
               <button type="submit" id="gh-save-btn" class="btn btn-primary">Save Settings</button>
@@ -605,12 +627,12 @@
       </div>
     </div>
 
-    <!-- MODAL 3: PASSWORD & ENVELOPE VAULT (DEK/KEK + AAD + AUTO-LOCK) -->
+    <!-- MODAL 3: PASSWORD, ENVELOPE VAULT & EMERGENCY PAPER RECOVERY KIT -->
     <div id="vault-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="vault-modal-title" hidden>
       <div class="modal-card">
         <div class="modal-header">
           <div>
-            <div class="modal-kicker">ENVELOPE CRYPTOGRAPHY · AAD TAMPER BINDING · AUTO-LOCK</div>
+            <div class="modal-kicker">ENVELOPE CRYPTOGRAPHY · AAD · PAPER RECOVERY KIT</div>
             <h2 id="vault-modal-title" class="modal-title">Diary Password &amp; Vault</h2>
           </div>
           <button type="button" id="vault-close-btn" class="icon-btn" aria-label="Close Vault Settings">✕</button>
@@ -630,12 +652,38 @@
           </div>
         </div>
 
+        <!-- Emergency Paper Recovery Kit & Offline Decryptor -->
+        <div id="vault-recovery-panel" class="vault-recovery-panel" hidden>
+          <div class="vault-arch-header">
+            <span class="mono-label">EMERGENCY PAPER RECOVERY KIT (256-BIT)</span>
+            <span id="vault-recovery-slot-status" class="mono-meta">Not generated</span>
+          </div>
+          <p class="section-subtext">
+            Generate a 256-bit Paper Recovery Key slot to recover your diary if you ever forget your master password, and download the standalone zero-dependency offline decryptor for decades-later access without GitHub.
+          </p>
+          <div id="vault-recovery-code-box" class="recovery-code-box" hidden>
+            <div class="mono-label">SAVE THIS KEY NOW — SHOWN ONCE IN RAM</div>
+            <code id="vault-recovery-code-display" class="recovery-code-display"></code>
+          </div>
+          <div class="recovery-actions">
+            <button type="button" id="vault-gen-recovery-btn" class="btn btn-primary btn-sm">
+              Generate Recovery Key
+            </button>
+            <button type="button" id="vault-print-card-btn" class="btn btn-outline btn-sm" disabled>
+              Print Recovery Card
+            </button>
+            <button type="button" id="vault-download-decryptor-btn" class="btn btn-ghost btn-sm">
+              Download Offline Decryptor (.HTML)
+            </button>
+          </div>
+        </div>
+
         <!-- Legacy v1 Upgrade Callout -->
         <div id="vault-upgrade-banner" class="vault-upgrade-callout" hidden>
           <div>
             <div class="mono-label">LEGACY V1 VAULT DETECTED</div>
             <p class="section-subtext">
-              Upgrade to v2 Envelope Encryption so future password changes take 1 instant commit without re-encrypting your entries. Enter your Current Master Password below, then click Upgrade.
+              Upgrade to v2 Envelope Encryption so future password changes take 1 instant commit and Paper Recovery Keys are supported. Enter your Current Master Password below, then click Upgrade.
             </p>
           </div>
           <button type="button" id="vault-upgrade-btn" class="btn btn-primary btn-sm">
@@ -675,7 +723,7 @@
           </label>
 
           <label class="field-group" id="vault-current-pass-group" hidden>
-            <span class="field-label">Current Master Password (required to rotate password or upgrade)</span>
+            <span class="field-label" id="vault-current-pass-label">Current Master Password (or Paper Recovery Key)</span>
             <input type="password" id="vault-current-password" class="input-text" />
           </label>
 
