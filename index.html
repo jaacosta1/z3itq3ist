@@ -27,10 +27,10 @@
       hidden
     >
       <div class="lock-card">
-        <div class="lock-kicker">PERPETUAL VAULT · AES-256-GCM</div>
+        <div class="lock-kicker">PERPETUAL VAULT · ENVELOPE AES-256-GCM</div>
         <h1 id="lock-title" class="lock-title">Diary Locked</h1>
         <p class="lock-subtitle">
-          Enter your master password to derive your session decryption key locally in memory.
+          Enter your master password to unwrap your Data Encryption Key locally in browser memory.
         </p>
         <form id="lock-form" class="lock-form" autocomplete="off">
           <label for="lock-password-input" class="sr-only">Master Password</label>
@@ -83,8 +83,8 @@
             type="button"
             id="vault-btn"
             class="icon-btn"
-            title="Diary Password & Vault"
-            aria-label="Diary Password & Vault"
+            title="Diary Password & Envelope Vault"
+            aria-label="Diary Password & Envelope Vault"
           >
             <span aria-hidden="true">⛨</span>
           </button>
@@ -596,18 +596,54 @@
       </div>
     </div>
 
-    <!-- MODAL 3: PASSWORD & VAULT SETUP -->
+    <!-- MODAL 3: PASSWORD & ENVELOPE VAULT (DEK/KEK + INSTANT ROTATION) -->
     <div id="vault-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="vault-modal-title" hidden>
       <div class="modal-card">
         <div class="modal-header">
           <div>
-            <div class="modal-kicker">CLIENT-SIDE CRYPTOGRAPHY · PBKDF2 + AES-256-GCM</div>
+            <div class="modal-kicker">ENVELOPE CRYPTOGRAPHY · DEK/KEK KEY SLOTS</div>
             <h2 id="vault-modal-title" class="modal-title">Diary Password &amp; Vault</h2>
           </div>
           <button type="button" id="vault-close-btn" class="icon-btn" aria-label="Close Vault Settings">✕</button>
         </div>
 
         <div id="vault-status-banner" class="status-callout"></div>
+
+        <!-- Envelope Architecture & Active Key Slots Panel -->
+        <div id="vault-arch-panel" class="vault-arch-panel" hidden>
+          <div class="vault-arch-header">
+            <span id="vault-version-pill" class="health-pill">V2 ENVELOPE</span>
+            <span id="vault-fingerprint-label" class="mono-meta">DEK: —</span>
+          </div>
+          <div id="vault-slots-list" class="vault-slots-list"></div>
+        </div>
+
+        <!-- Legacy v1 Upgrade Callout -->
+        <div id="vault-upgrade-banner" class="vault-upgrade-callout" hidden>
+          <div>
+            <div class="mono-label">LEGACY V1 VAULT DETECTED</div>
+            <p class="section-subtext">
+              Upgrade to v2 Envelope Encryption so future password changes take 1 instant commit without re-encrypting your entries. Enter your Current Master Password below, then click Upgrade.
+            </p>
+          </div>
+          <button type="button" id="vault-upgrade-btn" class="btn btn-primary btn-sm">
+            Upgrade to v2 Envelope
+          </button>
+        </div>
+
+        <!-- Optional Legacy Entry Batch Migrator -->
+        <div id="vault-migrate-banner" class="vault-upgrade-callout" hidden>
+          <div>
+            <div class="mono-label">LEGACY V1 ENTRIES BRIDGE ACTIVE</div>
+            <p class="section-subtext">
+              Your older v1 entries still decrypt automatically. You can optionally re-encrypt all v1 entries directly under your v2 DEK and retire the legacy key bridge.
+            </p>
+            <div id="vault-migrate-status" class="mono-meta" hidden></div>
+          </div>
+          <button type="button" id="vault-migrate-entries-btn" class="btn btn-outline btn-sm">
+            Migrate v1 Entries → v2
+          </button>
+        </div>
 
         <form id="vault-form" class="settings-form" autocomplete="off">
           <label class="checkbox-inline">
@@ -616,17 +652,17 @@
           </label>
 
           <label class="field-group" id="vault-current-pass-group" hidden>
-            <span class="field-label">Current Master Password (required to change password)</span>
+            <span class="field-label">Current Master Password (required to rotate password or upgrade)</span>
             <input type="password" id="vault-current-password" class="input-text" />
           </label>
 
           <label class="field-group">
-            <span class="field-label">New / Master Password</span>
+            <span class="field-label" id="vault-new-pass-label">Master Password</span>
             <input
               type="password"
               id="vault-new-password"
               class="input-text"
-              placeholder="At least 8 characters recommended"
+              placeholder="Leave blank to keep existing password (or enter new to rotate)"
             />
           </label>
 
