@@ -8,6 +8,8 @@
  * - UTF-8 / Emoji-safe Base64 encoding and cache-busted static fallback reads
  */
 
+import { resolveShardRepoName } from './media-sharding.js';
+
 export function encodeBase64Utf8(str) {
   const bytes = new TextEncoder().encode(String(str ?? ''));
   let binary = '';
@@ -121,6 +123,9 @@ const DEFAULT_CONFIG = Object.freeze({
   vaultRepo: 'perpetual-diary-vault',
   vaultBranch: 'main',
   vaultPath: 'data',
+  useMediaSharding: false,
+  mediaShardPattern: 'diary-media-{year}',
+  mediaShardBranch: 'main',
 });
 
 const STORAGE_KEY = 'perpetual_diary_gh_config_v1';
@@ -208,6 +213,138 @@ export class GitHubClient {
     const { basePath } = this.getDataTarget();
     const cleanSub = String(relativeSubpath || '').replace(/^\/+/, '');
     return basePath ? `${basePath}/${cleanSub}` : cleanSub;
+  }
+
+  /**
+   * Resolves the target repository for binary media uploads for a given calendar year.
+   * When Media Sharding is disabled, falls back to the active data target.
+   */
+  getMediaTarget(year = new Date().getFullYear()) {
+    const dataTarget = this.getDataTarget();
+    if (!this.config.useMediaSharding) {
+      return {
+        isSharded: false,
+        owner: dataTarget.owner,
+        repo: dataTarget.repo,
+        branch: dataTarget.branch,
+        basePath: dataTarget.basePath,
+      };
+    }
+
+    const shardRepo = resolveShardRepoName(
+      this.config.mediaShardPattern || 'diary-media-{year}',
+      year
+    );
+
+    return {
+      isSharded: true,
+      owner: dataTarget.owner,
+      repo: shardRepo,
+      branch: String(this.config.mediaShardBranch || 'main').trim() || 'main',
+      basePath: '',
+    };
+  }
+
+  /**
+   * Verifies that the sibling media shard repository exists and is writable by the active PAT.
+   */
+  async testMediaShard(year = new Date().getFullYear()) {
+    const target = this.getMediaTarget(year);
+    if (!target.owner || !target.repo) {
+      throw new Error('Configure your GitHub username and media shard pattern first.');
+    }
+    const repoData = await this._apiRequest(
+      `https://api.github.com/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(
+        target.repo
+      )}`
+    );
+    return {
+      ok: true,
+      fullName: repoData.full_name,
+      isPrivate: Boolean(repoData.private),
+      canPush: Boolean(repoData?.permissions?.push || repoData?.permissions?.admin),
+      sizeKb: Number(repoData.size || 0),
+    };
+  }
+
+  /**
+   * Uploads a binary photo (WebP or encrypted .enc) to the yearly/era media shard repo.
+   */
+  async uploadMediaToShard(year, mediaSubpath, arrayBufferOrBytes, commitMessage) {
+    if (!this.hasToken()) {
+      throw new Error('GitHub Personal Access Token is required to upload sharded media.');
+    }
+    const target = this.getMediaTarget(year);
+    const base64 = arrayBufferToBase64(arrayBufferOrBytes);
+    const cleanSub = String(mediaSubpath || '').replace(/^\/+/, '');
+    const repoPath = target.basePath ? `${target.basePath}/${cleanSub}` : cleanSub;
+
+    const encodedPath = repoPath.split('/').map(encodeURIComponent).join('/');
+    const endpoint = `https://api.github.com/repos/${encodeURIComponent(
+      target.owner
+    )}/${encodeURIComponent(target.repo)}/contents/${encodedPath}`;
+
+    let sha = null;
+    try {
+      const existing = await this._apiRequest(
+        `${endpoint}?ref=${encodeURIComponent(target.branch)}&_t=${Date.now()}`
+      );
+      if (existing?.sha) sha = existing.sha;
+    } catch (err) {
+      if (err.status !== 404 && err.status !== 409) throw err;
+    }
+
+    const payload = {
+      message: commitMessage || `diary: upload sharded media ${repoPath}`,
+      content: base64,
+      branch: target.branch,
+    };
+    if (sha) payload.sha = sha;
+
+    await this._apiRequest(endpoint, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+
+    return {
+      isSharded: target.isSharded,
+      repo: target.repo,
+      path: repoPath,
+    };
+  }
+
+  /**
+   * Deletes an orphaned media file from its sibling shard repository.
+   */
+  async deleteShardedMedia(owner, repo, branch, subpath, commitMessage) {
+    if (!this.hasToken()) return { deleted: false };
+    const cleanSub = String(subpath || '').replace(/^\/+/, '');
+    const encodedPath = cleanSub.split('/').map(encodeURIComponent).join('/');
+    const endpoint = `https://api.github.com/repos/${encodeURIComponent(
+      owner
+    )}/${encodeURIComponent(repo)}/contents/${encodedPath}`;
+
+    let sha = null;
+    try {
+      const existing = await this._apiRequest(
+        `${endpoint}?ref=${encodeURIComponent(branch || 'main')}&_t=${Date.now()}`
+      );
+      sha = existing?.sha || null;
+    } catch (err) {
+      if (err.status === 404) return { deleted: false };
+      throw err;
+    }
+    if (!sha) return { deleted: false };
+
+    await this._apiRequest(endpoint, {
+      method: 'DELETE',
+      body: JSON.stringify({
+        message: commitMessage || `diary: delete sharded media ${cleanSub}`,
+        sha,
+        branch: branch || 'main',
+      }),
+    });
+    return { deleted: true };
   }
 
   async _apiRequest(url, options = {}) {
