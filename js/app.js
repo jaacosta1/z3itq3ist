@@ -1,5 +1,13 @@
-// js/app.js — Perpetual Side-by-Side Diary Main Application Controller
-// Phase 4: Shared-Computer Zero-Footprint Mode & Emergency Paper Recovery Kit
+/**
+ * js/app.js — Perpetual Side-by-Side Diary Main Application Controller (Phase 6B)
+ * Integrates:
+ * - Phase 1: Split-Repo Vault (Public App + Private Data Repo) & Repo Health / PAT Expiry Radar
+ * - Phase 2: v2 Envelope Encryption (DEK/KEK Key Slots) & Instant Password Rotation
+ * - Phase 3: v3 AES-GCM AAD Tamper Binding, Sleep-Aware Auto-Lock & Panic Hotkey (Ctrl+Shift+L)
+ * - Phase 4: Shared-Computer Zero-Footprint Mode & Emergency Paper Recovery Kit
+ * - Phase 5: Atomic Multi-File Commits (Git Trees API) & Interactive 3-Way Conflict Resolver
+ * - Phase 6B: Browser-Side WebP Compression, Encrypted Media Vault (.enc) & Batch Photo Migration
+ */
 
 import {
   encryptText,
@@ -23,18 +31,22 @@ import {
   countChars,
   extractDefaultQuote,
 } from './markdown.js';
-import { GitHubClient, recalculateIndexForDay } from './github.js';
+import { GitHubClient, SyncConflictError, recalculateIndexForDay } from './github.js';
 import {
   LocalMediaStore,
   processImageFile,
-  resolveMediaSrc,
+  prepareMediaPayloadForStorage,
+  resolveMediaAsset,
+  revokeAllManagedMediaUrls,
+  formatBytesCompact,
+  getSavedWebpPreset,
+  saveWebpPreset,
   AlignmentStudio,
   attachInlineAlignController,
 } from './media.js';
-import {
-  openPrintableRecoveryCard,
-  buildOfflineDecryptorHtml,
-} from './recovery.js';
+import { migratePlaintextMediaToEncryptedVault } from './media-vault.js';
+import { openPrintableRecoveryCard, buildOfflineDecryptorHtml } from './recovery.js';
+import { renderDiffHtml, buildThreeWayMerge, mergeTags } from './conflict.js';
 
 const MONTHS = [
   'January',
@@ -221,6 +233,7 @@ class PerpetualDiaryApp {
       compareDateB: '2026-11-24',
       indexData: { updatedAt: '', days: {} },
       dayCache: {},
+      dayShas: {},
       sandboxRamDays: null,
       ramMediaUrls: new Map(),
       vaultMeta: null,
@@ -234,7 +247,9 @@ class PerpetualDiaryApp {
       editingCommentId: null,
       commentDraftPhoto: null,
       editingEntryKey: null,
+      editingBaseEntry: null,
       entryDraftPhoto: null,
+      activeConflict: null,
       editorMode: 'write',
       archiveSearch: '',
       archiveYear: '',
@@ -252,7 +267,9 @@ class PerpetualDiaryApp {
     this.autoLockWarned = false;
   }
 
-  // Zero-Footprint Storage Gateways
+  /* ========================================================================
+     ZERO-FOOTPRINT STORAGE & MANAGED MEDIA MEMORY GATEWAYS
+     ======================================================================== */
   storageSet(key, value) {
     if (this.state.zeroFootprint) return false;
     try {
@@ -276,7 +293,7 @@ class PerpetualDiaryApp {
     try {
       window.localStorage.removeItem(key);
     } catch {
-      // ignore
+      // ignore storage errors
     }
   }
 
@@ -303,7 +320,7 @@ class PerpetualDiaryApp {
     if (notify) {
       this.showToast(
         next
-          ? 'Zero-Footprint Mode ON — all keys, PAT, and drafts stay strictly in RAM.'
+          ? 'Zero-Footprint Mode ON — keys, PAT, photos, and drafts stay strictly in RAM.'
           : 'Zero-Footprint Mode OFF — local browser persistence re-enabled.',
         'info'
       );
@@ -311,22 +328,48 @@ class PerpetualDiaryApp {
   }
 
   revokeRamMediaUrls() {
-    for (const url of this.state.ramMediaUrls.values()) {
-      try {
-        URL.revokeObjectURL(url);
-      } catch {
-        // ignore
+    for (const val of this.state.ramMediaUrls.values()) {
+      if (typeof val === 'string' && val.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(val);
+        } catch {
+          // ignore
+        }
       }
     }
     this.state.ramMediaUrls.clear();
+    revokeAllManagedMediaUrls();
+  }
+
+  async resolveMediaAssetSafe(src) {
+    return resolveMediaAsset(
+      src,
+      this.gh,
+      this.state.zeroFootprint ? null : this.mediaStore,
+      this.state.keyring || this.state.cryptoKey,
+      this.state.ramMediaUrls
+    );
   }
 
   async resolveMediaUrlSafe(src) {
-    if (!src) return '';
-    if (String(src).startsWith('ram:')) {
-      return this.state.ramMediaUrls.get(src) || '';
+    const asset = await this.resolveMediaAssetSafe(src);
+    return asset.status === 'ok' ? asset.url : '';
+  }
+
+  async storeLocalMediaBuffer(mediaSubpath, buffer, mime, isEncrypted = false) {
+    if (this.state.zeroFootprint) {
+      const ramKey = `ram:${mediaSubpath}`;
+      if (isEncrypted) {
+        const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+        this.state.ramMediaUrls.set(ramKey, bytes);
+      } else {
+        const blobUrl = URL.createObjectURL(new Blob([buffer], { type: mime || 'image/webp' }));
+        this.state.ramMediaUrls.set(ramKey, blobUrl);
+      }
+      return ramKey;
     }
-    return resolveMediaSrc(src, this.gh, this.state.zeroFootprint ? null : this.mediaStore);
+    await this.mediaStore.putImage(mediaSubpath, buffer, mime);
+    return `idb:${mediaSubpath}`;
   }
 
   async wipeAllLocalBrowserTraces() {
@@ -363,6 +406,9 @@ class PerpetualDiaryApp {
     this.revokeRamMediaUrls();
   }
 
+  /* ========================================================================
+     VAULT SESSION, AUTO-LOCK MONITOR & PANIC LOCK
+     ======================================================================== */
   hasActiveSessionKey() {
     return Boolean(this.state.keyring?.dek || this.state.keyring?.legacyKey || this.state.cryptoKey);
   }
@@ -459,6 +505,8 @@ class PerpetualDiaryApp {
       'archive-results',
       'entry-preview-pane',
       'vault-recovery-code-display',
+      'conflict-local-diff',
+      'conflict-remote-diff',
     ];
     for (const id of clearHtmlIds) {
       const el = document.getElementById(id);
@@ -478,13 +526,23 @@ class PerpetualDiaryApp {
       'vault-new-password',
       'vault-confirm-password',
       'gh-token-input',
+      'conflict-merged-title',
+      'conflict-merged-mood',
+      'conflict-merged-tags',
+      'conflict-merged-body',
     ];
     for (const id of clearValueIds) {
       const el = document.getElementById(id);
       if (el) el.value = '';
     }
 
-    const modalIds = ['composer-modal', 'github-modal', 'vault-modal', 'confirm-modal'];
+    const modalIds = [
+      'composer-modal',
+      'github-modal',
+      'vault-modal',
+      'conflict-modal',
+      'confirm-modal',
+    ];
     for (const id of modalIds) {
       const el = document.getElementById(id);
       if (el) el.hidden = true;
@@ -501,7 +559,6 @@ class PerpetualDiaryApp {
       return;
     }
 
-    // Flush unsaved composer draft ONLY if Zero-Footprint Mode is OFF
     const composerOpen = !document.getElementById('composer-modal')?.hidden;
     if (composerOpen && !this.state.zeroFootprint) {
       const diaryDate = document.getElementById('entry-date-input')?.value;
@@ -523,8 +580,10 @@ class PerpetualDiaryApp {
 
     this.setActiveKeyring(null);
     this.state.recentRecoveryCode = null;
+    this.state.activeConflict = null;
     this.state.unlocked = false;
     this.state.dayCache = {};
+    this.state.dayShas = {};
     this.revokeRamMediaUrls();
 
     if (this.state.zeroFootprint) {
@@ -537,8 +596,8 @@ class PerpetualDiaryApp {
     if (reasonBadge) {
       if (reason === 'panic') {
         reasonBadge.textContent = this.state.zeroFootprint
-          ? 'PANIC LOCK (ZERO-FOOTPRINT) · RAM & PAT WIPED'
-          : 'PANIC LOCK ACTIVATED (CTRL+SHIFT+L) · MEMORY WIPED';
+          ? 'PANIC LOCK (ZERO-FOOTPRINT) · RAM, MEDIA & PAT WIPED'
+          : 'PANIC LOCK ACTIVATED (CTRL+SHIFT+L) · KEYS & MEDIA WIPED';
         reasonBadge.hidden = false;
       } else if (reason === 'inactivity') {
         const mins = this.getEffectiveAutoLockMinutes();
@@ -547,7 +606,7 @@ class PerpetualDiaryApp {
       } else if (reason === 'manual') {
         reasonBadge.textContent = this.state.zeroFootprint
           ? 'LOCKED · ZERO-FOOTPRINT RAM & PAT WIPED'
-          : 'LOCKED · SESSION KEY WIPED';
+          : 'LOCKED · SESSION KEY & DECRYPTED MEDIA WIPED';
         reasonBadge.hidden = false;
       } else {
         reasonBadge.hidden = true;
@@ -564,6 +623,9 @@ class PerpetualDiaryApp {
     this.updateModeBadge();
   }
 
+  /* ========================================================================
+     INITIALIZATION & UI PRIMITIVES
+     ======================================================================== */
   async init() {
     this.initTheme();
     this.populateDateSelectors();
@@ -631,7 +693,7 @@ class PerpetualDiaryApp {
     window.setTimeout(() => {
       toast.classList.add('is-leaving');
       window.setTimeout(() => toast.remove(), 220);
-    }, 3400);
+    }, 3600);
   }
 
   openConfirm({ title = 'Confirm Action', message = 'Are you sure?', confirmLabel = 'Confirm' }) {
@@ -697,6 +759,9 @@ class PerpetualDiaryApp {
     });
   }
 
+  /* ========================================================================
+     DATA LOADING & PERSISTENCE
+     ======================================================================== */
   async loadVaultAndIndex() {
     const localVaultRaw = this.storageGet('perpetual_diary_vault_local_v1');
     let vaultMeta = null;
@@ -761,7 +826,8 @@ class PerpetualDiaryApp {
     }
 
     if (this.gh.hasToken() || this.gh.isConfigured()) {
-      const remoteDoc = await this.gh.readJson(`days/${dayStr}.json`, null);
+      const { data: remoteDoc, sha } = await this.gh.readJsonWithMeta(`days/${dayStr}.json`, null);
+      if (sha) this.state.dayShas[dayStr] = sha;
       if (remoteDoc && typeof remoteDoc === 'object') {
         const normalized = {
           day: dayStr,
@@ -770,6 +836,11 @@ class PerpetualDiaryApp {
         };
         this.state.dayCache[dayStr] = normalized;
         return normalized;
+      }
+      if (this.gh.hasToken()) {
+        const emptyRemote = { day: dayStr, entries: {}, comments: [] };
+        this.state.dayCache[dayStr] = emptyRemote;
+        return emptyRemote;
       }
     }
 
@@ -789,29 +860,18 @@ class PerpetualDiaryApp {
       this.state.sandboxRamDays = sandboxDays;
     }
 
-    const doc = sandboxDays[dayStr] || {
-      day: dayStr,
-      entries: {},
-      comments: [],
-    };
+    const doc = sandboxDays[dayStr] || { day: dayStr, entries: {}, comments: [] };
     this.state.dayCache[dayStr] = doc;
     return doc;
   }
 
-  async persistDayDocument(dayStr, nextDoc, commitMessage) {
+  async persistSandboxDay(dayStr, nextDoc) {
     const normalized = {
       day: dayStr,
       entries: nextDoc.entries || {},
       comments: Array.isArray(nextDoc.comments) ? nextDoc.comments : [],
     };
-
     this.state.dayCache[dayStr] = normalized;
-
-    if (this.gh.hasToken()) {
-      const { index } = await this.gh.updateDayAndIndex(dayStr, normalized, commitMessage);
-      this.state.indexData = index;
-      return normalized;
-    }
 
     const sandboxDays = this.state.sandboxRamDays || JSON.parse(JSON.stringify(SANDBOX_SEED_DAYS));
     if (Object.keys(normalized.entries).length === 0 && normalized.comments.length === 0) {
@@ -825,6 +885,25 @@ class PerpetualDiaryApp {
     this.state.indexData = recalculateIndexForDay(this.state.indexData, dayStr, normalized);
     this.storageSet('perpetual_diary_sandbox_index_v1', JSON.stringify(this.state.indexData));
     return normalized;
+  }
+
+  async persistDayDocument(dayStr, nextDoc, commitMessage) {
+    const normalized = {
+      day: dayStr,
+      entries: nextDoc.entries || {},
+      comments: Array.isArray(nextDoc.comments) ? nextDoc.comments : [],
+    };
+
+    if (this.gh.hasToken()) {
+      const res = await this.gh.updateDayAndIndex(dayStr, normalized, commitMessage);
+      this.state.dayCache[dayStr] = normalized;
+      if (res.daySha) this.state.dayShas[dayStr] = res.daySha;
+      this.state.indexData = res.index;
+      return { doc: normalized, commitSha: res.commitSha };
+    }
+
+    await this.persistSandboxDay(dayStr, normalized);
+    return { doc: normalized, commitSha: '' };
   }
 
   async persistVaultMeta(vaultMeta, commitMessage = 'diary: update envelope vault') {
@@ -863,6 +942,9 @@ class PerpetualDiaryApp {
     return res.status === 'plain' || res.status === 'ok' ? res.text : null;
   }
 
+  /* ========================================================================
+     ROUTING & VIEW RENDERING
+     ======================================================================== */
   applyHashRoute() {
     const rawHash = (window.location.hash || '').replace(/^#/, '');
     if (!rawHash || rawHash === 'today') {
@@ -1112,7 +1194,7 @@ class PerpetualDiaryApp {
           <div class="mono-label">⚠ CRYPTOGRAPHIC INTEGRITY ALERT · AAD MISMATCH</div>
           <p>
             Decryption rejected this entry because its AES-GCM Additional Authenticated Data (AAD) does not match
-            <code>${escapeHtml(expectedDate)}</code>. The file may have been corrupted, edited externally, or transplanted from another date.
+            <code>${escapeHtml(expectedDate)}</code>.
           </p>
         </div>
       `;
@@ -1129,10 +1211,25 @@ class PerpetualDiaryApp {
       plainWords = countWords(stripMarkdown(decryptedBody));
     }
 
+    // Phase 6B: Encrypted (.enc) & Plaintext Media Resolution
     let mediaHtml = '';
     if (!isLockedEntry && !isTampered && entry.image && entry.image.src) {
-      const resolvedSrc = await this.resolveMediaUrlSafe(entry.image.src);
-      if (resolvedSrc) {
+      const asset = await this.resolveMediaAssetSafe(entry.image.src);
+      if (asset.status === 'locked') {
+        mediaHtml = `
+          <div class="encrypted-media-card">
+            <span class="mono-label">🔒 ENCRYPTED PHOTO (.ENC)</span>
+            <p class="section-subtext">Unlock the Vault to decrypt and view this photo in RAM.</p>
+          </div>
+        `;
+      } else if (asset.status === 'tampered') {
+        mediaHtml = `
+          <div class="tamper-alert-card" role="alert">
+            <div class="mono-label">⚠ PHOTO INTEGRITY ALERT · AAD MISMATCH</div>
+            <p>Encrypted photo failed AES-GCM AAD verification and was blocked from rendering.</p>
+          </div>
+        `;
+      } else if (asset.status === 'ok' && asset.url) {
         const align = entry.image.align || 'full';
         const posX = Number.isFinite(Number(entry.image.posX)) ? Number(entry.image.posX) : 50;
         const posY = Number.isFinite(Number(entry.image.posY)) ? Number(entry.image.posY) : 50;
@@ -1147,10 +1244,11 @@ class PerpetualDiaryApp {
           <figure class="entry-figure align-${escapeHtml(align)}" style="width:${widthPct}%;max-width:100%;">
             <div class="entry-figure-frame" style="height:${heightPx}px;">
               <img
-                src="${escapeHtml(resolvedSrc)}"
-                alt="${escapeHtml(entry.image.caption || `Photo from ${entry.diaryDate}`)}"
+                src="${escapeHtml(asset.url)}"
+                alt="${escapeHtml(entry.image.caption || `Photo from ${resolvedDate}`)}"
                 style="object-position:${posX}% ${posY}%;"
               />
+              ${asset.encrypted ? '<span class="media-enc-badge" title="Decrypted from AES-256-GCM .enc blob in RAM">🔒 .ENC</span>' : ''}
               <button type="button" class="btn btn-ghost btn-sm inline-realign-btn" title="Adjust photo pan & alignment">
                 ⇄ Drag Align
               </button>
@@ -1287,12 +1385,13 @@ class PerpetualDiaryApp {
                 ...updatedLayout,
               };
               latestDoc.entries[yearKey].updatedAt = new Date().toISOString();
-              await this.persistDayDocument(
+              const saved = await this.persistDayDocument(
                 dayStr,
                 latestDoc,
                 `diary: realign photo ${resolvedDate}`
               );
-              this.showToast('Photo alignment saved.', 'success');
+              const shortSha = saved.commitSha ? ` (#${saved.commitSha.slice(0, 7)})` : '';
+              this.showToast(`Photo alignment saved atomically${shortSha}.`, 'success');
               await this.renderReader();
             }
           }
@@ -1303,6 +1402,9 @@ class PerpetualDiaryApp {
     return col;
   }
 
+  /* ========================================================================
+     MARGIN COMMENTS & ENCRYPTED COMMENT MEDIA
+     ======================================================================== */
   attachQuoteToComment(quoteObj) {
     this.state.pendingQuote = quoteObj;
     const box = document.getElementById('comment-quote-attachment');
@@ -1362,15 +1464,22 @@ class PerpetualDiaryApp {
 
       let photoHtml = '';
       if (!isLocked && !isTampered && cmt.image && cmt.image.src) {
-        const resolved = await this.resolveMediaUrlSafe(cmt.image.src);
-        if (resolved) {
+        const asset = await this.resolveMediaAssetSafe(cmt.image.src);
+        if (asset.status === 'locked') {
+          photoHtml = `<div class="encrypted-media-card"><span class="mono-label">🔒 ENCRYPTED COMMENT PHOTO (.ENC)</span></div>`;
+        } else if (asset.status === 'tampered') {
+          photoHtml = `<div class="tamper-alert-card" role="alert"><div class="mono-label">⚠ COMMENT PHOTO AAD MISMATCH</div></div>`;
+        } else if (asset.status === 'ok' && asset.url) {
           photoHtml = `
             <figure class="comment-figure">
-              <img
-                src="${escapeHtml(resolved)}"
-                alt="${escapeHtml(cmt.image.caption || 'Comment attachment')}"
-                style="object-position:${cmt.image.posX ?? 50}% ${cmt.image.posY ?? 50}%;max-height:${cmt.image.height ?? 200}px;"
-              />
+              <div class="comment-figure-frame">
+                <img
+                  src="${escapeHtml(asset.url)}"
+                  alt="${escapeHtml(cmt.image.caption || 'Comment attachment')}"
+                  style="object-position:${cmt.image.posX ?? 50}% ${cmt.image.posY ?? 50}%;max-height:${cmt.image.height ?? 200}px;"
+                />
+                ${asset.encrypted ? '<span class="media-enc-badge">🔒 .ENC</span>' : ''}
+              </div>
               ${cmt.image.caption ? `<figcaption class="figure-caption">${escapeHtml(cmt.image.caption)}</figcaption>` : ''}
             </figure>
           `;
@@ -1457,6 +1566,9 @@ class PerpetualDiaryApp {
     this.state.commentDraftPhoto = cmt.image ? { ...cmt.image } : null;
     document.getElementById('comment-photo-remove-btn').hidden = !this.state.commentDraftPhoto;
     document.getElementById('comment-photo-caption').value = cmt.image?.caption || '';
+    const cmtStats = document.getElementById('comment-photo-stats');
+    if (cmtStats) cmtStats.hidden = true;
+
     if (this.state.commentDraftPhoto) {
       this.resolveMediaUrlSafe(this.state.commentDraftPhoto.src).then((src) => {
         this.commentStudio.setMedia(src, this.state.commentDraftPhoto);
@@ -1476,6 +1588,11 @@ class PerpetualDiaryApp {
     document.getElementById('comment-photo-url').value = '';
     document.getElementById('comment-photo-caption').value = '';
     document.getElementById('comment-photo-remove-btn').hidden = true;
+    const cmtStats = document.getElementById('comment-photo-stats');
+    if (cmtStats) {
+      cmtStats.textContent = '';
+      cmtStats.hidden = true;
+    }
     document.getElementById('comment-submit-btn').textContent = 'Post Margin Note';
     this.clearCommentQuote();
     this.commentStudio.clear();
@@ -1486,17 +1603,6 @@ class PerpetualDiaryApp {
     document.getElementById('comment-quote-attachment').hidden = true;
     document.getElementById('comment-quote-preview').textContent = '';
     document.getElementById('comment-quote-source').textContent = '';
-  }
-
-  async storeLocalMediaBuffer(mediaSubpath, buffer, mime) {
-    if (this.state.zeroFootprint) {
-      const ramKey = `ram:${mediaSubpath}`;
-      const blobUrl = URL.createObjectURL(new Blob([buffer], { type: mime || 'image/jpeg' }));
-      this.state.ramMediaUrls.set(ramKey, blobUrl);
-      return ramKey;
-    }
-    await this.mediaStore.putImage(mediaSubpath, buffer, mime);
-    return `idb:${mediaSubpath}`;
   }
 
   async handleCommentSubmit(ev) {
@@ -1520,6 +1626,7 @@ class PerpetualDiaryApp {
     const caption = document.getElementById('comment-photo-caption').value.trim();
     const photoUrl = document.getElementById('comment-photo-url').value.trim();
     let imagePayload = this.state.commentDraftPhoto ? { ...this.state.commentDraftPhoto } : null;
+    const mediaUploads = [];
 
     if (!imagePayload && photoUrl && /^https:\/\//i.test(photoUrl)) {
       imagePayload = {
@@ -1534,19 +1641,29 @@ class PerpetualDiaryApp {
     } else if (imagePayload) {
       imagePayload.caption = caption;
       if (imagePayload._pendingBuffer) {
-        const mediaSubpath = `media/${getTodayIsoDate()}-${Date.now()}.${imagePayload._ext || 'jpg'}`;
+        const encryptPhoto = Boolean(
+          document.getElementById('comment-photo-encrypt-checkbox')?.checked &&
+            this.hasActiveSessionKey()
+        );
+        const prepared = await prepareMediaPayloadForStorage({
+          buffer: imagePayload._pendingBuffer,
+          mime: imagePayload._mime || 'image/webp',
+          ext: imagePayload._ext || 'webp',
+          datePrefix: getTodayIsoDate(),
+          encrypt: encryptPhoto,
+          keyring: this.state.keyring || this.state.cryptoKey,
+        });
+        imagePayload.encrypted = prepared.encrypted;
+
         if (this.gh.hasToken()) {
-          await this.gh.uploadBinaryMedia(
-            mediaSubpath,
-            imagePayload._pendingBuffer,
-            `diary: attach comment media ${mediaSubpath}`
-          );
-          imagePayload.src = `${this.gh.getDataTarget().basePath}/${mediaSubpath}`;
+          mediaUploads.push({ subpath: prepared.mediaSubpath, buffer: prepared.uploadBuffer });
+          imagePayload.src = `${this.gh.getDataTarget().basePath}/${prepared.mediaSubpath}`;
         } else {
           imagePayload.src = await this.storeLocalMediaBuffer(
-            mediaSubpath,
-            imagePayload._pendingBuffer,
-            imagePayload._mime
+            prepared.mediaSubpath,
+            prepared.uploadBuffer,
+            prepared.uploadMime,
+            prepared.encrypted
           );
         }
         delete imagePayload._pendingBuffer;
@@ -1555,44 +1672,66 @@ class PerpetualDiaryApp {
       }
     }
 
-    const doc = await this.getDayDocument(dayStr, true);
-    const comments = Array.isArray(doc.comments) ? [...doc.comments] : [];
     const nowIso = new Date().toISOString();
+    const existingDoc = await this.getDayDocument(dayStr, false);
+    const existingComment = (existingDoc.comments || []).find(
+      (c) => c.id === this.state.editingCommentId
+    );
 
-    if (this.state.editingCommentId) {
-      const idx = comments.findIndex((c) => c.id === this.state.editingCommentId);
-      if (idx !== -1) {
-        comments[idx] = {
-          ...comments[idx],
-          author,
-          body,
-          updatedAt: nowIso,
-          encrypted: shouldEncrypt,
-          quote: this.state.pendingQuote ? { ...this.state.pendingQuote } : null,
-          image: imagePayload,
-        };
+    const commentObj = {
+      id: targetCommentId,
+      author,
+      body,
+      createdAt: existingComment?.createdAt || nowIso,
+      updatedAt: nowIso,
+      encrypted: shouldEncrypt,
+      quote: this.state.pendingQuote ? { ...this.state.pendingQuote } : null,
+      image: imagePayload,
+    };
+
+    try {
+      if (this.gh.hasToken()) {
+        const op = this.state.editingCommentId ? 'edit' : 'add';
+        const res = await this.gh.commitAtomicDayMutations({
+          dayMutations: [
+            {
+              dayStr,
+              mode: 'comment',
+              commentMutation: { op, comment: commentObj },
+            },
+          ],
+          mediaUploads,
+          commitMessage: `diary: ${op} comment on ${dayStr}`,
+        });
+        this.state.dayCache[dayStr] = res.docs[dayStr];
+        if (res.dayShas?.[dayStr]) this.state.dayShas[dayStr] = res.dayShas[dayStr];
+        this.state.indexData = res.index;
+        const shortSha = res.commitSha ? ` (#${res.commitSha.slice(0, 7)})` : '';
+        this.showToast(
+          `${this.state.editingCommentId ? 'Margin note updated' : 'Margin note posted'} atomically${shortSha}.`,
+          'success'
+        );
+      } else {
+        const doc = await this.getDayDocument(dayStr, true);
+        const comments = Array.isArray(doc.comments) ? [...doc.comments] : [];
+        if (this.state.editingCommentId) {
+          const idx = comments.findIndex((c) => c.id === this.state.editingCommentId);
+          if (idx !== -1) comments[idx] = commentObj;
+        } else {
+          comments.push(commentObj);
+        }
+        await this.persistSandboxDay(dayStr, { ...doc, comments });
+        this.showToast(
+          this.state.editingCommentId ? 'Margin note updated.' : 'Margin note posted.',
+          'success'
+        );
       }
-      doc.comments = comments;
-      await this.persistDayDocument(dayStr, doc, `diary: edit comment on ${dayStr}`);
-      this.showToast('Margin note updated.', 'success');
-    } else {
-      comments.push({
-        id: targetCommentId,
-        author,
-        body,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-        encrypted: shouldEncrypt,
-        quote: this.state.pendingQuote ? { ...this.state.pendingQuote } : null,
-        image: imagePayload,
-      });
-      doc.comments = comments;
-      await this.persistDayDocument(dayStr, doc, `diary: add comment on ${dayStr}`);
-      this.showToast('Margin note posted.', 'success');
-    }
 
-    this.resetCommentComposer();
-    await this.renderComments(dayStr);
+      this.resetCommentComposer();
+      await this.renderComments(dayStr);
+    } catch (err) {
+      this.showToast(err.message || 'Failed to save margin note.', 'error');
+    }
   }
 
   async handleDeleteComment(dayStr, commentObj) {
@@ -1603,19 +1742,46 @@ class PerpetualDiaryApp {
     });
     if (!confirmed) return;
 
-    const doc = await this.getDayDocument(dayStr, true);
-    doc.comments = (doc.comments || []).filter((c) => c.id !== commentObj.id);
-    await this.persistDayDocument(dayStr, doc, `diary: delete comment on ${dayStr}`);
+    try {
+      if (this.gh.hasToken()) {
+        const mediaDeletes = [];
+        const basePrefix = `${this.gh.getDataTarget().basePath}/`;
+        if (commentObj.image?.src?.startsWith(basePrefix)) {
+          mediaDeletes.push(commentObj.image.src.slice(basePrefix.length));
+        }
 
-    if (commentObj.image?.src?.startsWith('data/media/') && this.gh.hasToken()) {
-      const sub = commentObj.image.src.replace(/^data\//, '');
-      await this.gh.deleteFile(sub, `diary: remove comment media ${sub}`).catch(() => {});
+        const res = await this.gh.commitAtomicDayMutations({
+          dayMutations: [
+            {
+              dayStr,
+              mode: 'comment',
+              commentMutation: { op: 'delete', id: commentObj.id },
+            },
+          ],
+          mediaDeletes,
+          commitMessage: `diary: delete comment on ${dayStr}`,
+        });
+        this.state.dayCache[dayStr] = res.docs[dayStr];
+        if (res.dayShas?.[dayStr]) this.state.dayShas[dayStr] = res.dayShas[dayStr];
+        this.state.indexData = res.index;
+        const shortSha = res.commitSha ? ` (#${res.commitSha.slice(0, 7)})` : '';
+        this.showToast(`Margin note deleted atomically${shortSha}.`, 'success');
+      } else {
+        const doc = await this.getDayDocument(dayStr, true);
+        doc.comments = (doc.comments || []).filter((c) => c.id !== commentObj.id);
+        await this.persistSandboxDay(dayStr, doc);
+        this.showToast('Margin note deleted.', 'success');
+      }
+
+      await this.renderComments(dayStr);
+    } catch (err) {
+      this.showToast(err.message || 'Failed to delete margin note.', 'error');
     }
-
-    this.showToast('Margin note deleted.', 'success');
-    await this.renderComments(dayStr);
   }
 
+  /* ========================================================================
+     ENTRY COMPOSER, WEBP UPLOAD & ATOMIC SAVE / 3-WAY CONFLICT RESOLVER
+     ======================================================================== */
   openComposer({ presetDate = null, editEntry = null, dayStr = null, yearKey = null } = {}) {
     const modal = document.getElementById('composer-modal');
     const dateInput = document.getElementById('entry-date-input');
@@ -1624,19 +1790,38 @@ class PerpetualDiaryApp {
     const tagsInput = document.getElementById('entry-tags-input');
     const bodyInput = document.getElementById('entry-body-input');
     const encryptCb = document.getElementById('entry-encrypt-checkbox');
+    const photoEncryptCb = document.getElementById('entry-photo-encrypt-checkbox');
+    const photoStatsEl = document.getElementById('entry-photo-stats');
     const deleteBtn = document.getElementById('entry-delete-btn');
 
     document.getElementById('entry-photo-url').value = '';
     document.getElementById('entry-photo-caption').value = '';
     document.getElementById('entry-photo-remove-btn').hidden = true;
+    if (photoStatsEl) {
+      photoStatsEl.textContent = '';
+      photoStatsEl.hidden = true;
+    }
+    if (photoEncryptCb) photoEncryptCb.checked = this.hasActiveSessionKey();
     this.entryStudio.clear();
 
     if (editEntry) {
+      const origDay = dayStr || editEntry.diaryDate.slice(5);
       this.state.editingEntryKey = {
-        originalDayStr: dayStr || editEntry.diaryDate.slice(5),
+        originalDayStr: origDay,
         originalYearKey: yearKey || String(editEntry.year),
         originalWrittenAt: editEntry.writtenAt || new Date().toISOString(),
+        originalUpdatedAt: editEntry.updatedAt || '',
+        expectedDaySha: this.state.dayShas[origDay] || null,
       };
+      this.state.editingBaseEntry = {
+        diaryDate: editEntry.diaryDate || `${yearKey}-${origDay}`,
+        title: editEntry.title || '',
+        mood: editEntry.mood || '',
+        tags: Array.isArray(editEntry.tags) ? [...editEntry.tags] : [],
+        body: editEntry.body || '',
+        updatedAt: editEntry.updatedAt || '',
+      };
+
       document.getElementById('composer-modal-title').textContent =
         `Edit Entry · ${editEntry.diaryDate}`;
       dateInput.value = editEntry.diaryDate || getTodayIsoDate();
@@ -1659,6 +1844,7 @@ class PerpetualDiaryApp {
       }
     } else {
       this.state.editingEntryKey = null;
+      this.state.editingBaseEntry = null;
       this.state.entryDraftPhoto = null;
       document.getElementById('composer-modal-title').textContent = 'New Diary Entry';
       let defaultDate = presetDate;
@@ -1774,6 +1960,233 @@ class PerpetualDiaryApp {
     this.scheduleDraftAutosave();
   }
 
+  async openConflictResolverModal({
+    conflictErr,
+    localPlain,
+    encryptFlag,
+    imageObj,
+    mediaUploads,
+    editingEntryKey,
+  }) {
+    const { dayStr, yearKey, remoteEntry, remoteSha } = conflictErr;
+    const expectedDate = `${yearKey}-${dayStr}`;
+
+    let remotePlainTitle = '';
+    let remotePlainBody = '';
+    if (remoteEntry) {
+      remotePlainBody =
+        (await this.decryptFieldIfNeeded(
+          remoteEntry.body,
+          Boolean(remoteEntry.encrypted),
+          buildEntryAad(expectedDate, yearKey, 'body')
+        )) ?? '[Unable to decrypt remote entry]';
+      remotePlainTitle =
+        (await this.decryptFieldIfNeeded(
+          remoteEntry.title || '',
+          Boolean(remoteEntry.encrypted),
+          buildEntryAad(expectedDate, yearKey, 'title')
+        )) ?? '';
+    }
+
+    const remotePlain = {
+      diaryDate: remoteEntry?.diaryDate || expectedDate,
+      title: remotePlainTitle,
+      mood: remoteEntry?.mood || '',
+      tags: Array.isArray(remoteEntry?.tags) ? [...remoteEntry.tags] : [],
+      body: remotePlainBody,
+      updatedAt: remoteEntry?.updatedAt || '',
+      writtenAt: remoteEntry?.writtenAt || editingEntryKey?.originalWrittenAt || '',
+      image: remoteEntry?.image || null,
+    };
+
+    const basePlain = this.state.editingBaseEntry || {
+      title: '',
+      mood: '',
+      tags: [],
+      body: '',
+    };
+
+    const autoMerge = buildThreeWayMerge(basePlain.body, localPlain.body, remotePlain.body);
+
+    this.state.activeConflict = {
+      dayStr,
+      yearKey,
+      remoteSha,
+      basePlain,
+      localPlain,
+      remotePlain,
+      autoMerge,
+      encryptFlag,
+      imageObj,
+      mediaUploads,
+      editingEntryKey,
+    };
+
+    document.getElementById('conflict-modal-title').textContent =
+      `Sync Conflict · ${expectedDate}`;
+    document.getElementById('conflict-summary-banner').textContent = autoMerge.hasConflicts
+      ? `Another device updated ${expectedDate} while you were editing (${autoMerge.conflictCount} overlapping section(s) marked below). Compare both versions and commit your merged result.`
+      : `Another device updated ${expectedDate} while you were editing. Non-overlapping paragraphs were merged cleanly below—review and commit.`;
+
+    document.getElementById('conflict-local-meta').textContent =
+      `${countWords(stripMarkdown(localPlain.body))} words · Unsaved`;
+    document.getElementById('conflict-remote-meta').textContent = remotePlain.updatedAt
+      ? `Saved ${new Date(remotePlain.updatedAt).toLocaleString()}`
+      : 'Latest on GitHub';
+
+    document.getElementById('conflict-local-diff').innerHTML = renderDiffHtml(
+      remotePlain.body,
+      localPlain.body
+    );
+    document.getElementById('conflict-remote-diff').innerHTML = renderDiffHtml(
+      localPlain.body,
+      remotePlain.body
+    );
+
+    this.populateConflictMergeFields('merge');
+    document.getElementById('conflict-modal').hidden = false;
+  }
+
+  populateConflictMergeFields(strategy = 'merge') {
+    const c = this.state.activeConflict;
+    if (!c) return;
+
+    if (strategy === 'local') {
+      document.getElementById('conflict-merged-title').value = c.localPlain.title;
+      document.getElementById('conflict-merged-mood').value = c.localPlain.mood;
+      document.getElementById('conflict-merged-tags').value = c.localPlain.tags.join(', ');
+      document.getElementById('conflict-merged-body').value = c.localPlain.body;
+    } else if (strategy === 'remote') {
+      document.getElementById('conflict-merged-title').value = c.remotePlain.title;
+      document.getElementById('conflict-merged-mood').value = c.remotePlain.mood;
+      document.getElementById('conflict-merged-tags').value = c.remotePlain.tags.join(', ');
+      document.getElementById('conflict-merged-body').value = c.remotePlain.body;
+    } else {
+      const mergedTitle =
+        c.localPlain.title && c.localPlain.title !== c.basePlain.title
+          ? c.localPlain.title
+          : c.remotePlain.title || c.localPlain.title;
+      const mergedMood =
+        c.localPlain.mood && c.localPlain.mood !== c.basePlain.mood
+          ? c.localPlain.mood
+          : c.remotePlain.mood || c.localPlain.mood;
+      const mergedTags = mergeTags(c.localPlain.tags, c.remotePlain.tags);
+
+      document.getElementById('conflict-merged-title').value = mergedTitle;
+      document.getElementById('conflict-merged-mood').value = mergedMood;
+      document.getElementById('conflict-merged-tags').value = mergedTags.join(', ');
+      document.getElementById('conflict-merged-body').value = c.autoMerge.mergedText;
+    }
+  }
+
+  async handleConflictCommit(ev) {
+    ev.preventDefault();
+    const c = this.state.activeConflict;
+    if (!c) return;
+
+    const mergedBody = document.getElementById('conflict-merged-body').value;
+    if (!mergedBody.trim()) {
+      this.showToast('Merged prose cannot be empty.', 'warn');
+      return;
+    }
+    if (mergedBody.includes('<<<<<<<') || mergedBody.includes('>>>>>>>')) {
+      const proceed = await this.openConfirm({
+        title: 'Conflict Markers Still Present',
+        message: 'Your merged prose still contains <<<<<<< / >>>>>>> markers. Commit anyway?',
+        confirmLabel: 'Commit Anyway',
+      });
+      if (!proceed) return;
+    }
+
+    const mergedTitle = document.getElementById('conflict-merged-title').value.trim();
+    const mergedMood = document.getElementById('conflict-merged-mood').value.trim();
+    const mergedTags = document
+      .getElementById('conflict-merged-tags')
+      .value.split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    const diaryDate = `${c.yearKey}-${c.dayStr}`;
+    let storedTitle = mergedTitle;
+    let storedBody = mergedBody;
+
+    if (c.encryptFlag) {
+      if (!this.hasActiveSessionKey()) {
+        this.showToast('Unlock the Vault before committing encrypted merges.', 'warn');
+        return;
+      }
+      const keyCtx = this.state.keyring || this.state.cryptoKey;
+      storedTitle = mergedTitle
+        ? await encryptText(mergedTitle, keyCtx, buildEntryAad(diaryDate, c.yearKey, 'title'))
+        : '';
+      storedBody = await encryptText(
+        mergedBody,
+        keyCtx,
+        buildEntryAad(diaryDate, c.yearKey, 'body')
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+    const entryRecord = {
+      year: Number(c.yearKey),
+      diaryDate,
+      title: storedTitle,
+      body: storedBody,
+      tags: mergedTags,
+      mood: mergedMood,
+      image: c.imageObj || c.remotePlain.image || null,
+      writtenAt: c.remotePlain.writtenAt || c.editingEntryKey?.originalWrittenAt || nowIso,
+      updatedAt: nowIso,
+      encrypted: Boolean(c.encryptFlag),
+    };
+
+    try {
+      const dayMutations = [];
+      if (c.editingEntryKey) {
+        const { originalDayStr, originalYearKey } = c.editingEntryKey;
+        if (originalDayStr !== c.dayStr || originalYearKey !== c.yearKey) {
+          dayMutations.push({
+            dayStr: originalDayStr,
+            mode: 'entry-delete',
+            yearKey: originalYearKey,
+          });
+        }
+      }
+
+      dayMutations.push({
+        dayStr: c.dayStr,
+        mode: 'entry-save',
+        yearKey: c.yearKey,
+        entryRecord,
+        expectedSha: c.remoteSha,
+        expectedUpdatedAt: c.remotePlain.updatedAt,
+      });
+
+      const res = await this.gh.commitAtomicDayMutations({
+        dayMutations,
+        mediaUploads: c.mediaUploads || [],
+        commitMessage: `diary: resolve 3-way conflict ${diaryDate}`,
+      });
+
+      for (const [dKey, doc] of Object.entries(res.docs || {})) {
+        this.state.dayCache[dKey] = doc;
+      }
+      Object.assign(this.state.dayShas, res.dayShas || {});
+      this.state.indexData = res.index;
+      this.state.activeConflict = null;
+      this.storageRemove(`perpetual_draft_${diaryDate}`);
+
+      document.getElementById('conflict-modal').hidden = true;
+      this.closeComposer();
+      this.state.activeDay = c.dayStr;
+      const shortSha = res.commitSha ? ` (#${res.commitSha.slice(0, 7)})` : '';
+      this.showToast(`Conflict resolved & committed atomically${shortSha}.`, 'success');
+      await this.renderReader();
+    } catch (err) {
+      this.showToast(err.message || 'Failed to commit merged resolution.', 'error');
+    }
+  }
+
   async handleEntrySave(ev) {
     ev.preventDefault();
     const diaryDate = document.getElementById('entry-date-input').value;
@@ -1782,21 +2195,23 @@ class PerpetualDiaryApp {
     const newDayStr = `${mm}-${dd}`;
     const newYearKey = String(yearNum);
 
-    let title = document.getElementById('entry-title-input').value.trim();
+    const rawTitle = document.getElementById('entry-title-input').value.trim();
     const mood = document.getElementById('entry-mood-input').value.trim();
     const tags = document
       .getElementById('entry-tags-input')
       .value.split(',')
       .map((t) => t.trim())
       .filter(Boolean);
-    let body = document.getElementById('entry-body-input').value;
+    const rawBody = document.getElementById('entry-body-input').value;
     const encryptFlag = document.getElementById('entry-encrypt-checkbox').checked;
 
-    if (!body.trim()) {
+    if (!rawBody.trim()) {
       this.showToast('Please write some diary prose before saving.', 'warn');
       return;
     }
 
+    let title = rawTitle;
+    let body = rawBody;
     if (encryptFlag) {
       if (!this.hasActiveSessionKey()) {
         this.showToast('Unlock or configure the Vault password before encrypting entries.', 'warn');
@@ -1805,13 +2220,14 @@ class PerpetualDiaryApp {
       const keyCtx = this.state.keyring || this.state.cryptoKey;
       const titleAad = buildEntryAad(diaryDate, newYearKey, 'title');
       const bodyAad = buildEntryAad(diaryDate, newYearKey, 'body');
-      title = title ? await encryptText(title, keyCtx, titleAad) : '';
-      body = await encryptText(body, keyCtx, bodyAad);
+      title = rawTitle ? await encryptText(rawTitle, keyCtx, titleAad) : '';
+      body = await encryptText(rawBody, keyCtx, bodyAad);
     }
 
     const caption = document.getElementById('entry-photo-caption').value.trim();
     const photoUrl = document.getElementById('entry-photo-url').value.trim();
     let imageObj = this.state.entryDraftPhoto ? { ...this.state.entryDraftPhoto } : null;
+    const mediaUploads = [];
 
     if (!imageObj && photoUrl && /^https:\/\//i.test(photoUrl)) {
       imageObj = {
@@ -1826,19 +2242,29 @@ class PerpetualDiaryApp {
     } else if (imageObj) {
       imageObj.caption = caption;
       if (imageObj._pendingBuffer) {
-        const mediaSubpath = `media/${diaryDate}-${Date.now()}.${imageObj._ext || 'jpg'}`;
+        const encryptPhoto = Boolean(
+          document.getElementById('entry-photo-encrypt-checkbox')?.checked &&
+            this.hasActiveSessionKey()
+        );
+        const prepared = await prepareMediaPayloadForStorage({
+          buffer: imageObj._pendingBuffer,
+          mime: imageObj._mime || 'image/webp',
+          ext: imageObj._ext || 'webp',
+          datePrefix: diaryDate,
+          encrypt: encryptPhoto,
+          keyring: this.state.keyring || this.state.cryptoKey,
+        });
+        imageObj.encrypted = prepared.encrypted;
+
         if (this.gh.hasToken()) {
-          await this.gh.uploadBinaryMedia(
-            mediaSubpath,
-            imageObj._pendingBuffer,
-            `diary: upload media ${mediaSubpath}`
-          );
-          imageObj.src = `${this.gh.getDataTarget().basePath}/${mediaSubpath}`;
+          mediaUploads.push({ subpath: prepared.mediaSubpath, buffer: prepared.uploadBuffer });
+          imageObj.src = `${this.gh.getDataTarget().basePath}/${prepared.mediaSubpath}`;
         } else {
           imageObj.src = await this.storeLocalMediaBuffer(
-            mediaSubpath,
-            imageObj._pendingBuffer,
-            imageObj._mime
+            prepared.mediaSubpath,
+            prepared.uploadBuffer,
+            prepared.uploadMime,
+            prepared.encrypted
           );
         }
         delete imageObj._pendingBuffer;
@@ -1864,37 +2290,97 @@ class PerpetualDiaryApp {
     };
 
     try {
-      if (this.state.editingEntryKey) {
-        const { originalDayStr, originalYearKey } = this.state.editingEntryKey;
-        if (originalDayStr !== newDayStr || originalYearKey !== newYearKey) {
-          const oldDoc = await this.getDayDocument(originalDayStr, true);
-          const nextOldEntries = { ...(oldDoc.entries || {}) };
-          delete nextOldEntries[originalYearKey];
-          await this.persistDayDocument(
-            originalDayStr,
-            { ...oldDoc, entries: nextOldEntries },
-            `diary: move ${originalYearKey}-${originalDayStr} out`
-          );
+      if (this.gh.hasToken()) {
+        const dayMutations = [];
+        let commitMsg = `diary: save entry ${diaryDate}`;
+
+        if (this.state.editingEntryKey) {
+          const { originalDayStr, originalYearKey } = this.state.editingEntryKey;
+          if (originalDayStr !== newDayStr || originalYearKey !== newYearKey) {
+            dayMutations.push({
+              dayStr: originalDayStr,
+              mode: 'entry-delete',
+              yearKey: originalYearKey,
+            });
+            commitMsg = `diary: move ${originalYearKey}-${originalDayStr} -> ${diaryDate}`;
+          }
         }
+
+        const isSameSlotEdit = Boolean(
+          this.state.editingEntryKey &&
+            this.state.editingEntryKey.originalDayStr === newDayStr &&
+            this.state.editingEntryKey.originalYearKey === newYearKey
+        );
+
+        dayMutations.push({
+          dayStr: newDayStr,
+          mode: 'entry-save',
+          yearKey: newYearKey,
+          entryRecord,
+          expectedSha: isSameSlotEdit
+            ? this.state.editingEntryKey.expectedDaySha
+            : this.state.dayShas[newDayStr] || null,
+          expectedUpdatedAt: isSameSlotEdit
+            ? this.state.editingEntryKey.originalUpdatedAt
+            : null,
+        });
+
+        const res = await this.gh.commitAtomicDayMutations({
+          dayMutations,
+          mediaUploads,
+          commitMessage: commitMsg,
+        });
+
+        for (const [dKey, doc] of Object.entries(res.docs || {})) {
+          this.state.dayCache[dKey] = doc;
+        }
+        Object.assign(this.state.dayShas, res.dayShas || {});
+        this.state.indexData = res.index;
+
+        this.storageRemove(`perpetual_draft_${diaryDate}`);
+        this.state.activeDay = newDayStr;
+        this.closeComposer();
+        const shortSha = res.commitSha ? ` (#${res.commitSha.slice(0, 7)})` : '';
+        this.showToast(
+          `Saved ${diaryDate} in 1 atomic commit${shortSha}${encryptFlag ? ' · v3 AAD' : ''}.`,
+          'success'
+        );
+        await this.renderReader();
+      } else {
+        if (this.state.editingEntryKey) {
+          const { originalDayStr, originalYearKey } = this.state.editingEntryKey;
+          if (originalDayStr !== newDayStr || originalYearKey !== newYearKey) {
+            const oldDoc = await this.getDayDocument(originalDayStr, true);
+            const nextOldEntries = { ...(oldDoc.entries || {}) };
+            delete nextOldEntries[originalYearKey];
+            await this.persistSandboxDay(originalDayStr, { ...oldDoc, entries: nextOldEntries });
+          }
+        }
+        const targetDoc = await this.getDayDocument(newDayStr, true);
+        const nextEntries = { ...(targetDoc.entries || {}), [newYearKey]: entryRecord };
+        await this.persistSandboxDay(newDayStr, { ...targetDoc, entries: nextEntries });
+
+        this.storageRemove(`perpetual_draft_${diaryDate}`);
+        this.state.activeDay = newDayStr;
+        this.closeComposer();
+        this.showToast(
+          `Saved entry for ${diaryDate}${encryptFlag ? ' (v3 AAD verified)' : ''}.`,
+          'success'
+        );
+        await this.renderReader();
       }
-
-      const targetDoc = await this.getDayDocument(newDayStr, true);
-      const nextEntries = { ...(targetDoc.entries || {}), [newYearKey]: entryRecord };
-      await this.persistDayDocument(
-        newDayStr,
-        { ...targetDoc, entries: nextEntries },
-        `diary: save entry ${diaryDate}`
-      );
-
-      this.storageRemove(`perpetual_draft_${diaryDate}`);
-      this.state.activeDay = newDayStr;
-      this.closeComposer();
-      this.showToast(
-        `Saved entry for ${diaryDate}${encryptFlag ? ' (v3 AAD verified)' : ''}.`,
-        'success'
-      );
-      await this.renderReader();
     } catch (err) {
+      if (err instanceof SyncConflictError || err?.code === 'SYNC_CONFLICT') {
+        await this.openConflictResolverModal({
+          conflictErr: err,
+          localPlain: { diaryDate, title: rawTitle, mood, tags, body: rawBody },
+          encryptFlag,
+          imageObj,
+          mediaUploads,
+          editingEntryKey: this.state.editingEntryKey,
+        });
+        return;
+      }
       this.showToast(err.message || 'Failed to save entry.', 'error');
     }
   }
@@ -1908,28 +2394,43 @@ class PerpetualDiaryApp {
     if (!confirmed) return;
 
     try {
-      const doc = await this.getDayDocument(dayStr, true);
-      const nextEntries = { ...(doc.entries || {}) };
-      delete nextEntries[yearKey];
-      await this.persistDayDocument(
-        dayStr,
-        { ...doc, entries: nextEntries },
-        `diary: delete entry ${entryObj.diaryDate || `${yearKey}-${dayStr}`}`
-      );
+      if (this.gh.hasToken()) {
+        const mediaDeletes = [];
+        const basePrefix = `${this.gh.getDataTarget().basePath}/`;
+        if (entryObj?.image?.src?.startsWith(basePrefix)) {
+          mediaDeletes.push(entryObj.image.src.slice(basePrefix.length));
+        }
 
-      if (entryObj?.image?.src?.startsWith('data/media/') && this.gh.hasToken()) {
-        const sub = entryObj.image.src.replace(/^data\//, '');
-        await this.gh.deleteFile(sub, `diary: delete media ${sub}`).catch(() => {});
+        const res = await this.gh.commitAtomicDayMutations({
+          dayMutations: [{ dayStr, mode: 'entry-delete', yearKey }],
+          mediaDeletes,
+          commitMessage: `diary: delete entry ${entryObj.diaryDate || `${yearKey}-${dayStr}`}`,
+        });
+
+        this.state.dayCache[dayStr] = res.docs[dayStr];
+        if (res.dayShas?.[dayStr]) this.state.dayShas[dayStr] = res.dayShas[dayStr];
+        this.state.indexData = res.index;
+        this.closeComposer();
+        const shortSha = res.commitSha ? ` (#${res.commitSha.slice(0, 7)})` : '';
+        this.showToast(`Entry deleted in 1 atomic commit${shortSha}.`, 'success');
+        await this.renderReader();
+      } else {
+        const doc = await this.getDayDocument(dayStr, true);
+        const nextEntries = { ...(doc.entries || {}) };
+        delete nextEntries[yearKey];
+        await this.persistSandboxDay(dayStr, { ...doc, entries: nextEntries });
+        this.closeComposer();
+        this.showToast('Entry deleted.', 'success');
+        await this.renderReader();
       }
-
-      this.closeComposer();
-      this.showToast('Entry deleted.', 'success');
-      await this.renderReader();
     } catch (err) {
       this.showToast(err.message || 'Failed to delete entry.', 'error');
     }
   }
 
+  /* ========================================================================
+     366-DAY HEATMAP, ARCHIVE & EXPORTS
+     ======================================================================== */
   renderHeatmap() {
     const grid = document.getElementById('heatmap-grid');
     const readout = document.getElementById('heatmap-hover-readout');
@@ -2179,6 +2680,9 @@ class PerpetualDiaryApp {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
+  /* ========================================================================
+     GITHUB SETTINGS & VAULT MODALS
+     ======================================================================== */
   async openGitHubModal() {
     const cfg = this.gh.config;
     document.getElementById('gh-owner-input').value = cfg.owner || '';
@@ -2213,6 +2717,7 @@ class PerpetualDiaryApp {
     const fill = document.getElementById('quota-bar-fill');
     const sizeLabel = document.getElementById('health-size-label');
     const patStatus = document.getElementById('health-pat-status');
+    const commitLabel = document.getElementById('health-commit-label');
     const expiryWarn = document.getElementById('health-expiry-warning');
 
     const health = await this.gh.getRepoHealth();
@@ -2220,7 +2725,7 @@ class PerpetualDiaryApp {
       health.mode === 'live-api'
         ? this.state.zeroFootprint
           ? 'LIVE API · RAM ONLY'
-          : 'LIVE API · READ/WRITE'
+          : 'LIVE API · ATOMIC GIT'
         : health.mode === 'public-api'
           ? 'PUBLIC API · READ-ONLY'
           : 'LOCAL SANDBOX';
@@ -2231,6 +2736,12 @@ class PerpetualDiaryApp {
 
     const mbUsed = (health.totalSizeKb / 1024).toFixed(2);
     sizeLabel.textContent = `${mbUsed} MB / 1,024 MB Pages limit (${health.usagePercent}%)`;
+
+    if (commitLabel) {
+      commitLabel.textContent = health.lastCommitSha
+        ? `Last Atomic Commit: #${health.lastCommitSha.slice(0, 7)} (Git Trees API)`
+        : 'Atomic Commit Engine: Git Trees API ready';
+    }
 
     const expiryStr = this.gh.config.tokenExpiresAt || health.tokenExpiry || '';
     if (!this.gh.hasToken()) {
@@ -2269,7 +2780,7 @@ class PerpetualDiaryApp {
     statusBanner.textContent = unlockedViaRecovery
       ? 'Unlocked via Paper Recovery Key — you can set a new Master Password directly below without your old password.'
       : enabled
-        ? `Vault Lock is ACTIVE (${this.hasActiveSessionKey() ? 'Unlocked in session' : 'Locked'}) · ${isV2 ? 'v2 Envelope + v3 AAD' : 'v1 Legacy'}`
+        ? `Vault Lock is ACTIVE (${this.hasActiveSessionKey() ? 'Unlocked in session' : 'Locked'}) · ${isV2 ? 'v2 Envelope + v3 AAD + .enc Media' : 'v1 Legacy'}`
         : hasConfiguredVault
           ? `Vault configured (${isV2 ? 'v2 Envelope + v3 AAD' : 'v1 Legacy'}) — Full Lock Screen currently OFF.`
           : 'No Vault password configured yet. Set a master password to initialize v2 Envelope Encryption + AAD.';
@@ -2312,7 +2823,6 @@ class PerpetualDiaryApp {
       slotsList.innerHTML = '';
     }
 
-    // Emergency Paper Recovery Kit panel
     const recoveryPanel = document.getElementById('vault-recovery-panel');
     const recSlot = (vm?.keySlots || []).find((s) => s && s.type === 'recovery');
     recoveryPanel.hidden = !isV2;
@@ -2341,6 +2851,11 @@ class PerpetualDiaryApp {
     document.getElementById('vault-upgrade-banner').hidden = !isLegacyV1;
     document.getElementById('vault-migrate-banner').hidden = !(isV2 && this.state.keyring?.dek);
     document.getElementById('vault-migrate-status').hidden = true;
+
+    const mediaMigrateBanner = document.getElementById('vault-media-migrate-banner');
+    if (mediaMigrateBanner) mediaMigrateBanner.hidden = !this.hasActiveSessionKey();
+    const mediaMigrateStatus = document.getElementById('vault-media-migrate-status');
+    if (mediaMigrateStatus) mediaMigrateStatus.hidden = true;
 
     document.getElementById('vault-lock-enabled-checkbox').checked = enabled;
     document.getElementById('vault-autolock-select').value = String(
@@ -2411,6 +2926,7 @@ class PerpetualDiaryApp {
 
     try {
       const dayKeys = Object.keys(this.state.indexData?.days || {}).sort();
+      const batchChanges = [];
       let migratedDays = 0;
       let migratedItems = 0;
 
@@ -2478,8 +2994,17 @@ class PerpetualDiaryApp {
         }
 
         if (dirty) {
-          await this.persistDayDocument(dayStr, doc, `diary: upgrade ${dayStr} to v3 AAD`);
           migratedDays += 1;
+          this.state.dayCache[dayStr] = doc;
+          if (this.gh.hasToken()) {
+            batchChanges.push({
+              subpath: `days/${dayStr}.json`,
+              content: `${JSON.stringify(doc, null, 2)}\n`,
+              isBase64: false,
+            });
+          } else {
+            await this.persistSandboxDay(dayStr, doc);
+          }
         }
       }
 
@@ -2490,16 +3015,35 @@ class PerpetualDiaryApp {
           aadSupported: true,
           updatedAt: new Date().toISOString(),
         };
-        await this.persistVaultMeta(cleanedVault, 'diary: retire v1 legacy key bridge');
-        this.setActiveKeyring({
-          ...this.state.keyring,
-          legacyKey: null,
-        });
+        this.state.vaultMeta = cleanedVault;
+        this.storageSet('perpetual_diary_vault_local_v1', JSON.stringify(cleanedVault));
+        this.setActiveKeyring({ ...this.state.keyring, legacyKey: null });
+        if (this.gh.hasToken()) {
+          batchChanges.push({
+            subpath: 'vault.json',
+            content: `${JSON.stringify(cleanedVault, null, 2)}\n`,
+            isBase64: false,
+          });
+        }
+      }
+
+      let shortSha = '';
+      if (this.gh.hasToken() && batchChanges.length > 0) {
+        statusEl.textContent = `Committing ${batchChanges.length} file(s) in 1 atomic Git commit...`;
+        const res = await this.gh.commitBatch(
+          batchChanges,
+          `diary: batch upgrade ${migratedItems} item(s) to v3 AAD`
+        );
+        for (const [sub, sha] of Object.entries(res.fileShas || {})) {
+          const m = /^days\/(\d{2}-\d{2})\.json$/.exec(sub);
+          if (m) this.state.dayShas[m[1]] = sha;
+        }
+        shortSha = res.commitSha ? ` (#${res.commitSha.slice(0, 7)})` : '';
       }
 
       statusEl.textContent =
         migratedItems > 0
-          ? `Upgraded ${migratedItems} item(s) across ${migratedDays} day(s) to v3 AAD tamper protection.`
+          ? `Upgraded ${migratedItems} item(s) across ${migratedDays} day(s) to v3 AAD in 1 atomic commit${shortSha}.`
           : 'All encrypted entries are already protected with v3 AAD.';
       this.showToast(statusEl.textContent, 'success');
       await this.renderActiveView();
@@ -2511,21 +3055,24 @@ class PerpetualDiaryApp {
     }
   }
 
+  /* ========================================================================
+     EVENT BINDINGS
+     ======================================================================== */
   bindEvents() {
-    // Zero-Footprint automatic RAM wipe on tab close/unload
     const wipeOnUnload = () => {
+      this.revokeRamMediaUrls();
       if (!this.state.zeroFootprint) return;
       this.setActiveKeyring(null);
       this.state.recentRecoveryCode = null;
+      this.state.activeConflict = null;
       this.state.dayCache = {};
+      this.state.dayShas = {};
       this.gh.updateConfig({ token: '' });
-      this.revokeRamMediaUrls();
       this.scrubSensitiveDom();
     };
     window.addEventListener('pagehide', wipeOnUnload);
     window.addEventListener('beforeunload', wipeOnUnload);
 
-    // Activity tracking for Auto-Lock Inactivity Timer
     document.addEventListener('pointerdown', () => this.recordUserActivity(false), { passive: true });
     document.addEventListener('keydown', () => this.recordUserActivity(false), { passive: true });
     document.addEventListener('touchstart', () => this.recordUserActivity(false), { passive: true });
@@ -2540,7 +3087,6 @@ class PerpetualDiaryApp {
         this.lockDiaryNow('inactivity');
       }
     };
-
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible') checkSleepWakeLock();
     });
@@ -2587,7 +3133,6 @@ class PerpetualDiaryApp {
       this.state.compare2Active = false;
       this.renderReader();
     };
-
     document.getElementById('prev-day-btn')?.addEventListener('click', () => stepDay(-1));
     document.getElementById('next-day-btn')?.addEventListener('click', () => stepDay(1));
 
@@ -2721,20 +3266,33 @@ class PerpetualDiaryApp {
     document.getElementById('comment-clear-quote-btn')?.addEventListener('click', () => {
       this.clearCommentQuote();
     });
-
     document.getElementById('comment-cancel-edit-btn')?.addEventListener('click', () => {
       this.resetCommentComposer();
     });
-
     document.getElementById('comment-form')?.addEventListener('submit', (e) => {
       this.handleCommentSubmit(e);
     });
+
+    // Phase 6B: WebP Compression Preset Sync & Photo Upload Listeners
+    const webpPresetEl = document.getElementById('entry-webp-preset');
+    if (webpPresetEl) {
+      webpPresetEl.value = getSavedWebpPreset(this.state.zeroFootprint);
+      webpPresetEl.addEventListener('change', (e) => {
+        saveWebpPreset(e.target.value, this.state.zeroFootprint);
+      });
+    }
 
     document.getElementById('comment-photo-file')?.addEventListener('change', async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
       try {
-        const processed = await processImageFile(file);
+        const preset = getSavedWebpPreset(this.state.zeroFootprint);
+        const processed = await processImageFile(file, { preset });
+        const statsText =
+          processed.savedPercent > 0
+            ? `${processed.formatLabel} · ${formatBytesCompact(processed.compressedBytes)} (−${processed.savedPercent}%)`
+            : `${processed.formatLabel} · ${formatBytesCompact(processed.compressedBytes)}`;
+
         this.state.commentDraftPhoto = {
           src: processed.dataUrl,
           caption: document.getElementById('comment-photo-caption').value.trim(),
@@ -2747,8 +3305,13 @@ class PerpetualDiaryApp {
           _ext: processed.ext,
           _mime: processed.mime,
         };
+        const statsEl = document.getElementById('comment-photo-stats');
+        if (statsEl) {
+          statsEl.textContent = statsText;
+          statsEl.hidden = false;
+        }
         document.getElementById('comment-photo-remove-btn').hidden = false;
-        this.commentStudio.setMedia(processed.dataUrl, this.state.commentDraftPhoto);
+        this.commentStudio.setMedia(processed.dataUrl, this.state.commentDraftPhoto, statsText);
       } catch (err) {
         this.showToast(err.message || 'Image error.', 'error');
       }
@@ -2759,6 +3322,11 @@ class PerpetualDiaryApp {
       document.getElementById('comment-photo-file').value = '';
       document.getElementById('comment-photo-url').value = '';
       document.getElementById('comment-photo-remove-btn').hidden = true;
+      const statsEl = document.getElementById('comment-photo-stats');
+      if (statsEl) {
+        statsEl.textContent = '';
+        statsEl.hidden = true;
+      }
       this.commentStudio.clear();
     });
 
@@ -2838,7 +3406,13 @@ class PerpetualDiaryApp {
       const file = e.target.files?.[0];
       if (!file) return;
       try {
-        const processed = await processImageFile(file);
+        const preset = document.getElementById('entry-webp-preset')?.value || 'balanced';
+        const processed = await processImageFile(file, { preset });
+        const statsText =
+          processed.savedPercent > 0
+            ? `${processed.formatLabel} · ${formatBytesCompact(processed.originalBytes)} → ${formatBytesCompact(processed.compressedBytes)} (−${processed.savedPercent}%)`
+            : `${processed.formatLabel} · ${formatBytesCompact(processed.compressedBytes)}`;
+
         this.state.entryDraftPhoto = {
           src: processed.dataUrl,
           caption: document.getElementById('entry-photo-caption').value.trim(),
@@ -2851,8 +3425,13 @@ class PerpetualDiaryApp {
           _ext: processed.ext,
           _mime: processed.mime,
         };
+        const statsEl = document.getElementById('entry-photo-stats');
+        if (statsEl) {
+          statsEl.textContent = statsText;
+          statsEl.hidden = false;
+        }
         document.getElementById('entry-photo-remove-btn').hidden = false;
-        this.entryStudio.setMedia(processed.dataUrl, this.state.entryDraftPhoto);
+        this.entryStudio.setMedia(processed.dataUrl, this.state.entryDraftPhoto, statsText);
       } catch (err) {
         this.showToast(err.message || 'Could not process image.', 'error');
       }
@@ -2863,7 +3442,32 @@ class PerpetualDiaryApp {
       document.getElementById('entry-photo-file').value = '';
       document.getElementById('entry-photo-url').value = '';
       document.getElementById('entry-photo-remove-btn').hidden = true;
+      const statsEl = document.getElementById('entry-photo-stats');
+      if (statsEl) {
+        statsEl.textContent = '';
+        statsEl.hidden = true;
+      }
       this.entryStudio.clear();
+    });
+
+    // Interactive 3-Way Conflict Resolver Events
+    document.getElementById('conflict-close-btn')?.addEventListener('click', () => {
+      document.getElementById('conflict-modal').hidden = true;
+    });
+    document.getElementById('conflict-cancel-btn')?.addEventListener('click', () => {
+      document.getElementById('conflict-modal').hidden = true;
+    });
+    document.getElementById('conflict-pick-local-btn')?.addEventListener('click', () => {
+      this.populateConflictMergeFields('local');
+    });
+    document.getElementById('conflict-pick-remote-btn')?.addEventListener('click', () => {
+      this.populateConflictMergeFields('remote');
+    });
+    document.getElementById('conflict-pick-merge-btn')?.addEventListener('click', () => {
+      this.populateConflictMergeFields('merge');
+    });
+    document.getElementById('conflict-form')?.addEventListener('submit', (e) => {
+      this.handleConflictCommit(e);
     });
 
     // GitHub Settings, Split-Repo & Zero-Footprint Events
@@ -2942,7 +3546,10 @@ class PerpetualDiaryApp {
       this.setZeroFootprintMode(true, false);
       this.updateModeBadge();
       this.refreshRepoHealthPanel();
-      this.showToast('All local browser traces wiped. Switched to Zero-Footprint RAM mode.', 'success');
+      this.showToast(
+        'All local browser traces wiped. Switched to Zero-Footprint RAM mode.',
+        'success'
+      );
     });
 
     document.getElementById('github-form')?.addEventListener('submit', async (e) => {
@@ -2958,6 +3565,7 @@ class PerpetualDiaryApp {
         GitHubClient.saveConfig(nextCfg, window.localStorage);
       }
       this.state.dayCache = {};
+      this.state.dayShas = {};
       this.updateModeBadge();
       await this.loadVaultAndIndex();
       await this.renderActiveView();
@@ -2971,7 +3579,7 @@ class PerpetualDiaryApp {
       );
     });
 
-    // Envelope Vault, AAD Migration & Paper Recovery Kit Events
+    // Envelope Vault, AAD Migration, .enc Media Migration & Paper Recovery Kit Events
     document.getElementById('vault-btn')?.addEventListener('click', () => this.openVaultModal());
     document.getElementById('vault-close-btn')?.addEventListener('click', () => {
       document.getElementById('vault-modal').hidden = true;
@@ -3038,6 +3646,33 @@ class PerpetualDiaryApp {
 
     document.getElementById('vault-migrate-entries-btn')?.addEventListener('click', async () => {
       await this.handleMigrateLegacyEntriesToV3Aad();
+    });
+
+    document.getElementById('vault-migrate-media-btn')?.addEventListener('click', async () => {
+      const btn = document.getElementById('vault-migrate-media-btn');
+      const statusEl = document.getElementById('vault-media-migrate-status');
+      btn.disabled = true;
+      statusEl.hidden = false;
+      try {
+        const res = await migratePlaintextMediaToEncryptedVault({
+          app: this,
+          onProgress: (msg) => {
+            statusEl.textContent = msg;
+          },
+        });
+        const shaTxt = res.commitSha ? ` (#${res.commitSha.slice(0, 7)})` : '';
+        statusEl.textContent =
+          res.encryptedCount > 0
+            ? `Encrypted ${res.encryptedCount} photo(s) across ${res.updatedDays} day(s) into .enc vault${shaTxt}.`
+            : 'No unencrypted local/GitHub photos found — all vault media is already encrypted.';
+        this.showToast(statusEl.textContent, 'success');
+        await this.renderActiveView();
+      } catch (err) {
+        statusEl.textContent = `Migration error: ${err.message}`;
+        this.showToast(err.message || 'Media encryption failed.', 'error');
+      } finally {
+        btn.disabled = false;
+      }
     });
 
     document.getElementById('vault-form')?.addEventListener('submit', async (e) => {
@@ -3265,6 +3900,7 @@ class PerpetualDiaryApp {
         document.getElementById('composer-modal').hidden = true;
         document.getElementById('github-modal').hidden = true;
         document.getElementById('vault-modal').hidden = true;
+        document.getElementById('conflict-modal').hidden = true;
         this.closeConfirm(false);
       }
     });
