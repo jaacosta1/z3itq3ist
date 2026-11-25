@@ -1,6 +1,9 @@
 /**
- * js/app.js — Perpetual Side-by-Side Web Diary Master Controller (File 11 · Final Build)
- * Covers all 20 phases (Phases 1–20):
+ * js/app.js — Perpetual Side-by-Side Web Diary Master Controller (File 5 of 5 · Complete Build)
+ * Covers all 20 phases + Stacked Multi-Entries per Day + Word Trend Explorer + Right-Click Shortcuts:
+ * - Stacked Multi-Entries per Year on any calendar date (backward-compatible with single-entry records)
+ * - Word & Phrase Trend Explorer inside Insights & Arcs
+ * - Smart Context-Aware Right-Click Shortcut Menu (text selection, stacked entry card, year column, heatmap cell, or workspace)
  * - Envelope Cryptography (v2 DEK/KEK, v3 AAD, Argon2id, Paper Recovery, Passkeys, Decoy, Double-Lock)
  * - Split-Repo Vault, Media-Repo Sharding, Metadata Cloaking, Git Time Machine & Cross-Device `drafts`
  * - Multi-Photo Galleries + Lightbox, Ink Sketch Pad, Encrypted Voice Notes, Alignment Studio
@@ -53,6 +56,7 @@ import {
   GitHubClient,
   SyncConflictError,
   isNetworkOfflineError,
+  getYearEntriesList,
   recalculateIndexForDay,
 } from './github.js';
 import {
@@ -119,6 +123,7 @@ import {
   collectIndexedWindowEntries,
   getTimeCapsuleStatus,
   computeDiaryAnalytics,
+  computeWordTrend,
   generateYearInReviewDossier,
   renderYearDossierMarkdown,
   BUILT_IN_TEMPLATES,
@@ -205,7 +210,8 @@ const SANDBOX_SEED_INDEX = {
       years: [2024, 2025, 2026],
       tags: ['reflection', 'beginnings', 'craft', 'continuity', 'arc:perpetual-ledger'],
       arcs: ['perpetual-ledger'],
-      wordCounts: { 2024: 74, 2025: 56, 2026: 64 },
+      wordCounts: { 2024: 74, 2025: 56, 2026: 96 },
+      entryCounts: { 2024: 1, 2025: 1, 2026: 2 },
       moods: { 2024: 'grounded', 2025: 'clear', 2026: 'focused' },
       metrics: {
         2024: { energy: 4, clarity: 4, calm: 5, sleep: 4 },
@@ -222,6 +228,7 @@ const SANDBOX_SEED_DAYS = {
     day: '11-24',
     entries: {
       2024: {
+        id: 'ent-2024-1124-1',
         year: 2024,
         diaryDate: '2024-11-24',
         title: 'First frost & a quiet ledger',
@@ -240,6 +247,7 @@ const SANDBOX_SEED_DAYS = {
         encrypted: false,
       },
       2025: {
+        id: 'ent-2025-1124-1',
         year: 2025,
         diaryDate: '2025-11-24',
         title: 'One year later on the same page',
@@ -254,21 +262,39 @@ const SANDBOX_SEED_DAYS = {
         updatedAt: '2025-11-27T08:00:00Z',
         encrypted: false,
       },
-      2026: {
-        year: 2026,
-        diaryDate: '2026-11-24',
-        title: 'Three layers of November 24',
-        body:
-          'Having **2024**, **2025**, and **2026** in parallel columns turns single-day journaling into a longitudinal mirror. Even short entries compound into a quiet map of who you were becoming.',
-        tags: ['craft', 'continuity', 'arc:perpetual-ledger'],
-        mood: 'focused',
-        metrics: { energy: 5, clarity: 5, calm: 5, sleep: 4 },
-        images: [],
-        image: null,
-        writtenAt: '2026-11-24T14:30:00Z',
-        updatedAt: '2026-11-24T14:30:00Z',
-        encrypted: false,
-      },
+      2026: [
+        {
+          id: 'ent-2026-1124-1',
+          year: 2026,
+          diaryDate: '2026-11-24',
+          title: 'Morning pages · Three layers of November 24',
+          body:
+            'Having **2024**, **2025**, and **2026** in parallel columns turns single-day journaling into a longitudinal mirror. Even short entries compound into a quiet map of who you were becoming.',
+          tags: ['craft', 'continuity', 'arc:perpetual-ledger'],
+          mood: 'focused',
+          metrics: { energy: 5, clarity: 5, calm: 5, sleep: 4 },
+          images: [],
+          image: null,
+          writtenAt: '2026-11-24T08:30:00Z',
+          updatedAt: '2026-11-24T08:30:00Z',
+          encrypted: false,
+        },
+        {
+          id: 'ent-2026-1124-2',
+          year: 2026,
+          diaryDate: '2026-11-24',
+          title: 'Evening note · Stacked multiple entries',
+          body:
+            'Added a second evening reflection inside the same **2026** column. You can stack unlimited entries per day, track recurring words in **Insights & Arcs**, or **right-click anywhere** for quick shortcuts.',
+          tags: ['craft', 'evening'],
+          mood: 'calm',
+          images: [],
+          image: null,
+          writtenAt: '2026-11-24T21:15:00Z',
+          updatedAt: '2026-11-24T21:15:00Z',
+          encrypted: false,
+        },
+      ],
     },
     comments: [
       {
@@ -311,7 +337,7 @@ class PerpetualDiaryApp {
       indexData: { version: 1, updatedAt: '', days: {} },
       dayCache: {},
       dayShas: {},
-      decryptedEntryCache: new Map(), // Map<"YYYY-MM-DD", plainEntryObj>
+      decryptedEntryCache: new Map(), // Map<entryIdentity, plainEntryObj>
       sandboxRamDays: null,
       ramMediaUrls: new Map(),
       vaultMeta: null,
@@ -327,7 +353,7 @@ class PerpetualDiaryApp {
       pendingQuote: null,
       editingCommentId: null,
       commentDraftPhoto: null,
-      editingEntryKey: null,
+      editingEntryKey: null, // { dayStr, yearKey, entryId }
       editingBaseEntry: null,
       entryDraftGallery: [],
       entryDraftVoice: null,
@@ -342,6 +368,7 @@ class PerpetualDiaryApp {
       archiveSearch: '',
       archiveYear: '',
       archiveTag: '',
+      wordTrendQuery: '',
       selectedArcSlug: '',
       selectedDossierYear: new Date().getFullYear(),
       cmdkItems: [],
@@ -686,13 +713,14 @@ class PerpetualDiaryApp {
 
   scrubSensitiveDom() {
     closeMediaLightbox();
+    this.hideContextShortcutMenu();
     if (this.voiceRecorder?.isRecording()) this.voiceRecorder.cancel();
 
     const clearHtmlIds = [
       'columns-stage', 'comments-list', 'archive-results', 'entry-preview-pane',
       'vault-recovery-code-display', 'conflict-local-diff', 'conflict-remote-diff',
       'history-timeline-list', 'history-diff-viewer', 'history-snapshot-viewer',
-      'drafts-list', 'arc-book-stage', 'dossier-stage',
+      'drafts-list', 'arc-book-stage', 'dossier-stage', 'word-trend-chart', 'word-trend-matches',
     ];
     for (const id of clearHtmlIds) {
       const el = document.getElementById(id);
@@ -1223,7 +1251,7 @@ class PerpetualDiaryApp {
   }
 
   /* ========================================================================
-     VIEWS, PERPETUAL READER, BACKLINKS, GALLERIES, VOICE NOTES & COMMENTS
+     VIEWS, PERPETUAL READER (STACKED MULTI-ENTRIES PER YEAR), BACKLINKS & COMMENTS
      ======================================================================== */
   switchView(viewName) {
     document.querySelectorAll('.nav-tab').forEach((btn) => {
@@ -1355,28 +1383,35 @@ class PerpetualDiaryApp {
       const [yrStr, mm, dd] = String(item.iso || '2026-11-24').split('-');
       const dayKey = `${mm}-${dd}`;
       const doc = await this.getDayDocument(dayKey);
-      const entry = doc.entries?.[yrStr] || {
-        year: Number(yrStr) || 2026,
-        diaryDate: item.iso,
-        title: `${item.label} (${item.iso})`,
-        body: '_No entry recorded on this exact date._',
-        tags: [],
-        mood: '',
-        images: [],
-        image: null,
-        encrypted: false,
-      };
-      const card = await this.buildEntryColumnCard(entry, dayKey, yrStr);
+      const list = getYearEntriesList(doc.entries?.[yrStr], yrStr, dayKey);
+      const entriesForCol =
+        list.length > 0
+          ? list
+          : [
+              {
+                id: `empty-${item.iso}`,
+                year: Number(yrStr) || 2026,
+                diaryDate: item.iso,
+                title: `${item.label} (${item.iso})`,
+                body: '_No entry recorded on this exact date._',
+                tags: [],
+                mood: '',
+                images: [],
+                image: null,
+                encrypted: false,
+              },
+            ];
+      const card = await this.buildYearColumnCard(entriesForCol, dayKey, yrStr);
       if (card) stage.appendChild(card);
     }
   }
 
   async renderDayColumns(stage, dayStr) {
     const doc = await this.getDayDocument(dayStr);
-    const entries = doc.entries || {};
-    let years = Object.keys(entries)
+    const entriesMap = doc.entries || {};
+    let years = Object.keys(entriesMap)
       .map((y) => Number(y))
-      .filter((n) => Number.isFinite(n));
+      .filter((n) => Number.isFinite(n) && getYearEntriesList(entriesMap[String(n)], n, dayStr).length > 0);
 
     years.sort((a, b) => (this.state.sortOrder === 'asc' ? a - b : b - a));
     if (this.state.pinnedYear && years.includes(Number(this.state.pinnedYear))) {
@@ -1416,8 +1451,9 @@ class PerpetualDiaryApp {
     let visibleYearCount = 0;
 
     for (const yr of years) {
-      const entry = entries[String(yr)];
-      const card = await this.buildEntryColumnCard(entry, dayStr, String(yr));
+      const yrKey = String(yr);
+      const yearEntries = getYearEntriesList(entriesMap[yrKey], yr, dayStr);
+      const card = await this.buildYearColumnCard(yearEntries, dayStr, yrKey);
       if (!card) continue;
       visibleYearCount += 1;
       if (
@@ -1455,14 +1491,103 @@ class PerpetualDiaryApp {
     stage.appendChild(addCard);
   }
 
-  async buildEntryColumnCard(entry, dayStr, yearKey) {
+  /**
+   * Builds a Year Column Card containing 1 or more stacked entries for that year & calendar date.
+   */
+  async buildYearColumnCard(yearEntries, dayStr, yearKey) {
     const col = document.createElement('article');
-    const isPinned = Number(this.state.pinnedYear) === Number(entry.year);
+    const yearNum = Number(yearKey);
+    const isPinned = Number(this.state.pinnedYear) === yearNum;
     col.className = `year-column${isPinned ? ' is-pinned' : ''}`;
     const expectedDate = `${yearKey}-${dayStr}`;
+    col.dataset.year = String(yearKey);
+    col.dataset.diaryDate = expectedDate;
+
+    const renderedItems = [];
+    for (let idx = 0; idx < yearEntries.length; idx += 1) {
+      const itemEl = await this.buildStackedEntryItem(
+        yearEntries[idx],
+        dayStr,
+        yearKey,
+        idx,
+        yearEntries.length
+      );
+      if (itemEl) renderedItems.push(itemEl);
+    }
+
+    if (renderedItems.length === 0) {
+      return null;
+    }
+
+    const multiBadge =
+      renderedItems.length > 1
+        ? `<span class="year-entry-count-pill">${renderedItems.length} ENTRIES</span>`
+        : '';
+
+    col.innerHTML = `
+      <header class="year-col-header">
+        <div class="year-col-title-row">
+          <span class="year-heading">${escapeHtml(String(yearKey))}</span>
+          ${multiBadge}
+        </div>
+        <div class="year-col-actions">
+          <button type="button" class="btn btn-ghost btn-sm col-history-btn" title="Git Revision Time Machine">⏱ History</button>
+          <button type="button" class="btn btn-ghost btn-sm col-pin-btn ${isPinned ? 'is-pinned' : ''}">${
+      isPinned ? 'Pinned' : 'Pin'
+    }</button>
+        </div>
+      </header>
+      <div class="year-entries-stack${renderedItems.length > 1 ? ' is-multi' : ''}"></div>
+      <div class="year-col-add-entry-bar">
+        <button type="button" class="btn btn-ghost btn-sm col-add-another-btn">+ Add Another ${escapeHtml(
+          String(yearKey)
+        )} Entry</button>
+      </div>
+    `;
+
+    const stackEl = col.querySelector('.year-entries-stack');
+    for (const itemEl of renderedItems) {
+      stackEl.appendChild(itemEl);
+    }
+
+    col.querySelector('.col-pin-btn')?.addEventListener('click', () => {
+      this.state.pinnedYear =
+        Number(this.state.pinnedYear) === yearNum ? null : yearNum;
+      this.renderReader();
+    });
+
+    col.querySelector('.col-history-btn')?.addEventListener('click', () => {
+      const firstCached = Array.from(this.state.decryptedEntryCache.values()).find(
+        (e) => e.dayStr === dayStr && Number(e.year) === yearNum
+      );
+      this.openHistoryModal(dayStr, yearKey, firstCached || {
+        diaryDate: expectedDate,
+        title: '',
+        body: '',
+        mood: '',
+        tags: [],
+      });
+    });
+
+    col.querySelector('.col-add-another-btn')?.addEventListener('click', () => {
+      this.openComposer({ presetDate: expectedDate });
+    });
+
+    return col;
+  }
+
+  /**
+   * Renders a single entry card inside a year's vertical stack (works identically for 1 or N entries).
+   */
+  async buildStackedEntryItem(entry, dayStr, yearKey, indexInYear, totalInYear) {
+    const item = document.createElement('div');
+    item.className = 'stacked-entry-item';
+    const expectedDate = `${yearKey}-${dayStr}`;
     const resolvedDate = entry.diaryDate || expectedDate;
-    col.dataset.year = String(entry.year);
-    col.dataset.diaryDate = resolvedDate;
+    const entryId = entry.id || `ent-${yearKey}-${indexInYear + 1}`;
+    item.dataset.entryId = entryId;
+    item.dataset.year = String(yearKey);
+    item.dataset.diaryDate = resolvedDate;
 
     const backdatedDays = diffCalendarDays(entry.diaryDate, entry.writtenAt);
     const backdateBadge =
@@ -1493,7 +1618,7 @@ class PerpetualDiaryApp {
     let decryptedBody = bodyResult.text;
     let decryptedTitle = titleResult.text;
 
-    const dlSlotKey = `${dayStr}:${yearKey}`;
+    const dlSlotKey = `${dayStr}:${yearKey}:${entryId}`;
     const isDoubleLocked =
       !isTampered &&
       !isLockedEntry &&
@@ -1511,10 +1636,11 @@ class PerpetualDiaryApp {
       !isTampered && !isLockedEntry && !isDoubleLockSealed && capsuleStatus.isSealed;
 
     if (!isTampered && !isLockedEntry && !isDoubleLockSealed) {
-      this.state.decryptedEntryCache.set(resolvedDate, {
+      this.state.decryptedEntryCache.set(`${resolvedDate}::${entryId}`, {
+        id: entryId,
         diaryDate: resolvedDate,
         dayStr,
-        year: Number(entry.year),
+        year: Number(entry.year || yearKey),
         title: decryptedTitle || '',
         body: decryptedBody || '',
         mood: entry.mood || '',
@@ -1524,6 +1650,7 @@ class PerpetualDiaryApp {
         artifacts: entry.artifacts || null,
         metrics: entry.metrics || null,
         preserveWhitespace: Boolean(entry.preserveWhitespace),
+        writtenAt: entry.writtenAt || '',
       });
     }
 
@@ -1571,13 +1698,13 @@ class PerpetualDiaryApp {
           )}</div>
           <p class="section-subtext">Opens automatically in <strong>${
             capsuleStatus.daysRemaining
-          } day(s)</strong>. Write to your future self and let time keep the seal.</p>
+          } day(s)</strong>.</p>
         </div>
       `;
     } else {
       bodyHtml = renderMarkdown(decryptedBody, {
         preserveWhitespace: Boolean(entry.preserveWhitespace),
-        scopeId: `${dayStr}-${yearKey}`,
+        scopeId: `${dayStr}-${yearKey}-${indexInYear}`,
       });
       plainWords = countWords(stripMarkdown(decryptedBody));
     }
@@ -1638,7 +1765,6 @@ class PerpetualDiaryApp {
           `;
         }
 
-        // Additional gallery thumbnails (photos 2..N)
         if (galleryImages.length > 1) {
           const thumbBtns = [];
           for (let gIdx = 1; gIdx < galleryImages.length; gIdx += 1) {
@@ -1668,7 +1794,6 @@ class PerpetualDiaryApp {
         }
       }
 
-      // Phase 18C: Encrypted Voice Note Player
       if (entry.audio && entry.audio.src) {
         const audioAsset = await this.resolveMediaAssetSafe(entry.audio.src);
         if (audioAsset.status === 'ok' && audioAsset.url) {
@@ -1686,7 +1811,6 @@ class PerpetualDiaryApp {
       }
     }
 
-    // Chips: Mood, Location/Weather, Metrics, Story Arcs & Tags
     const chips = [];
     if (entry.mood) chips.push(`<span class="mood-chip">mood: ${escapeHtml(entry.mood)}</span>`);
     if (entry.location) chips.push(`<span class="stamp-chip">◎ ${escapeHtml(entry.location)}</span>`);
@@ -1713,7 +1837,6 @@ class PerpetualDiaryApp {
     }
     const metaChipsHtml = chips.length ? `<div class="entry-meta-chips">${chips.join('')}</div>` : '';
 
-    // Phase 19: Cultural Artifacts Strip
     let artifactsHtml = '';
     if (!isLockedEntry && !isTampered && !isDoubleLockSealed && !isCapsuleSealed && entry.artifacts) {
       const items = ARTIFACT_FIELDS.filter((f) => entry.artifacts[f.key]).map(
@@ -1727,13 +1850,13 @@ class PerpetualDiaryApp {
       }
     }
 
-    // Phase 13: Bi-Directional Backlinks
     let backlinksHtml = '';
     if (!isLockedEntry && !isTampered && !isDoubleLockSealed && !isCapsuleSealed) {
       const backlinks = computeBacklinksForDate(
         dayStr,
         yearKey,
-        Array.from(this.state.decryptedEntryCache.values())
+        Array.from(this.state.decryptedEntryCache.values()),
+        entryId
       );
       if (backlinks.length > 0) {
         backlinksHtml = `
@@ -1760,6 +1883,12 @@ class PerpetualDiaryApp {
       }
     }
 
+    const timeLabel = entry.writtenAt
+      ? new Date(entry.writtenAt).toLocaleTimeString(undefined, {
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : '';
     const loggedLabel = entry.writtenAt
       ? `Logged ${new Date(entry.writtenAt).toLocaleDateString(undefined, {
           month: 'short',
@@ -1778,31 +1907,34 @@ class PerpetualDiaryApp {
     const disabledAttr =
       isTampered || isLockedEntry || isDoubleLockSealed || isCapsuleSealed ? 'disabled' : '';
 
-    col.innerHTML = `
-      <header class="year-col-header">
-        <div class="year-col-title-row">
-          <span class="year-heading">${escapeHtml(String(entry.year))}</span>
+    const stackCounterPill =
+      totalInYear > 1
+        ? `<span class="stacked-entry-index">#${indexInYear + 1} of ${totalInYear}${
+            timeLabel ? ` · ${escapeHtml(timeLabel)}` : ''
+          }</span>`
+        : '';
+
+    item.innerHTML = `
+      <div class="stacked-entry-top">
+        <div class="stacked-entry-date mono-meta">
+          ${stackCounterPill}
+          <span>${escapeHtml(resolvedDate)}${encBadge}${dlBadge}</span>
           ${backdateBadge}
         </div>
-        <div class="year-col-actions">
+        <div class="stacked-entry-actions">
           ${
             isDoubleLocked && dlRamCache
-              ? '<button type="button" class="btn btn-ghost btn-sm col-reseal-btn">⚿ Re-Seal</button>'
+              ? '<button type="button" class="btn btn-ghost btn-xs col-reseal-btn">⚿ Re-Seal</button>'
               : ''
           }
-          <button type="button" class="btn btn-ghost btn-sm col-history-btn" title="Git Revision Time Machine">⏱ History</button>
-          <button type="button" class="btn btn-ghost btn-sm col-share-btn" ${disabledAttr}>↗ Share</button>
-          <button type="button" class="btn btn-ghost btn-sm col-quote-btn" ${disabledAttr}>❝ Quote</button>
-          <button type="button" class="btn btn-ghost btn-sm col-pin-btn ${isPinned ? 'is-pinned' : ''}">${
-      isPinned ? 'Pinned' : 'Pin'
-    }</button>
-          <button type="button" class="btn btn-ghost btn-sm col-edit-btn" ${
+          <button type="button" class="btn btn-ghost btn-xs col-share-btn" ${disabledAttr}>↗ Share</button>
+          <button type="button" class="btn btn-ghost btn-xs col-quote-btn" ${disabledAttr}>❝ Quote</button>
+          <button type="button" class="btn btn-ghost btn-xs col-edit-btn" ${
             isTampered || isDoubleLockSealed ? 'disabled' : ''
           }>Edit</button>
-          <button type="button" class="btn btn-ghost btn-sm col-delete-btn">Delete</button>
+          <button type="button" class="btn btn-ghost btn-xs col-delete-btn">Delete</button>
         </div>
-      </header>
-      <div class="mono-meta year-col-date">${escapeHtml(resolvedDate)}${encBadge}${dlBadge}</div>
+      </div>
       ${
         !isLockedEntry && !isTampered && !isDoubleLockSealed && !isCapsuleSealed && decryptedTitle
           ? `<h3 class="entry-title">${escapeHtml(decryptedTitle)}</h3>`
@@ -1831,24 +1963,20 @@ class PerpetualDiaryApp {
       </footer>
     `;
 
-    // Wire Lightbox click handlers on primary & gallery photos
-    col.querySelectorAll('[data-lb-open]').forEach((el) => {
+    item.querySelectorAll('[data-lb-open]').forEach((el) => {
       el.addEventListener('click', () => {
-        const idx = Number(el.dataset.lbOpen) || 0;
-        openMediaLightbox(resolvedLightboxItems, idx);
+        openMediaLightbox(resolvedLightboxItems, Number(el.dataset.lbOpen) || 0);
       });
     });
 
-    // Wire Story Arc chip click -> open Story Arc Book View
-    col.querySelectorAll('.tag-chip.is-arc').forEach((chipEl) => {
+    item.querySelectorAll('.tag-chip.is-arc').forEach((chipEl) => {
       chipEl.addEventListener('click', () => {
         this.state.selectedArcSlug = chipEl.dataset.arcSlug || '';
         this.switchView('analytics');
       });
     });
 
-    // Wire Backlink click -> jump to referencing calendar date
-    col.querySelectorAll('.backlink-item').forEach((blBtn) => {
+    item.querySelectorAll('.backlink-item').forEach((blBtn) => {
       blBtn.addEventListener('click', () => {
         const targetDay = blBtn.dataset.jumpDay;
         if (targetDay) {
@@ -1859,13 +1987,12 @@ class PerpetualDiaryApp {
       });
     });
 
-    // Wire Double-Lock unseal / re-seal
-    const dlForm = col.querySelector('.dl-unlock-form');
+    const dlForm = item.querySelector('.dl-unlock-form');
     if (dlForm) {
       dlForm.addEventListener('submit', async (ev) => {
         ev.preventDefault();
         const passInput = dlForm.querySelector('.dl-pass-input');
-        const errEl = col.querySelector('.dl-error');
+        const errEl = item.querySelector('.dl-error');
         errEl.hidden = true;
         try {
           const secondPass = passInput.value;
@@ -1897,36 +2024,30 @@ class PerpetualDiaryApp {
       });
     }
 
-    col.querySelector('.col-reseal-btn')?.addEventListener('click', () => {
+    item.querySelector('.col-reseal-btn')?.addEventListener('click', () => {
       this.state.doubleLockUnlocked.delete(dlSlotKey);
       this.showToast(`Re-sealed Double-Locked entry (${resolvedDate}).`, 'info');
       this.renderReader();
     });
 
-    col.querySelector('.unlock-inline-btn')?.addEventListener('click', () => {
+    item.querySelector('.unlock-inline-btn')?.addEventListener('click', () => {
       document.getElementById('lock-screen').hidden = false;
       document.getElementById('lock-password-input').focus();
     });
 
-    col.querySelector('.col-pin-btn')?.addEventListener('click', () => {
-      this.state.pinnedYear =
-        Number(this.state.pinnedYear) === Number(entry.year) ? null : Number(entry.year);
-      this.renderReader();
-    });
-
-    col.querySelector('.col-quote-btn')?.addEventListener('click', () => {
+    item.querySelector('.col-quote-btn')?.addEventListener('click', () => {
       const selText = window.getSelection()?.toString().trim();
       this.attachQuoteToComment({
         text: selText || extractDefaultQuote(decryptedBody || ''),
-        year: Number(entry.year),
+        year: Number(yearKey),
         diaryDate: resolvedDate,
       });
     });
 
-    col.querySelector('.col-share-btn')?.addEventListener('click', () => {
+    item.querySelector('.col-share-btn')?.addEventListener('click', () => {
       this.openShareComposerModal({
         diaryDate: resolvedDate,
-        year: Number(entry.year),
+        year: Number(yearKey),
         title: decryptedTitle || '',
         body: decryptedBody || '',
         mood: entry.mood || '',
@@ -1934,20 +2055,11 @@ class PerpetualDiaryApp {
       });
     });
 
-    col.querySelector('.col-history-btn')?.addEventListener('click', () => {
-      this.openHistoryModal(dayStr, yearKey, {
-        diaryDate: resolvedDate,
-        title: decryptedTitle || '',
-        body: decryptedBody || '',
-        mood: entry.mood || '',
-        tags: Array.isArray(entry.tags) ? entry.tags : [],
-      });
-    });
-
-    col.querySelector('.col-edit-btn')?.addEventListener('click', () => {
+    item.querySelector('.col-edit-btn')?.addEventListener('click', () => {
       this.openComposer({
         editEntry: {
           ...entry,
+          id: entryId,
           body: decryptedBody ?? entry.body,
           title: decryptedTitle ?? entry.title,
           _unlockedDoubleLockPassphrase: dlRamCache?.passphrase || '',
@@ -1957,29 +2069,31 @@ class PerpetualDiaryApp {
       });
     });
 
-    col.querySelector('.col-delete-btn')?.addEventListener('click', () => {
-      this.handleDeleteEntry(dayStr, yearKey, entry);
+    item.querySelector('.col-delete-btn')?.addEventListener('click', () => {
+      this.handleDeleteEntry(dayStr, yearKey, { ...entry, id: entryId });
     });
 
-    const realignBtn = col.querySelector('.inline-realign-btn');
+    const realignBtn = item.querySelector('.inline-realign-btn');
     const primaryImg = normalizeEntryImages(entry)[0];
     if (realignBtn && primaryImg) {
       realignBtn.addEventListener('click', (ev) => {
         ev.stopPropagation();
         if (this.state.inlineAlignCleanup) this.state.inlineAlignCleanup();
-        const figureEl = col.querySelector('.entry-figure');
+        const figureEl = item.querySelector('.entry-figure');
         this.state.inlineAlignCleanup = attachInlineAlignController(
           figureEl,
           primaryImg,
           async (updatedLayout) => {
             const latestDoc = await this.getDayDocument(dayStr, true);
-            const targetEntry = latestDoc.entries?.[yearKey];
+            const list = getYearEntriesList(latestDoc.entries?.[yearKey], yearKey, dayStr);
+            const targetEntry = list.find((e) => e.id === entryId) || list[0];
             if (targetEntry) {
               const imgs = normalizeEntryImages(targetEntry);
               if (imgs[0]) Object.assign(imgs[0], updatedLayout);
               targetEntry.images = imgs;
               targetEntry.image = imgs[0] || null;
               targetEntry.updatedAt = new Date().toISOString();
+              latestDoc.entries[yearKey] = list.length === 1 ? list[0] : list;
               const saved = await this.persistDayDocument(
                 dayStr,
                 latestDoc,
@@ -1994,7 +2108,204 @@ class PerpetualDiaryApp {
       });
     }
 
-    return col;
+    return item;
+  }
+
+  /* ========================================================================
+     CUSTOM CONTEXT-AWARE RIGHT-CLICK SHORTCUT MENU
+     ======================================================================== */
+  hideContextShortcutMenu() {
+    const menu = document.getElementById('context-shortcut-menu');
+    if (menu) {
+      menu.hidden = true;
+      menu.innerHTML = '';
+    }
+  }
+
+  showContextShortcutMenu(clientX, clientY, targetEl) {
+    if (!this.state.unlocked) return;
+    const menu = document.getElementById('context-shortcut-menu');
+    if (!menu) return;
+
+    const selectedText = window.getSelection()?.toString().trim() || '';
+    const stackedCard = targetEl?.closest?.('.stacked-entry-item');
+    const yearCol = targetEl?.closest?.('.year-column');
+    const hmCell = targetEl?.closest?.('.hm-cell');
+
+    const items = [];
+    let headerLabel = `SHORTCUTS · ${formatReadableDayKey(this.state.activeDay)}`;
+
+    // 1. Selected Text Context
+    if (selectedText.length > 0) {
+      headerLabel = `SELECTION (${selectedText.length} CHARS)`;
+      if (yearCol) {
+        items.push({
+          label: '❝ Quote Selection in Margin Note',
+          run: () =>
+            this.attachQuoteToComment({
+              text: selectedText,
+              year: Number(yearCol.dataset.year),
+              diaryDate: stackedCard?.dataset.diaryDate || yearCol.dataset.diaryDate,
+            }),
+        });
+      }
+      items.push({
+        label: '⌕ Track Phrase in Word Trend',
+        run: () => {
+          this.state.wordTrendQuery = selectedText.slice(0, 48);
+          this.switchView('analytics');
+        },
+      });
+      items.push({
+        label: '⎘ Copy Highlighted Text',
+        shortcut: 'Ctrl+C',
+        run: () => {
+          navigator.clipboard?.writeText(selectedText).catch(() => {});
+          this.showToast('Selection copied to clipboard.', 'success');
+        },
+      });
+      items.push({ sep: true });
+    }
+
+    // 2. Heatmap Day Cell Context
+    if (hmCell && hmCell.dataset.day) {
+      const hmDay = hmCell.dataset.day;
+      headerLabel = `CALENDAR · ${formatReadableDayKey(hmDay)} (${hmDay})`;
+      items.push({
+        label: `Open ${formatReadableDayKey(hmDay)} Side-by-Side`,
+        run: () => {
+          this.state.activeDay = hmDay;
+          this.state.compare2Active = false;
+          this.switchView('reader');
+        },
+      });
+      items.push({
+        label: `+ Write Entry on ${formatReadableDayKey(hmDay)}`,
+        run: () => {
+          const { month, day } = parseDayKey(hmDay);
+          this.openComposer({
+            presetDate: `${new Date().getFullYear()}-${pad2(month)}-${pad2(day)}`,
+          });
+        },
+      });
+      items.push({ sep: true });
+    }
+
+    // 3. Specific Stacked Entry or Year Column Context
+    if (yearCol && yearCol.dataset.year) {
+      const yr = yearCol.dataset.year;
+      const dayStr = this.state.activeDay;
+      if (!selectedText) {
+        headerLabel = `${yr} · ${formatReadableDayKey(dayStr)}`;
+      }
+      items.push({
+        label: `+ Add Another ${yr} Entry`,
+        run: () => this.openComposer({ presetDate: `${yr}-${dayStr}` }),
+      });
+
+      if (stackedCard && stackedCard.dataset.entryId) {
+        const entryId = stackedCard.dataset.entryId;
+        items.push({
+          label: `✎ Edit This ${yr} Entry`,
+          run: async () => {
+            const doc = await this.getDayDocument(dayStr, false);
+            const list = getYearEntriesList(doc.entries?.[yr], yr, dayStr);
+            const raw = list.find((e) => e.id === entryId);
+            if (!raw) return;
+            const cached = this.state.decryptedEntryCache.get(
+              `${raw.diaryDate || `${yr}-${dayStr}`}::${entryId}`
+            );
+            this.openComposer({
+              editEntry: {
+                ...raw,
+                id: entryId,
+                body: cached?.body ?? raw.body,
+                title: cached?.title ?? raw.title,
+              },
+              dayStr,
+              yearKey: yr,
+            });
+          },
+        });
+      }
+
+      items.push({
+        label: Number(this.state.pinnedYear) === Number(yr) ? `Unpin ${yr} Column` : `Pin ${yr} Column First`,
+        run: () => {
+          this.state.pinnedYear = Number(this.state.pinnedYear) === Number(yr) ? null : Number(yr);
+          this.renderReader();
+        },
+      });
+      items.push({ sep: true });
+    }
+
+    // 4. Universal Workspace Shortcuts
+    items.push(
+      {
+        label: '+ Write New Entry Today',
+        run: () => this.openComposer({ presetDate: getTodayIsoDate() }),
+      },
+      {
+        label: 'Jump to Today Side-by-Side',
+        run: () => {
+          this.state.activeDay = getTodayDayKey();
+          this.state.compare2Active = false;
+          this.switchView('reader');
+        },
+      },
+      {
+        label: 'Open Command Palette',
+        shortcut: 'Ctrl+K',
+        run: () => this.openCommandPalette(),
+      },
+      {
+        label: 'Insights, Word Trends & Story Arcs',
+        run: () => this.switchView('analytics'),
+      },
+      {
+        label: 'Print Book / 8-Page Mini-Zine',
+        run: () => this.switchView('archive'),
+      },
+      { sep: true },
+      {
+        label: '⚿ Panic Lock Diary Now',
+        shortcut: 'Ctrl+Shift+L',
+        danger: true,
+        run: () => this.lockDiaryNow('panic'),
+      }
+    );
+
+    menu.innerHTML =
+      `<div class="ctx-menu-header">${escapeHtml(headerLabel)}</div>` +
+      items
+        .map((it, idx) =>
+          it.sep
+            ? '<div class="ctx-menu-sep"></div>'
+            : `<button type="button" class="ctx-menu-item${it.danger ? ' is-danger' : ''}" data-ctx-idx="${idx}">
+                <span>${escapeHtml(it.label)}</span>
+                ${it.shortcut ? `<span class="ctx-menu-kbd">${escapeHtml(it.shortcut)}</span>` : ''}
+              </button>`
+        )
+        .join('');
+
+    menu.hidden = false;
+
+    // Position safely inside viewport bounds
+    const rect = menu.getBoundingClientRect();
+    const maxX = Math.max(8, window.innerWidth - rect.width - 10);
+    const maxY = Math.max(8, window.innerHeight - rect.height - 10);
+    menu.style.left = `${Math.min(clientX, maxX)}px`;
+    menu.style.top = `${Math.min(clientY, maxY)}px`;
+
+    menu.querySelectorAll('.ctx-menu-item').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = items[Number(btn.dataset.ctxIdx)];
+        this.hideContextShortcutMenu();
+        if (action && typeof action.run === 'function') {
+          action.run();
+        }
+      });
+    });
   }
 
   /* ========================================================================
@@ -2337,8 +2648,8 @@ class PerpetualDiaryApp {
   }
 
   /* ========================================================================
-     ENTRY COMPOSER (ZEN MODE, TEMPLATES, PROMPTS, ARTIFACTS, METRICS,
-     MULTI-PHOTO GALLERY, INK SKETCH PAD & ENCRYPTED VOICE NOTES)
+     ENTRY COMPOSER (MULTI-ENTRY SUPPORT, ZEN MODE, TEMPLATES, PROMPTS,
+     ARTIFACTS, METRICS, MULTI-PHOTO GALLERY, INK SKETCH PAD & VOICE NOTES)
      ======================================================================== */
   populateComposerTemplates() {
     const sel = document.getElementById('entry-template-select');
@@ -2507,13 +2818,16 @@ class PerpetualDiaryApp {
 
     if (editEntry) {
       const resolvedDate = editEntry.diaryDate || `${yearKey}-${dayStr}`;
-      this.state.editingEntryKey = { dayStr, yearKey: String(yearKey) };
+      const targetId = editEntry.id || `ent-${Date.now()}`;
+      this.state.editingEntryKey = { dayStr, yearKey: String(yearKey), entryId: targetId };
       this.state.editingBaseEntry = {
+        id: targetId,
         diaryDate: resolvedDate,
         title: editEntry.title || '',
         body: editEntry.body || '',
         mood: editEntry.mood || '',
         tags: Array.isArray(editEntry.tags) ? [...editEntry.tags] : [],
+        writtenAt: editEntry.writtenAt || null,
         updatedAt: editEntry.updatedAt || null,
         expectedSha: this.state.dayShas[dayStr] || null,
       };
@@ -2572,7 +2886,7 @@ class PerpetualDiaryApp {
       this.state.editingBaseEntry = null;
       this.state.entryDraftGallery = [];
 
-      document.getElementById('composer-modal-title').textContent = 'New Diary Entry';
+      document.getElementById('composer-modal-title').textContent = `New Entry · ${targetDate}`;
       document.getElementById('entry-date-input').value = targetDate;
       document.getElementById('entry-title-input').value = '';
       document.getElementById('entry-mood-input').value = '';
@@ -2810,7 +3124,6 @@ class PerpetualDiaryApp {
       }
     }
 
-    // Prepare Multi-Photo Gallery uploads
     const primaryCaption = document.getElementById('entry-photo-caption').value.trim();
     const photoUrlInput = document.getElementById('entry-photo-url').value.trim();
     const encryptMedia = Boolean(
@@ -2885,7 +3198,6 @@ class PerpetualDiaryApp {
       }
     }
 
-    // Prepare Encrypted Voice Note upload
     let finalAudio = null;
     if (this.state.entryDraftVoice) {
       const vDraft = { ...this.state.entryDraftVoice };
@@ -2930,9 +3242,12 @@ class PerpetualDiaryApp {
     }
 
     const nowIso = new Date().toISOString();
-    const existingDoc = await this.getDayDocument(dayStr, false);
-    const prevEntry = existingDoc.entries?.[yearStr];
+    const prevKey = this.state.editingEntryKey;
+    const targetEntryId =
+      prevKey?.entryId || `ent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
     const entryRecord = {
+      id: targetEntryId,
       year: Number(yearStr),
       diaryDate: dateVal,
       title: finalTitle,
@@ -2949,14 +3264,13 @@ class PerpetualDiaryApp {
       images: finalGallery,
       image: finalGallery[0] || null,
       audio: finalAudio,
-      writtenAt: prevEntry?.writtenAt || nowIso,
+      writtenAt: this.state.editingBaseEntry?.writtenAt || nowIso,
       updatedAt: nowIso,
       encrypted: shouldEncrypt,
       doubleLocked: useDoubleLock,
       doubleLockHint: useDoubleLock ? doubleLockHint : '',
     };
 
-    const prevKey = this.state.editingEntryKey;
     const isMovingSlot =
       prevKey && (prevKey.dayStr !== dayStr || String(prevKey.yearKey) !== String(yearStr));
     const isSameSlotEdit = prevKey && !isMovingSlot;
@@ -2978,12 +3292,14 @@ class PerpetualDiaryApp {
             dayStr: prevKey.dayStr,
             mode: 'entry-delete',
             yearKey: String(prevKey.yearKey),
+            entryId: prevKey.entryId,
           });
         }
         dayMutations.push({
           dayStr,
           mode: 'entry-save',
           yearKey: yearStr,
+          entryId: targetEntryId,
           entryRecord,
           expectedUpdatedAt: isSameSlotEdit ? this.state.editingBaseEntry?.updatedAt || null : null,
           expectedSha: isSameSlotEdit ? this.state.editingBaseEntry?.expectedSha || null : null,
@@ -3010,6 +3326,7 @@ class PerpetualDiaryApp {
             await this.openConflictResolver({
               dayStr,
               yearKey: yearStr,
+              entryId: targetEntryId,
               localPlain: { title: rawTitle, mood, tags, body: rawBody },
               localEntryRecord: entryRecord,
               mediaUploads,
@@ -3036,11 +3353,26 @@ class PerpetualDiaryApp {
       } else {
         if (isMovingSlot) {
           const oldDoc = await this.getDayDocument(prevKey.dayStr, true);
-          delete oldDoc.entries[prevKey.yearKey];
+          const oldList = getYearEntriesList(
+            oldDoc.entries[prevKey.yearKey],
+            prevKey.yearKey,
+            prevKey.dayStr
+          ).filter((e) => e.id !== prevKey.entryId);
+          if (oldList.length === 0) delete oldDoc.entries[prevKey.yearKey];
+          else oldDoc.entries[prevKey.yearKey] = oldList.length === 1 ? oldList[0] : oldList;
           await this.persistSandboxDay(prevKey.dayStr, oldDoc);
         }
+
         const targetDoc = await this.getDayDocument(dayStr, true);
-        targetDoc.entries[yearStr] = entryRecord;
+        const list = getYearEntriesList(targetDoc.entries[yearStr], yearStr, dayStr);
+        const existingIdx = list.findIndex((e) => e.id === targetEntryId);
+        if (existingIdx >= 0) {
+          list[existingIdx] = entryRecord;
+        } else {
+          list.push(entryRecord);
+        }
+        targetDoc.entries[yearStr] = list.length === 1 ? list[0] : list;
+
         await this.persistSandboxDay(dayStr, targetDoc);
         recordSandboxRevision(
           dayStr,
@@ -3051,14 +3383,15 @@ class PerpetualDiaryApp {
         this.showToast(`Saved ${dateVal} to local sandbox.`, 'success');
       }
 
+      const dlKey = `${dayStr}:${yearStr}:${targetEntryId}`;
       if (useDoubleLock) {
-        this.state.doubleLockUnlocked.set(`${dayStr}:${yearStr}`, {
+        this.state.doubleLockUnlocked.set(dlKey, {
           body: rawBody,
           title: rawTitle,
           passphrase: doubleLockPass,
         });
       } else {
-        this.state.doubleLockUnlocked.delete(`${dayStr}:${yearStr}`);
+        this.state.doubleLockUnlocked.delete(dlKey);
       }
 
       this.storageRemove(`perpetual_diary_draft_${dateVal}`);
@@ -3081,10 +3414,12 @@ class PerpetualDiaryApp {
   async handleDeleteEntry(dayStr, yearKey, entry) {
     const confirmed = await this.openConfirm({
       title: `Delete ${entry.diaryDate || `${yearKey}-${dayStr}`} Entry`,
-      message: 'This will remove the entry from this year column and update the manifest index.',
+      message: 'This will remove this entry from the year column and update the manifest index.',
       confirmLabel: 'Delete Entry',
     });
     if (!confirmed) return;
+
+    const targetId = entry.id || '';
 
     try {
       const imgs = normalizeEntryImages(entry);
@@ -3118,7 +3453,9 @@ class PerpetualDiaryApp {
         }
 
         const res = await this.gh.commitAtomicDayMutations({
-          dayMutations: [{ dayStr, mode: 'entry-delete', yearKey: String(yearKey) }],
+          dayMutations: [
+            { dayStr, mode: 'entry-delete', yearKey: String(yearKey), entryId: targetId },
+          ],
           mediaDeletes,
           commitMessage: `diary: delete ${yearKey}-${dayStr}`,
           cloak: this.buildCloakTxAdapter(),
@@ -3126,15 +3463,21 @@ class PerpetualDiaryApp {
         this.state.dayCache[dayStr] = res.docs[dayStr];
         if (res.dayShas?.[dayStr]) this.state.dayShas[dayStr] = res.dayShas[dayStr];
         this.state.indexData = res.index;
-        this.showToast(`Deleted ${yearKey}-${dayStr} atomically.`, 'success');
+        this.showToast(`Deleted ${yearKey}-${dayStr} entry atomically.`, 'success');
       } else {
         const doc = await this.getDayDocument(dayStr, true);
-        delete doc.entries[String(yearKey)];
+        const list = getYearEntriesList(doc.entries[String(yearKey)], yearKey, dayStr);
+        const remaining = targetId ? list.filter((e) => e.id !== targetId) : [];
+        if (remaining.length === 0) {
+          delete doc.entries[String(yearKey)];
+        } else {
+          doc.entries[String(yearKey)] = remaining.length === 1 ? remaining[0] : remaining;
+        }
         await this.persistSandboxDay(dayStr, doc);
-        this.showToast(`Deleted ${yearKey}-${dayStr}.`, 'success');
+        this.showToast(`Deleted ${yearKey}-${dayStr} entry.`, 'success');
       }
 
-      this.state.decryptedEntryCache.delete(`${yearKey}-${dayStr}`);
+      this.state.decryptedEntryCache.delete(`${entry.diaryDate || `${yearKey}-${dayStr}`}::${targetId}`);
       this.closeComposer();
       await this.renderActiveView();
     } catch (err) {
@@ -3148,6 +3491,7 @@ class PerpetualDiaryApp {
   async openConflictResolver({
     dayStr,
     yearKey,
+    entryId,
     localPlain,
     localEntryRecord,
     mediaUploads,
@@ -3190,6 +3534,7 @@ class PerpetualDiaryApp {
     this.state.activeConflict = {
       dayStr,
       yearKey,
+      entryId,
       basePlain,
       localPlain,
       remotePlain,
@@ -3298,12 +3643,14 @@ class PerpetualDiaryApp {
           dayStr: ctx.prevKey.dayStr,
           mode: 'entry-delete',
           yearKey: String(ctx.prevKey.yearKey),
+          entryId: ctx.prevKey.entryId,
         });
       }
       dayMutations.push({
         dayStr: ctx.dayStr,
         mode: 'entry-save',
         yearKey: String(ctx.yearKey),
+        entryId: ctx.entryId,
         entryRecord: resolvedRecord,
         expectedUpdatedAt: ctx.remoteEntry?.updatedAt || null,
         expectedSha: ctx.remoteSha || null,
@@ -3440,8 +3787,8 @@ class PerpetualDiaryApp {
         return;
       }
 
-      ctx.selectedSnapshot = fetched.entry;
-      const snap = fetched.entry;
+      const snap = Array.isArray(fetched.entry) ? fetched.entry[0] : fetched.entry;
+      ctx.selectedSnapshot = snap;
       const metaEl = document.getElementById('history-entry-meta');
       metaEl.hidden = false;
       metaEl.textContent = `Title: ${snap.title || '(untitled)'} · Mood: ${
@@ -3590,7 +3937,7 @@ class PerpetualDiaryApp {
   }
 
   /* ========================================================================
-     366-DAY HEATMAP, ARCHIVE, INSIGHTS & STORY ARCS BOOK VIEW
+     366-DAY HEATMAP, ARCHIVE, INSIGHTS, WORD TREND EXPLORER & STORY ARCS
      ======================================================================== */
   renderHeatmap() {
     const grid = document.getElementById('heatmap-grid');
@@ -3634,35 +3981,41 @@ class PerpetualDiaryApp {
     const dayKeys = Object.keys(this.state.indexData.days || {});
     for (const dayStr of dayKeys) {
       const doc = await this.getDayDocument(dayStr, false);
-      for (const [yrKey, entry] of Object.entries(doc.entries || {})) {
-        const expectedDate = `${yrKey}-${dayStr}`;
-        const resolvedDate = entry.diaryDate || expectedDate;
-        if (this.state.decryptedEntryCache.has(resolvedDate)) continue;
-        const body = await this.decryptFieldIfNeeded(
-          entry.body || '',
-          Boolean(entry.encrypted),
-          buildEntryAad(expectedDate, yrKey, 'body')
-        );
-        const title = await this.decryptFieldIfNeeded(
-          entry.title || '',
-          Boolean(entry.encrypted),
-          buildEntryAad(expectedDate, yrKey, 'title')
-        );
-        if (body !== null && !isDoubleLockedPayload(body)) {
-          this.state.decryptedEntryCache.set(resolvedDate, {
-            diaryDate: resolvedDate,
-            dayStr,
-            year: Number(yrKey),
-            title: title || '',
-            body,
-            mood: entry.mood || '',
-            tags: Array.isArray(entry.tags) ? entry.tags : [],
-            location: entry.location || '',
-            weather: entry.weather || '',
-            artifacts: entry.artifacts || null,
-            metrics: entry.metrics || null,
-            preserveWhitespace: Boolean(entry.preserveWhitespace),
-          });
+      for (const [yrKey, slot] of Object.entries(doc.entries || {})) {
+        const list = getYearEntriesList(slot, yrKey, dayStr);
+        for (const entry of list) {
+          const expectedDate = `${yrKey}-${dayStr}`;
+          const resolvedDate = entry.diaryDate || expectedDate;
+          const cacheKey = `${resolvedDate}::${entry.id}`;
+          if (this.state.decryptedEntryCache.has(cacheKey)) continue;
+          const body = await this.decryptFieldIfNeeded(
+            entry.body || '',
+            Boolean(entry.encrypted),
+            buildEntryAad(expectedDate, yrKey, 'body')
+          );
+          const title = await this.decryptFieldIfNeeded(
+            entry.title || '',
+            Boolean(entry.encrypted),
+            buildEntryAad(expectedDate, yrKey, 'title')
+          );
+          if (body !== null && !isDoubleLockedPayload(body)) {
+            this.state.decryptedEntryCache.set(cacheKey, {
+              id: entry.id,
+              diaryDate: resolvedDate,
+              dayStr,
+              year: Number(yrKey),
+              title: title || '',
+              body,
+              mood: entry.mood || '',
+              tags: Array.isArray(entry.tags) ? entry.tags : [],
+              location: entry.location || '',
+              weather: entry.weather || '',
+              artifacts: entry.artifacts || null,
+              metrics: entry.metrics || null,
+              preserveWhitespace: Boolean(entry.preserveWhitespace),
+              writtenAt: entry.writtenAt || '',
+            });
+          }
         }
       }
     }
@@ -3724,22 +4077,28 @@ class PerpetualDiaryApp {
 
       if (cachedDoc) {
         let matched = !query;
-        for (const [yrKey, e] of Object.entries(cachedDoc.entries || {})) {
+        for (const [yrKey, slot] of Object.entries(cachedDoc.entries || {})) {
           if (this.state.archiveYear && Number(yrKey) !== Number(this.state.archiveYear)) continue;
-          const plain = this.state.decryptedEntryCache.get(e.diaryDate || `${yrKey}-${dayStr}`);
-          const hay = plain
-            ? `${plain.title} ${plain.body} ${plain.mood} ${plain.location || ''} ${JSON.stringify(
-                plain.artifacts || ''
-              )} ${(plain.tags || []).join(' ')}`.toLowerCase()
-            : `${e.diaryDate} ${e.mood || ''} ${(e.tags || []).join(' ')}`.toLowerCase();
-          if (query && hay.includes(query)) {
-            matched = true;
-            snippet = plain
-              ? stripMarkdown(plain.body).slice(0, 140)
-              : 'Encrypted entry (matched metadata)';
-            if (plain?.title) title = `${formatReadableDayKey(dayStr)} — ${plain.title}`;
-            break;
+          const list = getYearEntriesList(slot, yrKey, dayStr);
+          for (const e of list) {
+            const plain = this.state.decryptedEntryCache.get(
+              `${e.diaryDate || `${yrKey}-${dayStr}`}::${e.id}`
+            );
+            const hay = plain
+              ? `${plain.title} ${plain.body} ${plain.mood} ${plain.location || ''} ${JSON.stringify(
+                  plain.artifacts || ''
+                )} ${(plain.tags || []).join(' ')}`.toLowerCase()
+              : `${e.diaryDate} ${e.mood || ''} ${(e.tags || []).join(' ')}`.toLowerCase();
+            if (query && hay.includes(query)) {
+              matched = true;
+              snippet = plain
+                ? stripMarkdown(plain.body).slice(0, 140)
+                : 'Encrypted entry (matched metadata)';
+              if (plain?.title) title = `${formatReadableDayKey(dayStr)} — ${plain.title}`;
+              break;
+            }
           }
+          if (matched && query) break;
         }
         if (!matched) continue;
       } else if (query) {
@@ -3768,6 +4127,93 @@ class PerpetualDiaryApp {
       resultsEl.innerHTML =
         '<div class="empty-comments mono-meta">No matching entries found. Click "Load All Days" to search inside decrypted prose.</div>';
     }
+  }
+
+  renderWordTrendSection(plainEntries) {
+    const inputEl = document.getElementById('word-trend-input');
+    const summaryEl = document.getElementById('word-trend-summary-meta');
+    const chipsEl = document.getElementById('word-trend-chips');
+    const chartEl = document.getElementById('word-trend-chart');
+    const matchesEl = document.getElementById('word-trend-matches');
+    if (!chipsEl || !chartEl || !matchesEl) return;
+
+    if (inputEl && inputEl.value !== this.state.wordTrendQuery) {
+      inputEl.value = this.state.wordTrendQuery;
+    }
+
+    const trend = computeWordTrend(this.state.wordTrendQuery, plainEntries);
+
+    chipsEl.innerHTML =
+      trend.topWords.length === 0
+        ? '<span class="mono-meta">Load or decrypt entries to surface recurring keywords.</span>'
+        : trend.topWords
+            .map(
+              (w) =>
+                `<button type="button" class="word-trend-chip${
+                  this.state.wordTrendQuery.toLowerCase() === w.word ? ' is-active' : ''
+                }" data-trend-word="${escapeHtml(w.word)}">${escapeHtml(w.word)} (${w.count})</button>`
+            )
+            .join('');
+
+    chipsEl.querySelectorAll('.word-trend-chip').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.state.wordTrendQuery = btn.dataset.trendWord || '';
+        this.renderWordTrendSection(Array.from(this.state.decryptedEntryCache.values()));
+      });
+    });
+
+    if (!trend.query) {
+      summaryEl.textContent = 'Type any word or click a keyword chip above';
+      chartEl.innerHTML = '';
+      matchesEl.innerHTML = '';
+      return;
+    }
+
+    summaryEl.textContent =
+      trend.totalOccurrences > 0
+        ? `“${trend.query}” · ${trend.totalOccurrences} mention(s) across ${
+            trend.matchingEntriesCount
+          } entry/entries${trend.peakYear ? ` · Peak year: ${trend.peakYear}` : ''}`
+        : `No mentions of “${trend.query}” in loaded entries`;
+
+    const maxOcc = Math.max(1, ...trend.byYear.map((y) => y.occurrences));
+    chartEl.innerHTML =
+      trend.byYear.length === 0
+        ? ''
+        : trend.byYear
+            .map(
+              (y) => `
+              <div class="bar-chart-row">
+                <span>${y.year} (${y.entryHits}/${y.totalEntries})</span>
+                <div class="bar-chart-track"><div class="bar-chart-fill" style="width:${Math.round(
+                  (y.occurrences / maxOcc) * 100
+                )}%"></div></div>
+                <span>${y.occurrences}×</span>
+              </div>
+            `
+            )
+            .join('');
+
+    matchesEl.innerHTML = trend.matches
+      .map(
+        (m) => `
+        <button type="button" class="word-trend-match-item" data-jump-day="${escapeHtml(m.dayStr)}">
+          <div class="mono-meta">${escapeHtml(m.diaryDate)} · ${escapeHtml(m.title)} (${
+          m.occurrences
+        }×)</div>
+          <div class="section-subtext">${escapeHtml(m.excerpt)}</div>
+        </button>
+      `
+      )
+      .join('');
+
+    matchesEl.querySelectorAll('.word-trend-match-item').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.state.activeDay = btn.dataset.jumpDay;
+        this.state.compare2Active = false;
+        this.switchView('reader');
+      });
+    });
   }
 
   async renderAnalyticsAndArcs() {
@@ -3827,6 +4273,9 @@ class PerpetualDiaryApp {
               )
               .join('');
     }
+
+    // Word & Phrase Trend Explorer
+    this.renderWordTrendSection(plainEntries);
 
     // Year-in-Review Dossier
     const dossierSel = document.getElementById('dossier-year-select');
@@ -3901,7 +4350,7 @@ class PerpetualDiaryApp {
                   ${ch.title ? `<h4 class="entry-title">${escapeHtml(ch.title)}</h4>` : ''}
                   <div class="prose-body">${renderMarkdown(ch.body, {
                     preserveWhitespace: Boolean(ch.preserveWhitespace),
-                    scopeId: `arc-${ch.diaryDate}`,
+                    scopeId: `arc-${ch.id || ch.diaryDate}`,
                   })}</div>
                 </article>
               `
@@ -3923,26 +4372,33 @@ class PerpetualDiaryApp {
     const outDays = {};
     for (const [dayStr, doc] of Object.entries(this.state.dayCache)) {
       const decEntries = {};
-      for (const [yrKey, e] of Object.entries(doc.entries || {})) {
-        const expectedDate = `${yrKey}-${dayStr}`;
-        const plainBody =
-          (await this.decryptFieldIfNeeded(
-            e.body || '',
-            Boolean(e.encrypted),
-            buildEntryAad(expectedDate, yrKey, 'body')
-          )) ?? e.body;
-        const plainTitle =
-          (await this.decryptFieldIfNeeded(
-            e.title || '',
-            Boolean(e.encrypted),
-            buildEntryAad(expectedDate, yrKey, 'title')
-          )) ?? e.title;
-        decEntries[yrKey] = {
-          ...e,
-          title: plainTitle,
-          body: plainBody,
-          encrypted: false,
-        };
+      for (const [yrKey, slot] of Object.entries(doc.entries || {})) {
+        const list = getYearEntriesList(slot, yrKey, dayStr);
+        const decList = [];
+        for (const e of list) {
+          const expectedDate = `${yrKey}-${dayStr}`;
+          const plainBody =
+            (await this.decryptFieldIfNeeded(
+              e.body || '',
+              Boolean(e.encrypted),
+              buildEntryAad(expectedDate, yrKey, 'body')
+            )) ?? e.body;
+          const plainTitle =
+            (await this.decryptFieldIfNeeded(
+              e.title || '',
+              Boolean(e.encrypted),
+              buildEntryAad(expectedDate, yrKey, 'title')
+            )) ?? e.title;
+          decList.push({
+            ...e,
+            title: plainTitle,
+            body: plainBody,
+            encrypted: false,
+          });
+        }
+        if (decList.length > 0) {
+          decEntries[yrKey] = decList.length === 1 ? decList[0] : decList;
+        }
       }
       const decComments = [];
       for (const c of doc.comments || []) {
@@ -4020,7 +4476,9 @@ class PerpetualDiaryApp {
                 )
               : item.title;
 
-          doc.entries[yrKey] = {
+          const existingList = getYearEntriesList(doc.entries[yrKey], yrKey, dayStr);
+          existingList.push({
+            id: `ent-imp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             year: item.year,
             diaryDate: dateVal,
             title: titleVal,
@@ -4038,7 +4496,8 @@ class PerpetualDiaryApp {
             writtenAt: item.writtenAt || new Date().toISOString(),
             updatedAt: new Date().toISOString(),
             encrypted: shouldEncrypt,
-          };
+          });
+          doc.entries[yrKey] = existingList.length === 1 ? existingList[0] : existingList;
           importedCount += 1;
         }
         await this.persistDayDocument(dayStr, doc, `diary: import ${items.length} entry/entries on ${dayStr}`);
@@ -4107,9 +4566,9 @@ class PerpetualDiaryApp {
       },
       {
         id: 'cmd-analytics',
-        title: 'Open Insights, Year-in-Review & Story Arcs',
-        subtitle: 'View longitudinal analytics, annual dossiers, and Story Arc books',
-        keywords: 'insights analytics dossier story arcs book',
+        title: 'Open Insights, Word Trends, Dossier & Story Arcs',
+        subtitle: 'Track word trajectories across years, annual dossiers, and Story Arc books',
+        keywords: 'insights analytics word trend dossier story arcs book',
         run: () => this.switchView('analytics'),
       },
       {
@@ -4185,7 +4644,7 @@ class PerpetualDiaryApp {
 
     for (const entry of this.state.decryptedEntryCache.values()) {
       cmds.push({
-        id: `entry-${entry.diaryDate}`,
+        id: `entry-${entry.diaryDate}-${entry.id || ''}`,
         title: `${entry.diaryDate}${entry.title ? ` — ${entry.title}` : ''}`,
         subtitle: stripMarkdown(entry.body).slice(0, 72),
         keywords: `${entry.diaryDate} ${entry.dayStr} ${entry.mood} ${(entry.tags || []).join(' ')}`,
@@ -4215,7 +4674,6 @@ class PerpetualDiaryApp {
     const all = this.buildCommandList();
     let filtered = filterCommands(all, query);
 
-    // Direct MM-DD jump shortcut if user types e.g. "07-04"
     const cleanQ = String(query || '').trim();
     if (/^\d{2}-\d{2}$/.test(cleanQ)) {
       filtered = [
@@ -4578,7 +5036,7 @@ class PerpetualDiaryApp {
   }
 
   /* ========================================================================
-     GLOBAL EVENT LISTENERS & KEYBOARD SHORTCUTS
+     GLOBAL EVENT LISTENERS, RIGHT-CLICK CONTEXT MENU & KEYBOARD SHORTCUTS
      ======================================================================== */
   bindEvents() {
     window.addEventListener('beforeunload', () => this.revokeRamMediaUrls());
@@ -4592,7 +5050,25 @@ class PerpetualDiaryApp {
       window.addEventListener(evt, () => this.recordUserActivity(true), { passive: true });
     });
 
-    // Global Keyboard Shortcuts (Panic Lock, Settings, Command Palette, Arrow Nav)
+    // Context-Aware Right-Click Shortcut Menu (preserves native spellcheck inside inputs/textareas)
+    document.addEventListener('contextmenu', (ev) => {
+      if (!this.state.unlocked) return;
+      const tag = ev.target?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || ev.target?.isContentEditable) {
+        return;
+      }
+      ev.preventDefault();
+      this.showContextShortcutMenu(ev.clientX, ev.clientY, ev.target);
+    });
+
+    document.addEventListener('pointerdown', (ev) => {
+      const menu = document.getElementById('context-shortcut-menu');
+      if (menu && !menu.hidden && !menu.contains(ev.target)) {
+        this.hideContextShortcutMenu();
+      }
+    });
+
+    // Global Keyboard Shortcuts (Panic Lock, Settings, Command Palette, Escape)
     window.addEventListener('keydown', (ev) => {
       const mod = ev.ctrlKey || ev.metaKey;
       if (mod && ev.shiftKey && ev.key.toLowerCase() === 'l') {
@@ -4611,6 +5087,7 @@ class PerpetualDiaryApp {
         return;
       }
       if (ev.key === 'Escape') {
+        this.hideContextShortcutMenu();
         const cmdk = document.getElementById('cmdk-modal');
         if (cmdk && !cmdk.hidden) {
           cmdk.hidden = true;
@@ -4885,25 +5362,24 @@ class PerpetualDiaryApp {
         if (pill) pill.hidden = true;
         return;
       }
+      const stacked = el?.closest?.('.stacked-entry-item');
       const rect = sel.getRangeAt(0).getBoundingClientRect();
       pill.style.left = `${Math.max(12, window.scrollX + rect.left)}px`;
       pill.style.top = `${Math.max(12, window.scrollY + rect.top - 38)}px`;
+      pill.dataset.targetYear = col.dataset.year || '';
+      pill.dataset.targetDate = stacked?.dataset.diaryDate || col.dataset.diaryDate || '';
       pill.hidden = false;
     });
 
-    document.getElementById('selection-quote-pill')?.addEventListener('click', () => {
+    document.getElementById('selection-quote-pill')?.addEventListener('click', (ev) => {
       const sel = window.getSelection();
       const text = sel?.toString().trim() || '';
-      const el =
-        sel?.anchorNode?.nodeType === Node.ELEMENT_NODE
-          ? sel.anchorNode
-          : sel?.anchorNode?.parentElement;
-      const col = el?.closest?.('.year-column');
-      if (text && col) {
+      const pill = ev.currentTarget;
+      if (text && pill.dataset.targetYear) {
         this.attachQuoteToComment({
           text,
-          year: Number(col.dataset.year),
-          diaryDate: col.dataset.diaryDate,
+          year: Number(pill.dataset.targetYear),
+          diaryDate: pill.dataset.targetDate,
         });
       }
     });
@@ -4950,7 +5426,7 @@ class PerpetualDiaryApp {
       this.commentStudio.clear();
     });
 
-    // Heatmap, Archive, Insights & Story Arcs Events
+    // Heatmap, Archive, Insights, Word Trend Explorer & Story Arcs Events
     document.getElementById('heatmap-mode-select')?.addEventListener('change', (e) => {
       this.state.heatmapMode = e.target.value;
       this.renderHeatmap();
@@ -4964,8 +5440,20 @@ class PerpetualDiaryApp {
 
     document.getElementById('analytics-load-all-btn')?.addEventListener('click', async () => {
       await this.loadAllIndexedDays();
-      this.showToast('Decrypted all entries for longitudinal insights.', 'success');
+      this.showToast('Decrypted all entries for longitudinal insights & word trends.', 'success');
       await this.renderAnalyticsAndArcs();
+    });
+
+    document.getElementById('word-trend-input')?.addEventListener('input', (e) => {
+      this.state.wordTrendQuery = e.target.value;
+      this.renderWordTrendSection(Array.from(this.state.decryptedEntryCache.values()));
+    });
+
+    document.getElementById('word-trend-clear-btn')?.addEventListener('click', () => {
+      this.state.wordTrendQuery = '';
+      const inp = document.getElementById('word-trend-input');
+      if (inp) inp.value = '';
+      this.renderWordTrendSection(Array.from(this.state.decryptedEntryCache.values()));
     });
 
     document.getElementById('archive-search-input')?.addEventListener('input', (e) => {
@@ -5016,8 +5504,10 @@ class PerpetualDiaryApp {
         lines.push(`## ${formatReadableDayKey(dayStr)} (${dayStr})`, '');
         const doc = bundle.days[dayStr];
         for (const yr of Object.keys(doc.entries).sort()) {
-          const e = doc.entries[yr];
-          lines.push(`### ${e.diaryDate}${e.title ? ` — ${e.title}` : ''}`, '', e.body, '');
+          const list = getYearEntriesList(doc.entries[yr], yr, dayStr);
+          for (const e of list) {
+            lines.push(`### ${e.diaryDate}${e.title ? ` — ${e.title}` : ''}`, '', e.body, '');
+          }
         }
       }
       this.triggerFileDownload(
@@ -5082,9 +5572,10 @@ class PerpetualDiaryApp {
 
     document.getElementById('entry-delete-btn')?.addEventListener('click', async () => {
       if (!this.state.editingEntryKey) return;
-      const { dayStr, yearKey } = this.state.editingEntryKey;
+      const { dayStr, yearKey, entryId } = this.state.editingEntryKey;
       const doc = await this.getDayDocument(dayStr, false);
-      const entry = doc.entries?.[yearKey];
+      const list = getYearEntriesList(doc.entries?.[yearKey], yearKey, dayStr);
+      const entry = list.find((e) => e.id === entryId) || list[0];
       if (entry) await this.handleDeleteEntry(dayStr, yearKey, entry);
     });
 
@@ -5597,30 +6088,36 @@ class PerpetualDiaryApp {
         for (const dayStr of dayKeys) {
           const doc = await this.getDayDocument(dayStr, true);
           let dirty = false;
-          for (const [yrKey, entry] of Object.entries(doc.entries || {})) {
-            if (!entry.encrypted) continue;
-            const ver = getPayloadVersion(entry.body);
-            if (ver === 1 || ver === 2) {
-              const expectedDate = `${yrKey}-${dayStr}`;
-              const plainBody = await this.decryptFieldIfNeeded(entry.body, true);
-              const plainTitle = entry.title ? await this.decryptFieldIfNeeded(entry.title, true) : '';
-              if (plainBody !== null) {
-                entry.body = await encryptText(
-                  plainBody,
-                  this.state.keyring,
-                  buildEntryAad(expectedDate, yrKey, 'body')
-                );
-                if (plainTitle) {
-                  entry.title = await encryptText(
-                    plainTitle,
+          for (const [yrKey, slot] of Object.entries(doc.entries || {})) {
+            const list = getYearEntriesList(slot, yrKey, dayStr);
+            for (const entry of list) {
+              if (!entry.encrypted) continue;
+              const ver = getPayloadVersion(entry.body);
+              if (ver === 1 || ver === 2) {
+                const expectedDate = `${yrKey}-${dayStr}`;
+                const plainBody = await this.decryptFieldIfNeeded(entry.body, true);
+                const plainTitle = entry.title ? await this.decryptFieldIfNeeded(entry.title, true) : '';
+                if (plainBody !== null) {
+                  entry.body = await encryptText(
+                    plainBody,
                     this.state.keyring,
-                    buildEntryAad(expectedDate, yrKey, 'title')
+                    buildEntryAad(expectedDate, yrKey, 'body')
                   );
+                  if (plainTitle) {
+                    entry.title = await encryptText(
+                      plainTitle,
+                      this.state.keyring,
+                      buildEntryAad(expectedDate, yrKey, 'title')
+                    );
+                  }
+                  entry.updatedAt = new Date().toISOString();
+                  dirty = true;
+                  upgraded += 1;
                 }
-                entry.updatedAt = new Date().toISOString();
-                dirty = true;
-                upgraded += 1;
               }
+            }
+            if (list.length > 0) {
+              doc.entries[yrKey] = list.length === 1 ? list[0] : list;
             }
           }
           if (dirty) {
