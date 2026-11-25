@@ -27,8 +27,9 @@
       hidden
     >
       <div class="lock-card">
-        <div class="lock-kicker">PERPETUAL VAULT · ENVELOPE AES-256-GCM</div>
+        <div class="lock-kicker">PERPETUAL VAULT · ENVELOPE AES-256-GCM + AAD</div>
         <h1 id="lock-title" class="lock-title">Diary Locked</h1>
+        <div id="lock-reason-badge" class="lock-reason-badge" hidden></div>
         <p class="lock-subtitle">
           Enter your master password to unwrap your Data Encryption Key locally in browser memory.
         </p>
@@ -79,6 +80,14 @@
           <button type="button" id="open-composer-btn" class="btn btn-primary">
             + Write Entry
           </button>
+          <span
+            id="autolock-pill"
+            class="autolock-pill"
+            title="Auto-lock inactivity countdown (Click Lock or press Ctrl+Shift+L anytime)"
+            hidden
+          >
+            15:00
+          </span>
           <button
             type="button"
             id="vault-btn"
@@ -92,8 +101,8 @@
             type="button"
             id="lock-now-btn"
             class="icon-btn"
-            title="Lock Diary Now"
-            aria-label="Lock Diary Now"
+            title="Panic Lock Diary Now (Ctrl+Shift+L)"
+            aria-label="Panic Lock Diary Now"
             hidden
           >
             <span aria-hidden="true">⚿</span>
@@ -245,7 +254,7 @@
                 </label>
                 <label class="checkbox-inline" id="comment-encrypt-wrap">
                   <input type="checkbox" id="comment-encrypt-checkbox" />
-                  <span>Encrypt note (AES-256-GCM)</span>
+                  <span>Encrypt note (AES-256-GCM + AAD)</span>
                 </label>
               </div>
 
@@ -437,7 +446,7 @@
             <span id="entry-draft-status" class="mono-meta">Drafts auto-saved locally</span>
             <label class="checkbox-inline" id="entry-encrypt-wrap">
               <input type="checkbox" id="entry-encrypt-checkbox" />
-              <span>Encrypt entry (AES-256-GCM)</span>
+              <span>Encrypt entry (AES-256-GCM + AAD)</span>
             </label>
           </div>
 
@@ -596,12 +605,12 @@
       </div>
     </div>
 
-    <!-- MODAL 3: PASSWORD & ENVELOPE VAULT (DEK/KEK + INSTANT ROTATION) -->
+    <!-- MODAL 3: PASSWORD & ENVELOPE VAULT (DEK/KEK + AAD + AUTO-LOCK) -->
     <div id="vault-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="vault-modal-title" hidden>
       <div class="modal-card">
         <div class="modal-header">
           <div>
-            <div class="modal-kicker">ENVELOPE CRYPTOGRAPHY · DEK/KEK KEY SLOTS</div>
+            <div class="modal-kicker">ENVELOPE CRYPTOGRAPHY · AAD TAMPER BINDING · AUTO-LOCK</div>
             <h2 id="vault-modal-title" class="modal-title">Diary Password &amp; Vault</h2>
           </div>
           <button type="button" id="vault-close-btn" class="icon-btn" aria-label="Close Vault Settings">✕</button>
@@ -612,10 +621,13 @@
         <!-- Envelope Architecture & Active Key Slots Panel -->
         <div id="vault-arch-panel" class="vault-arch-panel" hidden>
           <div class="vault-arch-header">
-            <span id="vault-version-pill" class="health-pill">V2 ENVELOPE</span>
+            <span id="vault-version-pill" class="health-pill">V2 ENVELOPE · V3 AAD</span>
             <span id="vault-fingerprint-label" class="mono-meta">DEK: —</span>
           </div>
           <div id="vault-slots-list" class="vault-slots-list"></div>
+          <div class="mono-meta">
+            Panic Lock Hotkey: <strong>Ctrl+Shift+L</strong> (or <strong>Cmd+Shift+L</strong>) — wipes keys &amp; scrubs DOM instantly.
+          </div>
         </div>
 
         <!-- Legacy v1 Upgrade Callout -->
@@ -631,17 +643,17 @@
           </button>
         </div>
 
-        <!-- Optional Legacy Entry Batch Migrator -->
+        <!-- Batch Upgrade v1/v2 Entries to v3 AAD Tamper-Bound -->
         <div id="vault-migrate-banner" class="vault-upgrade-callout" hidden>
           <div>
-            <div class="mono-label">LEGACY V1 ENTRIES BRIDGE ACTIVE</div>
+            <div class="mono-label">TAMPER-BINDING BATCH UPGRADE (V1 / V2 → V3 AAD)</div>
             <p class="section-subtext">
-              Your older v1 entries still decrypt automatically. You can optionally re-encrypt all v1 entries directly under your v2 DEK and retire the legacy key bridge.
+              Re-encrypt older v1/v2 entries directly under your DEK with date-bound AES-GCM AAD tamper protection (and retire any legacy v1 key bridge).
             </p>
             <div id="vault-migrate-status" class="mono-meta" hidden></div>
           </div>
           <button type="button" id="vault-migrate-entries-btn" class="btn btn-outline btn-sm">
-            Migrate v1 Entries → v2
+            Upgrade Entries → v3 AAD
           </button>
         </div>
 
@@ -649,6 +661,17 @@
           <label class="checkbox-inline">
             <input type="checkbox" id="vault-lock-enabled-checkbox" />
             <span>Enable Full Lock Screen Mode (require password before revealing diary content)</span>
+          </label>
+
+          <label class="field-group">
+            <span class="field-label">Auto-Lock Inactivity Timer (sleep/wake aware)</span>
+            <select id="vault-autolock-select" class="select-compact">
+              <option value="0">Disabled (manual lock only)</option>
+              <option value="5">5 minutes</option>
+              <option value="15" selected>15 minutes (recommended)</option>
+              <option value="30">30 minutes</option>
+              <option value="60">60 minutes</option>
+            </select>
           </label>
 
           <label class="field-group" id="vault-current-pass-group" hidden>
