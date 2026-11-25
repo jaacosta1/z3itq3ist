@@ -8,6 +8,14 @@
       content="Perpetual Side-by-Side Web Diary — view every recorded year for any calendar date side by side, backed by GitHub and encrypted client-side."
     />
     <title>Perpetual — Side-by-Side Diary</title>
+
+    <!-- Phase 20: Installable PWA Manifest & Theme Color -->
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#0d0d0d" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Perpetual" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -17,7 +25,7 @@
     <link rel="stylesheet" href="css/styles.css" />
   </head>
   <body>
-    <!-- Phase 10: Zero-Knowledge Shared Memory Reader Overlay (works even when Diary is Locked) -->
+    <!-- Phase 10: Zero-Knowledge Shared Memory Reader Overlay -->
     <section
       id="shared-viewer-overlay"
       class="shared-viewer-overlay"
@@ -115,6 +123,16 @@
           >
             CLOAKED
           </span>
+          <button
+            type="button"
+            id="offline-queue-pill"
+            class="offline-queue-pill"
+            title="Click to sync queued offline commits to GitHub"
+            hidden
+          >
+            QUEUED: 0
+          </button>
+
           <nav class="primary-nav" aria-label="Primary Views">
             <button type="button" id="nav-reader-btn" class="nav-tab is-active" data-view="reader">
               Side-by-Side
@@ -125,10 +143,21 @@
             <button type="button" id="nav-archive-btn" class="nav-tab" data-view="archive">
               Archive
             </button>
+            <button type="button" id="nav-analytics-btn" class="nav-tab" data-view="analytics">
+              Insights &amp; Arcs
+            </button>
           </nav>
         </div>
 
         <div class="header-right">
+          <button
+            type="button"
+            id="open-cmdk-btn"
+            class="btn btn-ghost btn-sm"
+            title="Command Palette (Ctrl+K / Cmd+K)"
+          >
+            ⌘K
+          </button>
           <button
             type="button"
             id="open-drafts-btn"
@@ -176,15 +205,13 @@
           >
             <span aria-hidden="true">⚙</span>
           </button>
-          <button
-            type="button"
-            id="theme-toggle-btn"
-            class="icon-btn"
-            title="Toggle Light / Dark Theme"
-            aria-label="Toggle Light / Dark Theme"
-          >
-            <span id="theme-icon" aria-hidden="true">☀</span>
-          </button>
+          <label for="theme-preset-select" class="sr-only">Editorial Theme</label>
+          <select id="theme-preset-select" class="select-compact select-xs" title="Switch Editorial Theme">
+            <option value="dark">Obsidian</option>
+            <option value="light">Paper</option>
+            <option value="sepia">Parchment</option>
+            <option value="nordic">Slate</option>
+          </select>
         </div>
       </header>
 
@@ -236,8 +263,13 @@
             </div>
 
             <div class="control-cluster">
+              <div id="window-scope-group" class="segmented-control" role="group" aria-label="Perpetual Window Scope">
+                <button type="button" class="seg-btn is-active" data-window-scope="day">Day</button>
+                <button type="button" class="seg-btn" data-window-scope="week">On This Week</button>
+                <button type="button" class="seg-btn" data-window-scope="season">Season</button>
+              </div>
               <button type="button" id="toggle-compare2-btn" class="btn btn-ghost btn-sm">
-                Compare 2 Dates
+                Compare 2
               </button>
               <button type="button" id="copy-permalink-btn" class="btn btn-ghost btn-sm">
                 Copy Link
@@ -247,6 +279,15 @@
                 <button type="button" class="seg-btn" data-mobile-mode="tabs">Tabs</button>
               </div>
             </div>
+          </div>
+
+          <!-- Phase 14: On This Week / On This Season Perpetual Ribbon -->
+          <div id="window-ribbon-panel" class="window-ribbon-panel" hidden>
+            <div class="window-ribbon-header">
+              <span id="window-ribbon-title" class="mono-label">ON THIS WEEK ACROSS YEARS</span>
+              <span id="window-ribbon-meta" class="mono-meta"></span>
+            </div>
+            <div id="window-ribbon-cards" class="window-ribbon-cards"></div>
           </div>
 
           <!-- Custom Compare 2 Panel -->
@@ -368,23 +409,34 @@
           </section>
         </section>
 
-        <!-- VIEW 2: 366-DAY PERPETUAL HEATMAP -->
+        <!-- VIEW 2: 366-DAY PERPETUAL HEATMAP (MULTI-METRIC) -->
         <section id="view-heatmap" class="view-section" aria-label="366-Day Perpetual Heatmap">
           <div class="section-top-bar">
             <div>
               <h2 class="section-heading">366-Day Calendar Density</h2>
               <p class="section-subtext">
-                Every calendar day from January 1 to December 31 (including February 29). Click any cell to open side-by-side years.
+                Every calendar day from January 1 to December 31 (including February 29). Switch lenses to view years, word density, or daily check-in metrics.
               </p>
             </div>
-            <div id="heatmap-legend" class="heatmap-legend">
-              <span class="mono-meta">Less</span>
-              <span class="hm-cell hm-lvl-0"></span>
-              <span class="hm-cell hm-lvl-1"></span>
-              <span class="hm-cell hm-lvl-2"></span>
-              <span class="hm-cell hm-lvl-3"></span>
-              <span class="hm-cell hm-lvl-4"></span>
-              <span class="mono-meta">More Years</span>
+            <div class="control-cluster">
+              <label for="heatmap-mode-select" class="sr-only">Heatmap Metric Lens</label>
+              <select id="heatmap-mode-select" class="select-compact">
+                <option value="years">Lens: Recorded Years</option>
+                <option value="words">Lens: Word Density</option>
+                <option value="metric:energy">Metric: Energy</option>
+                <option value="metric:clarity">Metric: Clarity</option>
+                <option value="metric:calm">Metric: Calm</option>
+                <option value="metric:sleep">Metric: Sleep</option>
+              </select>
+              <div id="heatmap-legend" class="heatmap-legend">
+                <span class="mono-meta">Less</span>
+                <span class="hm-cell hm-lvl-0"></span>
+                <span class="hm-cell hm-lvl-1"></span>
+                <span class="hm-cell hm-lvl-2"></span>
+                <span class="hm-cell hm-lvl-3"></span>
+                <span class="hm-cell hm-lvl-4"></span>
+                <span class="mono-meta">More</span>
+              </div>
             </div>
           </div>
           <div id="heatmap-grid" class="heatmap-grid"></div>
@@ -393,24 +445,34 @@
           </div>
         </section>
 
-        <!-- VIEW 3: ARCHIVE, SEARCH & EXPORTS -->
+        <!-- VIEW 3: ARCHIVE, SEARCH, PRINT-TO-BOOK, MINI-ZINE & IMPORTERS -->
         <section id="view-archive" class="view-section" aria-label="Archive, Search and Exports">
           <div class="section-top-bar">
             <div>
-              <h2 class="section-heading">Archive &amp; Ownership Exports</h2>
+              <h2 class="section-heading">Archive, Print &amp; Ownership</h2>
               <p class="section-subtext">
-                Search across entries, filter by year or tag, and export your full diary as JSON or Markdown.
+                Search across entries, print a Book or 8-Page Foldable Mini-Zine, export JSON/Markdown, or import from Day One, Journey, or Markdown.
               </p>
             </div>
             <div class="export-actions">
               <button type="button" id="load-all-days-btn" class="btn btn-ghost btn-sm">
-                Load All Indexed Days
+                Load All Days
+              </button>
+              <label class="btn btn-ghost btn-sm file-btn" title="Import from Perpetual JSON, Day One JSON, Journey JSON, or Markdown (.md)">
+                Import Archive
+                <input type="file" id="import-diary-file" accept=".json,.md,.txt,application/json,text/markdown" hidden />
+              </label>
+              <button type="button" id="print-book-btn" class="btn btn-outline btn-sm">
+                Print Book
+              </button>
+              <button type="button" id="print-zine-btn" class="btn btn-outline btn-sm">
+                8-Page Mini-Zine
               </button>
               <button type="button" id="export-json-btn" class="btn btn-outline btn-sm">
                 Export .JSON
               </button>
               <button type="button" id="export-md-btn" class="btn btn-outline btn-sm">
-                Export .MD Book
+                Export .MD
               </button>
             </div>
           </div>
@@ -420,7 +482,7 @@
               type="search"
               id="archive-search-input"
               class="input-text"
-              placeholder="Search titles, tags, or decrypted prose..."
+              placeholder="Search titles, tags, moods, artifacts, or decrypted prose..."
             />
             <select id="archive-year-select" class="select-compact">
               <option value="">All Years</option>
@@ -430,6 +492,77 @@
           <div id="archive-tag-cloud" class="tag-cloud"></div>
           <div id="archive-results" class="archive-results"></div>
         </section>
+
+        <!-- VIEW 4: PHASE 13 & 15 — ANALYTICS, YEAR-IN-REVIEW DOSSIER & STORY ARCS -->
+        <section id="view-analytics" class="view-section" aria-label="Insights, Year-in-Review and Story Arcs">
+          <div class="section-top-bar">
+            <div>
+              <h2 class="section-heading">Longitudinal Insights &amp; Story Arcs</h2>
+              <p class="section-subtext">
+                Word velocity, mood patterns, automatic Year-in-Review Dossiers, and chronological Story Arc books (tag entries with <code>arc:project-name</code>).
+              </p>
+            </div>
+            <button type="button" id="analytics-load-all-btn" class="btn btn-outline btn-sm">
+              Decrypt All Days for Full Insights
+            </button>
+          </div>
+
+          <div id="analytics-kpi-grid" class="analytics-kpi-grid"></div>
+
+          <div class="analytics-panels-grid">
+            <div class="analytics-card">
+              <div class="mono-label">WORD VELOCITY BY YEAR</div>
+              <div id="analytics-years-chart" class="bar-chart-list"></div>
+            </div>
+            <div class="analytics-card">
+              <div class="mono-label">DOMINANT MOODS MATRIX</div>
+              <div id="analytics-moods-chart" class="bar-chart-list"></div>
+            </div>
+          </div>
+
+          <!-- Year-in-Review Auto-Dossier -->
+          <div class="analytics-card" style="margin-bottom: 1.25rem;">
+            <div class="section-top-bar" style="margin-bottom: 0.75rem;">
+              <div>
+                <div class="mono-label">YEAR-IN-REVIEW AUTO-DOSSIER</div>
+                <h3 class="section-heading" style="font-size: 1.2rem;">Annual Reflection Summary</h3>
+              </div>
+              <div class="control-cluster">
+                <select id="dossier-year-select" class="select-compact"></select>
+                <button type="button" id="dossier-download-md-btn" class="btn btn-outline btn-sm">
+                  Download Dossier .MD
+                </button>
+                <button type="button" id="dossier-print-book-btn" class="btn btn-ghost btn-sm">
+                  Print Year Book
+                </button>
+              </div>
+            </div>
+            <div id="dossier-stage" class="section-subtext"></div>
+          </div>
+
+          <!-- Story Arcs ("Book View") -->
+          <div class="analytics-card">
+            <div class="section-top-bar" style="margin-bottom: 0.75rem;">
+              <div>
+                <div class="mono-label">STORY ARCS · BOOK VIEW</div>
+                <h3 class="section-heading" style="font-size: 1.2rem;">Chronological Arc Reader</h3>
+              </div>
+              <div class="control-cluster">
+                <select id="arc-select" class="select-compact">
+                  <option value="">Select a Story Arc (arc:...)</option>
+                </select>
+                <button type="button" id="arc-print-book-btn" class="btn btn-outline btn-sm" disabled>
+                  Print Arc Book
+                </button>
+              </div>
+            </div>
+            <div id="arc-book-stage" class="arc-book-stage">
+              <p class="section-subtext">
+                Tag any entries across different dates with <code>arc:my-story</code> to stitch them into a continuous chronological book here.
+              </p>
+            </div>
+          </div>
+        </section>
       </main>
     </div>
 
@@ -438,7 +571,7 @@
       ❝ Quote in Comment
     </button>
 
-    <!-- MODAL 1: ENTRY COMPOSER (CREATE / EDIT / DATE-MOVE / DELETE) -->
+    <!-- MODAL 1: ENTRY COMPOSER (ZEN MODE, TEMPLATES, PROMPTS, ARTIFACTS, SKETCH, VOICE, GALLERY) -->
     <div id="composer-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="composer-modal-title" hidden>
       <div class="modal-card modal-card-lg">
         <div class="modal-header">
@@ -446,7 +579,12 @@
             <div class="modal-kicker">PERPETUAL ENTRY COMPOSER · ATOMIC GIT COMMIT</div>
             <h2 id="composer-modal-title" class="modal-title">New Diary Entry</h2>
           </div>
-          <button type="button" id="composer-close-btn" class="icon-btn" aria-label="Close Composer">✕</button>
+          <div class="control-cluster">
+            <button type="button" id="composer-zen-btn" class="btn btn-ghost btn-sm" title="Toggle distraction-free Typewriter / Zen Mode">
+              ⛶ Zen Mode
+            </button>
+            <button type="button" id="composer-close-btn" class="icon-btn" aria-label="Close Composer">✕</button>
+          </div>
         </div>
 
         <div id="draft-recovery-banner" class="draft-banner" hidden>
@@ -458,6 +596,38 @@
         </div>
 
         <form id="entry-form" class="composer-form">
+          <!-- Phase 17: Templates & Curated Prompt Deck Strip -->
+          <div class="composer-extras-panel">
+            <div class="editor-toolbar">
+              <div class="control-cluster">
+                <select id="entry-template-select" class="select-compact select-xs" title="Apply an entry template">
+                  <option value="">Insert Template…</option>
+                </select>
+                <button type="button" id="entry-save-template-btn" class="btn btn-ghost btn-sm">
+                  + Save as Template
+                </button>
+              </div>
+              <div class="control-cluster">
+                <select id="entry-prompt-category" class="select-compact select-xs" title="Prompt deck category">
+                  <option value="all">All Prompts</option>
+                  <option value="longitudinal">Longitudinal / Time</option>
+                  <option value="inquiry">Self-Inquiry</option>
+                  <option value="craft">Craft &amp; Work</option>
+                  <option value="senses">Memory &amp; Senses</option>
+                </select>
+                <button type="button" id="entry-draw-prompt-btn" class="btn btn-outline btn-sm">
+                  ✦ Draw Prompt
+                </button>
+              </div>
+            </div>
+            <div id="entry-prompt-banner" class="prompt-banner" hidden>
+              <span id="entry-prompt-text"></span>
+              <button type="button" id="entry-insert-prompt-btn" class="btn btn-ghost btn-sm">
+                Insert
+              </button>
+            </div>
+          </div>
+
           <div class="composer-grid-3">
             <label class="field-group">
               <span class="field-label">Diary Date (YYYY-MM-DD)</span>
@@ -468,8 +638,8 @@
               <input type="text" id="entry-mood-input" class="input-text" placeholder="e.g., clear, reflective, steady" />
             </label>
             <label class="field-group">
-              <span class="field-label">Tags (comma-separated)</span>
-              <input type="text" id="entry-tags-input" class="input-text" placeholder="reflection, routine, craft" />
+              <span class="field-label">Tags (use arc:name for Story Arcs)</span>
+              <input type="text" id="entry-tags-input" class="input-text" placeholder="reflection, arc:autumn-move" />
             </label>
           </div>
 
@@ -485,7 +655,10 @@
               <button type="button" class="md-btn" data-md="h2" title="Heading">H2</button>
               <button type="button" class="md-btn" data-md="quote" title="Blockquote">❝</button>
               <button type="button" class="md-btn" data-md="list" title="Bullet List">• List</button>
-              <button type="button" class="md-btn" data-md="code" title="Inline Code">&lt;/&gt;</button>
+              <button type="button" class="md-btn" data-md="wikilink" title="Bi-Directional Wiki-Link">[[Date]]</button>
+              <button type="button" class="md-btn" data-md="callout" title="Editorial Callout">[!Note]</button>
+              <button type="button" class="md-btn" data-md="sidenote" title="Margin Sidenote">^[Note]</button>
+              <button type="button" class="md-btn" data-md="footnote" title="Footnote">[^1]</button>
             </div>
             <div id="editor-mode-group" class="segmented-control" role="group" aria-label="Editor Mode">
               <button type="button" class="seg-btn is-active" data-editor-mode="write">Write</button>
@@ -500,7 +673,7 @@
               id="entry-body-input"
               class="input-textarea entry-textarea"
               rows="10"
-              placeholder="Write freely in Markdown. You can backdate any calendar date or move an existing entry to another date..."
+              placeholder="Write freely in Markdown. Link other dates with [[YYYY-MM-DD]], add ^[sidenotes] or > [!reflection] callouts..."
               required
             ></textarea>
             <div id="entry-preview-pane" class="entry-preview-pane prose-body" hidden></div>
@@ -509,11 +682,72 @@
           <div class="editor-status-row">
             <span id="entry-word-count" class="mono-meta">0 words · 0 chars</span>
             <span id="entry-draft-status" class="mono-meta">Drafts auto-saved locally</span>
-            <label class="checkbox-inline" id="entry-encrypt-wrap">
-              <input type="checkbox" id="entry-encrypt-checkbox" />
-              <span>Encrypt entry (AES-256-GCM + AAD)</span>
-            </label>
+            <div class="control-cluster">
+              <label class="checkbox-inline checkbox-xs" title="Preserve exact leading spaces, indentation, and stanza breaks for poetry/formalist prose">
+                <input type="checkbox" id="entry-verse-checkbox" />
+                <span>Verse / Whitespace Mode</span>
+              </label>
+              <label class="checkbox-inline checkbox-xs" id="entry-encrypt-wrap">
+                <input type="checkbox" id="entry-encrypt-checkbox" />
+                <span>Encrypt (v3 AAD)</span>
+              </label>
+            </div>
           </div>
+
+          <!-- Phase 14 & 19: Collapsible Context Strip (Weather/Place, Cultural Artifacts, Metrics, Time Capsule) -->
+          <details class="composer-extras-panel" id="composer-context-details">
+            <summary class="mono-label" style="cursor: pointer;">
+              + CONTEXT, CULTURAL ARTIFACTS, DAILY METRICS &amp; TIME CAPSULE
+            </summary>
+
+            <div class="form-grid-2" style="margin-top: 0.5rem;">
+              <label class="field-group">
+                <span class="field-label">Location Stamp (Opt-In)</span>
+                <input type="text" id="entry-location-input" class="input-text input-sm" placeholder="e.g., Manila, Philippines" />
+              </label>
+              <label class="field-group">
+                <span class="field-label">Weather Stamp</span>
+                <div class="field-inline">
+                  <input type="text" id="entry-weather-input" class="input-text input-sm" placeholder="e.g., ⛅ 27°C · Partly Cloudy" />
+                  <button type="button" id="entry-stamp-weather-btn" class="btn btn-outline btn-sm">
+                    ◎ Stamp Now
+                  </button>
+                </div>
+              </label>
+            </div>
+
+            <div class="composer-grid-3">
+              <label class="field-group">
+                <span class="field-label">📖 Reading</span>
+                <input type="text" id="artifact-reading" class="input-text input-sm" placeholder="Book or essay" />
+              </label>
+              <label class="field-group">
+                <span class="field-label">♫ Listening</span>
+                <input type="text" id="artifact-listening" class="input-text input-sm" placeholder="Album or song" />
+              </label>
+              <label class="field-group">
+                <span class="field-label">▣ Watching</span>
+                <input type="text" id="artifact-watching" class="input-text input-sm" placeholder="Film or series" />
+              </label>
+              <label class="field-group">
+                <span class="field-label">☕ Ritual</span>
+                <input type="text" id="artifact-drinking" class="input-text input-sm" placeholder="Coffee, tea, meal" />
+              </label>
+              <label class="field-group">
+                <span class="field-label">❝ Anchor Line</span>
+                <input type="text" id="artifact-quote" class="input-text input-sm" placeholder="Line worth keeping" />
+              </label>
+              <label class="field-group">
+                <span class="field-label">⏳ Time Capsule (Seal Until)</span>
+                <input type="date" id="entry-sealed-until-input" class="input-date input-sm" />
+              </label>
+            </div>
+
+            <div>
+              <div class="field-label" style="margin-bottom: 0.35rem;">Daily Check-In Metrics (1–5 · leave at 0 to omit)</div>
+              <div id="entry-metrics-grid" class="metrics-sliders-grid"></div>
+            </div>
+          </details>
 
           <!-- Phase 9: Optional Double-Lock Entry (2nd Independent Passphrase) -->
           <div class="doublelock-composer-box">
@@ -544,12 +778,16 @@
             </div>
           </div>
 
+          <!-- Phase 6, 7 & 18: Multi-Photo Gallery, Ink Sketch Pad & Encrypted Voice Notes -->
           <div class="media-attach-bar">
             <div class="media-attach-controls">
               <label class="btn btn-ghost btn-sm file-btn">
-                Upload Photo
-                <input type="file" id="entry-photo-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+                + Upload Photo(s)
+                <input type="file" id="entry-photo-file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden />
               </label>
+              <button type="button" id="entry-sketch-toggle-btn" class="btn btn-ghost btn-sm">
+                ✎ Ink Sketch
+              </button>
               <input
                 type="url"
                 id="entry-photo-url"
@@ -560,10 +798,10 @@
                 type="text"
                 id="entry-photo-caption"
                 class="input-text input-sm"
-                placeholder="Optional photo caption"
+                placeholder="Primary photo caption"
               />
               <button type="button" id="entry-photo-remove-btn" class="btn btn-ghost btn-sm" hidden>
-                Remove Photo
+                Clear Photos
               </button>
               <select id="entry-webp-preset" class="select-compact select-xs" title="Browser-side WebP compression preset">
                 <option value="thumb">Thumbnail (480px · ~30 KB)</option>
@@ -576,13 +814,49 @@
                 <input type="checkbox" id="entry-archive-original-checkbox" />
                 <span>Archive original locally</span>
               </label>
-              <label class="checkbox-inline checkbox-xs" title="Encrypt photo binary into an opaque .enc blob before committing">
+              <label class="checkbox-inline checkbox-xs" title="Encrypt photo/audio binaries into opaque .enc blobs before committing">
                 <input type="checkbox" id="entry-photo-encrypt-checkbox" checked />
-                <span>Encrypt photo (.enc)</span>
+                <span>Encrypt (.enc)</span>
               </label>
               <span id="entry-photo-stats" class="mono-meta" hidden></span>
             </div>
+
+            <!-- Multi-Photo Draft Gallery Strip -->
+            <div id="entry-gallery-draft-list" class="entry-gallery-strip" hidden></div>
+
+            <!-- Hold-and-Drag Alignment Studio for Primary Photo -->
             <div id="entry-alignment-host" class="alignment-host" hidden></div>
+
+            <!-- Phase 18B: Collapsible Ink Sketch Pad -->
+            <div id="entry-sketch-panel" style="margin-top: 0.65rem;" hidden>
+              <div id="entry-sketch-host"></div>
+              <div class="control-cluster" style="margin-top: 0.5rem;">
+                <button type="button" id="entry-sketch-attach-btn" class="btn btn-primary btn-sm">
+                  Attach Sketch to Entry
+                </button>
+                <button type="button" id="entry-sketch-close-btn" class="btn btn-ghost btn-sm">
+                  Close Pad
+                </button>
+              </div>
+            </div>
+
+            <!-- Phase 18C: Encrypted Voice Note Recorder -->
+            <div class="voice-recorder-bar" style="margin-top: 0.65rem;">
+              <button type="button" id="voice-record-btn" class="btn btn-outline btn-sm">
+                ● Record Voice Note
+              </button>
+              <button type="button" id="voice-stop-btn" class="btn btn-danger btn-sm" hidden>
+                ■ Stop
+              </button>
+              <span id="voice-timer" class="mono-meta">00:00</span>
+              <div class="voice-meter-track" aria-hidden="true">
+                <div id="voice-meter-fill" class="voice-meter-fill"></div>
+              </div>
+              <audio id="voice-draft-preview" controls hidden></audio>
+              <button type="button" id="voice-remove-btn" class="btn btn-ghost btn-sm" hidden>
+                Remove Voice
+              </button>
+            </div>
           </div>
 
           <div class="modal-footer">
@@ -606,7 +880,7 @@
       </div>
     </div>
 
-    <!-- MODAL 2: GITHUB SYNC, SPLIT-REPO VAULT, ATOMIC ENGINE & ZERO-FOOTPRINT -->
+    <!-- MODAL 2: GITHUB SYNC, SPLIT-REPO VAULT, SHARDING & ZERO-FOOTPRINT -->
     <div id="github-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="github-modal-title" hidden>
       <div class="modal-card">
         <div class="modal-header">
@@ -617,7 +891,6 @@
           <button type="button" id="github-close-btn" class="icon-btn" aria-label="Close GitHub Settings">✕</button>
         </div>
 
-        <!-- Repo Health, Atomic Commit & PAT Expiry Radar -->
         <div id="repo-health-panel" class="health-panel">
           <div class="health-top-row">
             <span id="health-mode-pill" class="health-pill">SANDBOX MODE</span>
@@ -637,7 +910,7 @@
         </div>
 
         <form id="github-form" class="settings-form">
-          <div class="settings-section-label">1. Public App Repository (GitHub Pages Host)</div>
+          <div class="settings-section-label">1. Public App Repository (GitHub Pages / Neocities Host)</div>
           <div class="form-grid-2">
             <label class="field-group">
               <span class="field-label">GitHub Username / Owner</span>
@@ -754,7 +1027,7 @@
               <button type="button" id="gh-clear-token-btn" class="btn btn-danger btn-sm">
                 Clear Token
               </button>
-              <button type="button" id="gh-wipe-local-btn" class="btn btn-ghost btn-sm" title="Erase all diary localStorage, sessionStorage, and IndexedDB traces from this browser">
+              <button type="button" id="gh-wipe-local-btn" class="btn btn-ghost btn-sm" title="Erase all diary localStorage, sessionStorage, Service Worker caches, and IndexedDB traces from this browser">
                 Wipe Local Traces
               </button>
             </div>
@@ -767,12 +1040,12 @@
       </div>
     </div>
 
-    <!-- MODAL 3: PASSWORD, ENVELOPE VAULT & EMERGENCY PAPER RECOVERY KIT -->
+    <!-- MODAL 3: PASSWORD, ENVELOPE VAULT, ARGON2ID, PASSKEYS, DECOY, CLOAKING & RECOVERY KIT -->
     <div id="vault-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="vault-modal-title" hidden>
       <div class="modal-card">
         <div class="modal-header">
           <div>
-            <div class="modal-kicker">ENVELOPE CRYPTOGRAPHY · AAD · PAPER RECOVERY KIT</div>
+            <div class="modal-kicker">ENVELOPE CRYPTOGRAPHY · ARGON2ID · AAD · PAPER RECOVERY KIT</div>
             <h2 id="vault-modal-title" class="modal-title">Diary Password &amp; Vault</h2>
           </div>
           <button type="button" id="vault-close-btn" class="icon-btn" aria-label="Close Vault Settings">✕</button>
@@ -780,7 +1053,6 @@
 
         <div id="vault-status-banner" class="status-callout"></div>
 
-        <!-- Envelope Architecture & Active Key Slots Panel -->
         <div id="vault-arch-panel" class="vault-arch-panel" hidden>
           <div class="vault-arch-header">
             <span id="vault-version-pill" class="health-pill">V2 ENVELOPE · V3 AAD</span>
@@ -792,7 +1064,6 @@
           </div>
         </div>
 
-        <!-- Emergency Paper Recovery Kit & Offline Decryptor -->
         <div id="vault-recovery-panel" class="vault-recovery-panel" hidden>
           <div class="vault-arch-header">
             <span class="mono-label">EMERGENCY PAPER RECOVERY KIT (256-BIT)</span>
@@ -818,7 +1089,6 @@
           </div>
         </div>
 
-        <!-- Legacy v1 Upgrade Callout -->
         <div id="vault-upgrade-banner" class="vault-upgrade-callout" hidden>
           <div>
             <div class="mono-label">LEGACY V1 VAULT DETECTED</div>
@@ -831,7 +1101,6 @@
           </button>
         </div>
 
-        <!-- Batch Upgrade v1/v2 Entries to v3 AAD Tamper-Bound -->
         <div id="vault-migrate-banner" class="vault-upgrade-callout" hidden>
           <div>
             <div class="mono-label">TAMPER-BINDING BATCH UPGRADE (V1 / V2 → V3 AAD)</div>
@@ -845,7 +1114,6 @@
           </button>
         </div>
 
-        <!-- Phase 6: Batch Encrypt Existing Plaintext Media into .enc Vault -->
         <div id="vault-media-migrate-banner" class="vault-upgrade-callout" hidden>
           <div>
             <div class="mono-label">ENCRYPTED MEDIA VAULT (.ENC PHOTOS)</div>
@@ -859,14 +1127,13 @@
           </button>
         </div>
 
-        <!-- Phase 8: Metadata Cloaking (index.enc + HMAC Shards + Generic Commits) -->
         <div id="vault-cloak-panel" class="vault-cloak-panel" hidden>
           <div class="vault-arch-header">
             <span class="mono-label">METADATA CLOAKING · ZERO-PROFILE REPO</span>
             <span id="vault-cloak-status-pill" class="health-pill">OFF</span>
           </div>
           <p class="section-subtext">
-            Encrypts <code>index.json</code> into <code>index.enc</code>, hashes <code>MM-DD</code> filenames into opaque <code>shards/&lt;hmac&gt;.enc</code> blobs (sealing tags, moods, timestamps &amp; prose), and pushes generic <code>sync: update</code> commits.
+            Encrypts <code>index.json</code> into <code>index.enc</code>, hashes <code>MM-DD</code> filenames into opaque <code>shards/&lt;hmac&gt;.enc</code> blobs, and pushes generic <code>sync: update</code> commits.
           </p>
           <label class="checkbox-inline">
             <input type="checkbox" id="vault-cloak-enabled-checkbox" />
@@ -884,14 +1151,13 @@
           </div>
         </div>
 
-        <!-- Phase 9: Biometric / Passkey Unlock (WebAuthn PRF) -->
         <div id="vault-passkey-panel" class="vault-passkey-panel" hidden>
           <div class="vault-arch-header">
             <span class="mono-label">BIOMETRIC / PASSKEY UNLOCK (WEBAUTHN PRF)</span>
             <span id="vault-passkey-status" class="mono-meta">Not enrolled</span>
           </div>
           <p class="section-subtext">
-            Enroll Face ID, Touch ID, Windows Hello, or a hardware security key to unwrap your Envelope DEK without typing your master password. Your password remains your universal fallback.
+            Enroll Face ID, Touch ID, Windows Hello, or a hardware security key to unwrap your Envelope DEK without typing your master password.
           </p>
           <div id="vault-passkey-list" class="vault-slots-list"></div>
           <div class="passkey-enroll-row">
@@ -907,35 +1173,22 @@
           </div>
         </div>
 
-        <!-- Phase 9: Plausible Deniability ("Decoy" Vault) -->
         <div id="vault-decoy-panel" class="vault-decoy-panel" hidden>
           <div class="vault-arch-header">
             <span class="mono-label">PLAUSIBLE DENIABILITY · DECOY VAULT</span>
             <span id="vault-decoy-status" class="mono-meta">Not configured</span>
           </div>
           <p class="section-subtext">
-            Configure a secondary decoy password backed by its own isolated DEK. Entering the decoy password unlocks only casual/plaintext entries (and entries written inside the decoy session) with zero visible trace of your real encrypted vault.
+            Configure a secondary decoy password backed by its own isolated DEK. Entering the decoy password opens only casual/plaintext entries with zero visible trace of your real vault.
           </p>
           <div class="form-grid-2">
             <label class="field-group">
               <span class="field-label">Decoy Password</span>
-              <input
-                type="password"
-                id="vault-decoy-password"
-                class="input-text"
-                placeholder="Different from Master Password"
-                autocomplete="off"
-              />
+              <input type="password" id="vault-decoy-password" class="input-text" placeholder="Different from Master Password" autocomplete="off" />
             </label>
             <label class="field-group">
               <span class="field-label">Confirm Decoy Password</span>
-              <input
-                type="password"
-                id="vault-decoy-confirm"
-                class="input-text"
-                placeholder="Re-enter decoy password"
-                autocomplete="off"
-              />
+              <input type="password" id="vault-decoy-confirm" class="input-text" placeholder="Re-enter decoy password" autocomplete="off" />
             </label>
           </div>
           <label class="checkbox-inline">
@@ -952,14 +1205,13 @@
           </div>
         </div>
 
-        <!-- Phase 10: Memory-Hard KDF Upgrade (Argon2id Web Worker) -->
         <div id="vault-argon2-panel" class="vault-argon2-panel" hidden>
           <div class="vault-arch-header">
             <span class="mono-label">MEMORY-HARD KEY DERIVATION · ARGON2ID WEB WORKER</span>
             <span id="vault-kdf-status-pill" class="health-pill">PBKDF2-SHA256</span>
           </div>
           <p class="section-subtext">
-            Upgrade your Master Password key slot from PBKDF2 to genuine RFC 9106 <strong>Argon2id</strong> (running off-thread in a Web Worker) for strong resistance against offline GPU cracking — 1 instant commit, 0 entries re-encrypted.
+            Upgrade your Master Password key slot from PBKDF2 to genuine RFC 9106 <strong>Argon2id</strong> (running off-thread in a Web Worker) — 1 instant commit, 0 entries re-encrypted.
           </p>
           <div class="passkey-enroll-row">
             <select id="vault-argon2-preset" class="select-compact">
@@ -974,7 +1226,6 @@
           <div id="vault-argon2-status" class="mono-meta" hidden></div>
         </div>
 
-        <!-- Phase 10: Active Zero-Knowledge Share Links Manager -->
         <div id="vault-shares-panel" class="vault-shares-panel" hidden>
           <div class="vault-arch-header">
             <span class="mono-label">ZERO-KNOWLEDGE REVOCABLE SHARE LINKS</span>
@@ -1074,15 +1325,9 @@
         <div class="conflict-merge-toolbar">
           <span class="mono-label">FINAL MERGED ENTRY (EDITABLE BEFORE COMMIT)</span>
           <div class="conflict-quick-btns">
-            <button type="button" id="conflict-pick-local-btn" class="btn btn-ghost btn-sm">
-              Take Mine
-            </button>
-            <button type="button" id="conflict-pick-remote-btn" class="btn btn-ghost btn-sm">
-              Take Remote
-            </button>
-            <button type="button" id="conflict-pick-merge-btn" class="btn btn-outline btn-sm">
-              3-Way Auto-Merge
-            </button>
+            <button type="button" id="conflict-pick-local-btn" class="btn btn-ghost btn-sm">Take Mine</button>
+            <button type="button" id="conflict-pick-remote-btn" class="btn btn-ghost btn-sm">Take Remote</button>
+            <button type="button" id="conflict-pick-merge-btn" class="btn btn-outline btn-sm">3-Way Auto-Merge</button>
           </div>
         </div>
 
@@ -1108,12 +1353,8 @@
           </label>
 
           <div class="modal-footer">
-            <button type="button" id="conflict-cancel-btn" class="btn btn-ghost">
-              Back to Composer
-            </button>
-            <button type="submit" id="conflict-commit-btn" class="btn btn-primary">
-              Commit Resolved Merge Atomically
-            </button>
+            <button type="button" id="conflict-cancel-btn" class="btn btn-ghost">Back to Composer</button>
+            <button type="submit" id="conflict-commit-btn" class="btn btn-primary">Commit Resolved Merge Atomically</button>
           </div>
         </form>
       </div>
@@ -1167,12 +1408,8 @@
             <div class="mono-label">ZERO-KNOWLEDGE SHARE LINK (KEY STAYS IN #FRAGMENT)</div>
             <input type="text" id="share-result-url" class="input-text" readonly />
             <div class="recovery-actions">
-              <button type="button" id="share-copy-url-btn" class="btn btn-primary btn-sm">
-                Copy Share Link
-              </button>
-              <button type="button" id="share-open-preview-btn" class="btn btn-ghost btn-sm">
-                Preview
-              </button>
+              <button type="button" id="share-copy-url-btn" class="btn btn-primary btn-sm">Copy Share Link</button>
+              <button type="button" id="share-open-preview-btn" class="btn btn-ghost btn-sm">Preview</button>
             </div>
           </div>
 
@@ -1180,15 +1417,13 @@
 
           <div class="modal-footer">
             <button type="button" id="share-cancel-btn" class="btn btn-ghost">Close</button>
-            <button type="submit" id="share-generate-btn" class="btn btn-primary">
-              Generate Encrypted Link
-            </button>
+            <button type="submit" id="share-generate-btn" class="btn btn-primary">Generate Encrypted Link</button>
           </div>
         </form>
       </div>
     </div>
 
-    <!-- MODAL 7: GIT REVISION "TIME MACHINE" (EDIT HISTORY, DIFFS & RESTORE) -->
+    <!-- MODAL 7: GIT REVISION "TIME MACHINE" -->
     <div id="history-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="history-modal-title" hidden>
       <div class="modal-card modal-card-xl">
         <div class="modal-header">
@@ -1253,9 +1488,7 @@
 
         <div class="drafts-toolbar">
           <span id="drafts-branch-pill" class="health-pill">BRANCH: drafts</span>
-          <button type="button" id="drafts-refresh-btn" class="btn btn-ghost btn-sm">
-            ↻ Refresh Drafts
-          </button>
+          <button type="button" id="drafts-refresh-btn" class="btn btn-ghost btn-sm">↻ Refresh Drafts</button>
         </div>
 
         <p class="section-subtext drafts-intro">
@@ -1269,6 +1502,24 @@
           <button type="button" id="drafts-new-btn" class="btn btn-outline btn-sm">+ New Entry</button>
           <button type="button" id="drafts-done-btn" class="btn btn-ghost">Close</button>
         </div>
+      </div>
+    </div>
+
+    <!-- MODAL 9: PHASE 17 COMMAND PALETTE (Ctrl+K / Cmd+K) -->
+    <div id="cmdk-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Command Palette" hidden>
+      <div class="modal-card cmdk-card">
+        <div class="cmdk-input-wrap">
+          <span class="mono-label">⌘K</span>
+          <input
+            type="text"
+            id="cmdk-input"
+            class="cmdk-input"
+            placeholder="Jump to date (11-24), switch view, draw prompt, print zine, lock vault..."
+            autocomplete="off"
+          />
+          <span class="cmdk-kbd">ESC</span>
+        </div>
+        <div id="cmdk-list" class="cmdk-list" role="listbox"></div>
       </div>
     </div>
 
