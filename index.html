@@ -75,6 +75,14 @@
           >
             RAM ONLY
           </span>
+          <span
+            id="cloak-mode-badge"
+            class="cloak-badge"
+            title="Metadata Cloaking active: index.enc manifest, HMAC day shards, and generic commit messages."
+            hidden
+          >
+            CLOAKED
+          </span>
           <nav class="primary-nav" aria-label="Primary Views">
             <button type="button" id="nav-reader-btn" class="nav-tab is-active" data-view="reader">
               Side-by-Side
@@ -772,6 +780,31 @@
           <button type="button" id="vault-migrate-media-btn" class="btn btn-outline btn-sm">
             Encrypt Plaintext Photos → .enc
           </button>
+        </div>
+
+        <!-- Phase 8: Metadata Cloaking (index.enc + HMAC Shards + Generic Commits) -->
+        <div id="vault-cloak-panel" class="vault-cloak-panel" hidden>
+          <div class="vault-arch-header">
+            <span class="mono-label">METADATA CLOAKING · ZERO-PROFILE REPO</span>
+            <span id="vault-cloak-status-pill" class="health-pill">OFF</span>
+          </div>
+          <p class="section-subtext">
+            Encrypts <code>index.json</code> into <code>index.enc</code>, hashes <code>MM-DD</code> filenames into opaque <code>shards/&lt;hmac&gt;.enc</code> blobs (sealing tags, moods, timestamps &amp; prose), and pushes generic <code>sync: update</code> commits.
+          </p>
+          <label class="checkbox-inline">
+            <input type="checkbox" id="vault-cloak-enabled-checkbox" />
+            <span>Enable Metadata Cloaking (<code>index.enc</code> + HMAC day shards)</span>
+          </label>
+          <label class="checkbox-inline">
+            <input type="checkbox" id="vault-generic-commits-checkbox" />
+            <span>Mask Git commit history with generic <code>sync: update</code> messages</span>
+          </label>
+          <div id="vault-cloak-migrate-status" class="mono-meta" hidden></div>
+          <div class="recovery-actions">
+            <button type="button" id="vault-migrate-cloak-btn" class="btn btn-primary btn-sm">
+              Migrate Repo → Cloaked Shards
+            </button>
+          </div>
         </div>
 
         <form id="vault-form" class="settings-form" autocomplete="off">
