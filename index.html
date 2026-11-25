@@ -302,6 +302,11 @@
                   <button type="button" id="comment-photo-remove-btn" class="btn btn-ghost btn-sm" hidden>
                     Remove Photo
                   </button>
+                  <label class="checkbox-inline checkbox-xs" title="Encrypt comment photo into an opaque .enc blob">
+                    <input type="checkbox" id="comment-photo-encrypt-checkbox" checked />
+                    <span>Encrypt (.enc)</span>
+                  </label>
+                  <span id="comment-photo-stats" class="mono-meta" hidden></span>
                 </div>
                 <div id="comment-alignment-host" class="alignment-host" hidden></div>
               </div>
@@ -390,7 +395,7 @@
       <div class="modal-card modal-card-lg">
         <div class="modal-header">
           <div>
-            <div class="modal-kicker">PERPETUAL ENTRY COMPOSER</div>
+            <div class="modal-kicker">PERPETUAL ENTRY COMPOSER · ATOMIC GIT COMMIT</div>
             <h2 id="composer-modal-title" class="modal-title">New Diary Entry</h2>
           </div>
           <button type="button" id="composer-close-btn" class="icon-btn" aria-label="Close Composer">✕</button>
@@ -483,6 +488,17 @@
               <button type="button" id="entry-photo-remove-btn" class="btn btn-ghost btn-sm" hidden>
                 Remove Photo
               </button>
+              <select id="entry-webp-preset" class="select-compact select-xs" title="Browser-side WebP compression preset">
+                <option value="balanced" selected>WebP Balanced (1200px)</option>
+                <option value="compact">WebP Compact (960px)</option>
+                <option value="high">WebP High (1600px)</option>
+                <option value="original">Original (No Resize)</option>
+              </select>
+              <label class="checkbox-inline checkbox-xs" title="Encrypt photo binary into an opaque .enc blob before committing">
+                <input type="checkbox" id="entry-photo-encrypt-checkbox" checked />
+                <span>Encrypt photo (.enc)</span>
+              </label>
+              <span id="entry-photo-stats" class="mono-meta" hidden></span>
             </div>
             <div id="entry-alignment-host" class="alignment-host" hidden></div>
           </div>
@@ -493,25 +509,25 @@
             </button>
             <div class="modal-footer-right">
               <button type="button" id="entry-cancel-btn" class="btn btn-ghost">Cancel</button>
-              <button type="submit" id="entry-save-btn" class="btn btn-primary">Save to GitHub</button>
+              <button type="submit" id="entry-save-btn" class="btn btn-primary">Save Atomically</button>
             </div>
           </div>
         </form>
       </div>
     </div>
 
-    <!-- MODAL 2: GITHUB SYNC, SPLIT-REPO VAULT & ZERO-FOOTPRINT CONTROLS -->
+    <!-- MODAL 2: GITHUB SYNC, SPLIT-REPO VAULT, ATOMIC ENGINE & ZERO-FOOTPRINT -->
     <div id="github-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="github-modal-title" hidden>
       <div class="modal-card">
         <div class="modal-header">
           <div>
-            <div class="modal-kicker">GITHUB PERSISTENCE · SPLIT-REPO VAULT · ZERO-FOOTPRINT</div>
+            <div class="modal-kicker">GITHUB PERSISTENCE · ATOMIC GIT TREES · SPLIT-REPO VAULT</div>
             <h2 id="github-modal-title" class="modal-title">GitHub Sync &amp; Vault Health</h2>
           </div>
           <button type="button" id="github-close-btn" class="icon-btn" aria-label="Close GitHub Settings">✕</button>
         </div>
 
-        <!-- Repo Health & PAT Expiry Radar -->
+        <!-- Repo Health, Atomic Commit & PAT Expiry Radar -->
         <div id="repo-health-panel" class="health-panel">
           <div class="health-top-row">
             <span id="health-mode-pill" class="health-pill">SANDBOX MODE</span>
@@ -523,6 +539,9 @@
           <div class="health-metrics-row">
             <span id="health-size-label" class="mono-meta">0 KB / 1,024 MB (0%)</span>
             <span id="health-pat-status" class="mono-meta">PAT: Not set</span>
+          </div>
+          <div class="health-metrics-row">
+            <span id="health-commit-label" class="mono-meta">Atomic Commit Engine: Git Trees API ready</span>
           </div>
           <div id="health-expiry-warning" class="health-warning" role="status" hidden></div>
         </div>
@@ -696,12 +715,26 @@
           <div>
             <div class="mono-label">TAMPER-BINDING BATCH UPGRADE (V1 / V2 → V3 AAD)</div>
             <p class="section-subtext">
-              Re-encrypt older v1/v2 entries directly under your DEK with date-bound AES-GCM AAD tamper protection (and retire any legacy v1 key bridge).
+              Re-encrypt older v1/v2 entries directly under your DEK with date-bound AES-GCM AAD tamper protection in 1 atomic Git commit.
             </p>
             <div id="vault-migrate-status" class="mono-meta" hidden></div>
           </div>
           <button type="button" id="vault-migrate-entries-btn" class="btn btn-outline btn-sm">
             Upgrade Entries → v3 AAD
+          </button>
+        </div>
+
+        <!-- Phase 6: Batch Encrypt Existing Plaintext Media into .enc Vault -->
+        <div id="vault-media-migrate-banner" class="vault-upgrade-callout" hidden>
+          <div>
+            <div class="mono-label">ENCRYPTED MEDIA VAULT (.ENC PHOTOS)</div>
+            <p class="section-subtext">
+              Encrypt any older plaintext photos inside <code>data/media/</code> into AAD-bound <code>.enc</code> blobs and delete the unencrypted originals atomically.
+            </p>
+            <div id="vault-media-migrate-status" class="mono-meta" hidden></div>
+          </div>
+          <button type="button" id="vault-migrate-media-btn" class="btn btn-outline btn-sm">
+            Encrypt Plaintext Photos → .enc
           </button>
         </div>
 
@@ -762,7 +795,86 @@
       </div>
     </div>
 
-    <!-- MODAL 4: CUSTOM CONFIRMATION DIALOG -->
+    <!-- MODAL 4: INTERACTIVE 3-WAY CONFLICT RESOLVER -->
+    <div id="conflict-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="conflict-modal-title" hidden>
+      <div class="modal-card modal-card-xl">
+        <div class="modal-header">
+          <div>
+            <div class="modal-kicker">MULTI-DEVICE SYNC CONFLICT · 3-WAY DIFF RESOLVER</div>
+            <h2 id="conflict-modal-title" class="modal-title">Resolve Entry Conflict</h2>
+          </div>
+          <button type="button" id="conflict-close-btn" class="icon-btn" aria-label="Close Conflict Resolver">✕</button>
+        </div>
+
+        <div id="conflict-summary-banner" class="conflict-summary-banner"></div>
+
+        <div class="conflict-compare-grid">
+          <div class="conflict-pane">
+            <div class="conflict-pane-header">
+              <span class="mono-label">YOUR UNSAVED EDIT (LOCAL)</span>
+              <span id="conflict-local-meta" class="mono-meta"></span>
+            </div>
+            <div id="conflict-local-diff" class="diff-viewer"></div>
+          </div>
+
+          <div class="conflict-pane">
+            <div class="conflict-pane-header">
+              <span class="mono-label">LATEST GITHUB VERSION (REMOTE)</span>
+              <span id="conflict-remote-meta" class="mono-meta"></span>
+            </div>
+            <div id="conflict-remote-diff" class="diff-viewer"></div>
+          </div>
+        </div>
+
+        <div class="conflict-merge-toolbar">
+          <span class="mono-label">FINAL MERGED ENTRY (EDITABLE BEFORE COMMIT)</span>
+          <div class="conflict-quick-btns">
+            <button type="button" id="conflict-pick-local-btn" class="btn btn-ghost btn-sm">
+              Take Mine
+            </button>
+            <button type="button" id="conflict-pick-remote-btn" class="btn btn-ghost btn-sm">
+              Take Remote
+            </button>
+            <button type="button" id="conflict-pick-merge-btn" class="btn btn-outline btn-sm">
+              3-Way Auto-Merge
+            </button>
+          </div>
+        </div>
+
+        <form id="conflict-form" class="composer-form">
+          <div class="composer-grid-3">
+            <label class="field-group">
+              <span class="field-label">Merged Heading</span>
+              <input type="text" id="conflict-merged-title" class="input-text" />
+            </label>
+            <label class="field-group">
+              <span class="field-label">Merged Mood</span>
+              <input type="text" id="conflict-merged-mood" class="input-text" />
+            </label>
+            <label class="field-group">
+              <span class="field-label">Merged Tags</span>
+              <input type="text" id="conflict-merged-tags" class="input-text" />
+            </label>
+          </div>
+
+          <label class="field-group">
+            <span class="field-label">Merged Prose (remove any &lt;&lt;&lt;&lt;&lt;&lt;&lt; / ======= / &gt;&gt;&gt;&gt;&gt;&gt;&gt; markers before committing)</span>
+            <textarea id="conflict-merged-body" class="input-textarea entry-textarea" rows="8" required></textarea>
+          </label>
+
+          <div class="modal-footer">
+            <button type="button" id="conflict-cancel-btn" class="btn btn-ghost">
+              Back to Composer
+            </button>
+            <button type="submit" id="conflict-commit-btn" class="btn btn-primary">
+              Commit Resolved Merge Atomically
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- MODAL 5: CUSTOM CONFIRMATION DIALOG -->
     <div id="confirm-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title" hidden>
       <div class="modal-card modal-card-sm">
         <div class="modal-header">
