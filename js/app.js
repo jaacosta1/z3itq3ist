@@ -1,14 +1,15 @@
-// js/app.js — Perpetual Side-by-Side Diary Main Application Controller
+// js/app.js — Perpetual Side-by-Side Diary Main Application Controller (Phase 2: Envelope Encryption)
 
 import {
-  deriveKey,
   encryptText,
   decryptText,
   isEncryptedPayload,
-  createVaultCanary,
-  verifyVaultCanary,
+  getPayloadVersion,
+  createEnvelopeVault,
+  unlockVault,
+  rotateVaultPassword,
+  upgradeLegacyVaultToEnvelope,
   encryptPatToken,
-  decryptPatToken,
 } from './crypto.js';
 import {
   renderMarkdown,
@@ -71,8 +72,7 @@ function getTodayIsoDate() {
 }
 
 function getTodayDayKey() {
-  const iso = getTodayIsoDate();
-  return iso.slice(5);
+  return getTodayIsoDate().slice(5);
 }
 
 function diffCalendarDays(diaryDateStr, writtenAtIso) {
@@ -203,6 +203,7 @@ class PerpetualDiaryApp {
       indexData: { updatedAt: '', days: {} },
       dayCache: {},
       vaultMeta: null,
+      keyring: null,
       cryptoKey: null,
       unlocked: true,
       pendingQuote: null,
@@ -221,6 +222,15 @@ class PerpetualDiaryApp {
     this.entryStudio = null;
     this.commentStudio = null;
     this.draftSaveTimer = null;
+  }
+
+  hasActiveSessionKey() {
+    return Boolean(this.state.keyring?.dek || this.state.keyring?.legacyKey || this.state.cryptoKey);
+  }
+
+  setActiveKeyring(keyring) {
+    this.state.keyring = keyring || null;
+    this.state.cryptoKey = keyring ? keyring.dek || keyring.legacyKey || null : null;
   }
 
   async init() {
@@ -272,7 +282,7 @@ class PerpetualDiaryApp {
     }
 
     if (lockNowBtn) {
-      lockNowBtn.hidden = !this.state.cryptoKey && !this.state.vaultMeta?.enabled;
+      lockNowBtn.hidden = !this.hasActiveSessionKey() && !this.state.vaultMeta?.enabled;
     }
   }
 
@@ -314,7 +324,8 @@ class PerpetualDiaryApp {
     if (!monthSel || !daySel) return;
 
     monthSel.innerHTML = MONTHS.map(
-      (name, idx) => `<option value="${pad2(idx + 1)}">${pad2(idx + 1)} · ${name.slice(0, 3).toUpperCase()}</option>`
+      (name, idx) =>
+        `<option value="${pad2(idx + 1)}">${pad2(idx + 1)} · ${name.slice(0, 3).toUpperCase()}</option>`
     ).join('');
 
     this.syncDaySelectorOptions(11, 24);
@@ -373,7 +384,7 @@ class PerpetualDiaryApp {
 
     this.state.vaultMeta = vaultMeta;
 
-    if (vaultMeta && vaultMeta.enabled && !this.state.cryptoKey) {
+    if (vaultMeta && vaultMeta.enabled && !this.hasActiveSessionKey()) {
       this.state.unlocked = false;
       const lockScreen = document.getElementById('lock-screen');
       if (lockScreen) lockScreen.hidden = false;
@@ -436,10 +447,7 @@ class PerpetualDiaryApp {
       }
     } else {
       sandboxDays = JSON.parse(JSON.stringify(SANDBOX_SEED_DAYS));
-      window.localStorage.setItem(
-        'perpetual_diary_sandbox_days_v1',
-        JSON.stringify(sandboxDays)
-      );
+      window.localStorage.setItem('perpetual_diary_sandbox_days_v1', JSON.stringify(sandboxDays));
     }
 
     const doc = sandboxDays[dayStr] || {
@@ -474,10 +482,7 @@ class PerpetualDiaryApp {
       sandboxDays = {};
     }
 
-    if (
-      Object.keys(normalized.entries).length === 0 &&
-      normalized.comments.length === 0
-    ) {
+    if (Object.keys(normalized.entries).length === 0 && normalized.comments.length === 0) {
       delete sandboxDays[dayStr];
     } else {
       sandboxDays[dayStr] = normalized;
@@ -492,15 +497,23 @@ class PerpetualDiaryApp {
     return normalized;
   }
 
+  async persistVaultMeta(vaultMeta, commitMessage = 'diary: update envelope vault') {
+    this.state.vaultMeta = vaultMeta;
+    window.localStorage.setItem('perpetual_diary_vault_local_v1', JSON.stringify(vaultMeta));
+    if (this.gh.hasToken()) {
+      await this.gh.putJson('vault.json', vaultMeta, commitMessage);
+    }
+  }
+
   async decryptFieldIfNeeded(value, isEncrypted) {
     if (!isEncrypted && !isEncryptedPayload(value)) {
       return String(value ?? '');
     }
-    if (!this.state.cryptoKey) {
+    if (!this.hasActiveSessionKey()) {
       return null;
     }
     try {
-      return await decryptText(value, this.state.cryptoKey);
+      return await decryptText(value, this.state.keyring || this.state.cryptoKey);
     } catch {
       return null;
     }
@@ -576,7 +589,9 @@ class PerpetualDiaryApp {
     if (monthSel) monthSel.value = pad2(month);
     this.syncDaySelectorOptions(month, day);
 
-    document.getElementById('active-date-title').textContent = formatReadableDay(this.state.activeDay);
+    document.getElementById('active-date-title').textContent = formatReadableDay(
+      this.state.activeDay
+    );
 
     const comparePanel = document.getElementById('compare2-panel');
     if (comparePanel) {
@@ -588,9 +603,13 @@ class PerpetualDiaryApp {
     }
 
     const stage = document.getElementById('columns-stage');
-    stage.className = `columns-stage col-mode-${this.state.colMode}`;
+    stage.className = `columns-stage col-mode-${this.state.colMode}${
+      this.state.mobileMode === 'tabs' ? ' mobile-mode-tabs' : ''
+    }`;
 
     if (this.state.compare2Active) {
+      const mobileTabs = document.getElementById('mobile-year-tabs');
+      if (mobileTabs) mobileTabs.hidden = true;
       await this.renderCompare2Columns(stage);
     } else {
       await this.renderDayColumns(stage, this.state.activeDay);
@@ -644,11 +663,45 @@ class PerpetualDiaryApp {
     document.getElementById('recorded-years-count').textContent =
       `${years.length} ${years.length === 1 ? 'YEAR' : 'YEARS'}`;
 
+    const mobileTabs = document.getElementById('mobile-year-tabs');
+    if (years.length > 0 && !years.includes(Number(this.state.mobileSelectedYear))) {
+      this.state.mobileSelectedYear = years[0];
+    }
+
+    if (mobileTabs) {
+      if (this.state.mobileMode === 'tabs' && years.length > 0) {
+        mobileTabs.hidden = false;
+        mobileTabs.innerHTML = years
+          .map(
+            (yr) =>
+              `<button type="button" class="mobile-year-tab ${
+                Number(this.state.mobileSelectedYear) === yr ? 'is-active' : ''
+              }" role="tab" data-mobile-year="${yr}">${yr}</button>`
+          )
+          .join('');
+        mobileTabs.querySelectorAll('.mobile-year-tab').forEach((tabBtn) => {
+          tabBtn.addEventListener('click', () => {
+            this.state.mobileSelectedYear = Number(tabBtn.dataset.mobileYear);
+            this.renderReader();
+          });
+        });
+      } else {
+        mobileTabs.hidden = true;
+        mobileTabs.innerHTML = '';
+      }
+    }
+
     stage.innerHTML = '';
 
     for (const yr of years) {
       const entry = entries[String(yr)];
       const card = await this.buildEntryColumnCard(entry, dayStr, String(yr));
+      if (
+        this.state.mobileMode === 'tabs' &&
+        Number(this.state.mobileSelectedYear) !== Number(yr)
+      ) {
+        card.classList.add('mobile-tab-hidden');
+      }
       stage.appendChild(card);
     }
 
@@ -688,7 +741,10 @@ class PerpetualDiaryApp {
         : '';
 
     const decryptedBody = await this.decryptFieldIfNeeded(entry.body, Boolean(entry.encrypted));
-    const decryptedTitle = await this.decryptFieldIfNeeded(entry.title || '', Boolean(entry.encrypted));
+    const decryptedTitle = await this.decryptFieldIfNeeded(
+      entry.title || '',
+      Boolean(entry.encrypted)
+    );
     const isLockedEntry = decryptedBody === null;
 
     let bodyHtml = '';
@@ -714,8 +770,12 @@ class PerpetualDiaryApp {
         const align = entry.image.align || 'full';
         const posX = Number.isFinite(Number(entry.image.posX)) ? Number(entry.image.posX) : 50;
         const posY = Number.isFinite(Number(entry.image.posY)) ? Number(entry.image.posY) : 50;
-        const widthPct = Number.isFinite(Number(entry.image.width)) ? Number(entry.image.width) : 100;
-        const heightPx = Number.isFinite(Number(entry.image.height)) ? Number(entry.image.height) : 240;
+        const widthPct = Number.isFinite(Number(entry.image.width))
+          ? Number(entry.image.width)
+          : 100;
+        const heightPx = Number.isFinite(Number(entry.image.height))
+          ? Number(entry.image.height)
+          : 240;
 
         mediaHtml = `
           <figure class="entry-figure align-${escapeHtml(align)}" style="width:${widthPct}%;max-width:100%;">
@@ -735,17 +795,17 @@ class PerpetualDiaryApp {
       }
     }
 
-    const tagsHtml = Array.isArray(entry.tags) && entry.tags.length
-      ? entry.tags.map((t) => `<span class="tag-chip">#${escapeHtml(t)}</span>`).join('')
-      : '';
+    const tagsHtml =
+      Array.isArray(entry.tags) && entry.tags.length
+        ? entry.tags.map((t) => `<span class="tag-chip">#${escapeHtml(t)}</span>`).join('')
+        : '';
 
     const moodHtml = entry.mood
       ? `<span class="mood-chip">mood: ${escapeHtml(entry.mood)}</span>`
       : '';
 
-    const metaChipsHtml = moodHtml || tagsHtml
-      ? `<div class="entry-meta-chips">${moodHtml}${tagsHtml}</div>`
-      : '';
+    const metaChipsHtml =
+      moodHtml || tagsHtml ? `<div class="entry-meta-chips">${moodHtml}${tagsHtml}</div>` : '';
 
     const loggedLabel = entry.writtenAt
       ? `Logged ${new Date(entry.writtenAt).toLocaleDateString(undefined, {
@@ -754,6 +814,9 @@ class PerpetualDiaryApp {
           year: 'numeric',
         })}`
       : '';
+
+    const payloadVer = entry.encrypted ? getPayloadVersion(entry.body) : 0;
+    const encBadge = payloadVer ? ` · v${payloadVer}` : '';
 
     col.innerHTML = `
       <header class="year-col-header">
@@ -770,7 +833,7 @@ class PerpetualDiaryApp {
           <button type="button" class="btn btn-ghost btn-sm col-delete-btn">Delete</button>
         </div>
       </header>
-      <div class="mono-meta year-col-date">${escapeHtml(entry.diaryDate || `${entry.year}-${dayStr}`)}</div>
+      <div class="mono-meta year-col-date">${escapeHtml(entry.diaryDate || `${entry.year}-${dayStr}`)}${encBadge}</div>
       ${!isLockedEntry && decryptedTitle ? `<h3 class="entry-title">${escapeHtml(decryptedTitle)}</h3>` : ''}
       ${metaChipsHtml}
       <div class="entry-prose-wrap">
@@ -817,7 +880,11 @@ class PerpetualDiaryApp {
 
     col.querySelector('.col-edit-btn').addEventListener('click', () => {
       this.openComposer({
-        editEntry: { ...entry, body: decryptedBody ?? entry.body, title: decryptedTitle ?? entry.title },
+        editEntry: {
+          ...entry,
+          body: decryptedBody ?? entry.body,
+          title: decryptedTitle ?? entry.title,
+        },
         dayStr,
         yearKey,
       });
@@ -1049,11 +1116,11 @@ class PerpetualDiaryApp {
 
     const shouldEncrypt = document.getElementById('comment-encrypt-checkbox').checked;
     if (shouldEncrypt) {
-      if (!this.state.cryptoKey) {
+      if (!this.hasActiveSessionKey()) {
         this.showToast('Unlock the Vault first to encrypt margin notes.', 'warn');
         return;
       }
-      body = await encryptText(body, this.state.cryptoKey);
+      body = await encryptText(body, this.state.keyring || this.state.cryptoKey);
     }
 
     const caption = document.getElementById('comment-photo-caption').value.trim();
@@ -1082,7 +1149,11 @@ class PerpetualDiaryApp {
           );
           imagePayload.src = `${this.gh.getDataTarget().basePath}/${mediaSubpath}`;
         } else {
-          await this.mediaStore.putImage(mediaSubpath, imagePayload._pendingBuffer, imagePayload._mime);
+          await this.mediaStore.putImage(
+            mediaSubpath,
+            imagePayload._pendingBuffer,
+            imagePayload._mime
+          );
           imagePayload.src = `idb:${mediaSubpath}`;
         }
         delete imagePayload._pendingBuffer;
@@ -1207,7 +1278,7 @@ class PerpetualDiaryApp {
       moodInput.value = '';
       tagsInput.value = '';
       bodyInput.value = '';
-      encryptCb.checked = Boolean(this.state.cryptoKey);
+      encryptCb.checked = this.hasActiveSessionKey();
       deleteBtn.hidden = true;
     }
 
@@ -1325,12 +1396,13 @@ class PerpetualDiaryApp {
     }
 
     if (encryptFlag) {
-      if (!this.state.cryptoKey) {
+      if (!this.hasActiveSessionKey()) {
         this.showToast('Unlock or configure the Vault password before encrypting entries.', 'warn');
         return;
       }
-      title = title ? await encryptText(title, this.state.cryptoKey) : '';
-      body = await encryptText(body, this.state.cryptoKey);
+      const keyCtx = this.state.keyring || this.state.cryptoKey;
+      title = title ? await encryptText(title, keyCtx) : '';
+      body = await encryptText(body, keyCtx);
     }
 
     const caption = document.getElementById('entry-photo-caption').value.trim();
@@ -1553,12 +1625,22 @@ class PerpetualDiaryApp {
           if (!e) continue;
           const bodyText = (await this.decryptFieldIfNeeded(e.body, Boolean(e.encrypted))) || '';
           const titleText = (await this.decryptFieldIfNeeded(e.title, Boolean(e.encrypted))) || '';
-          const hay = `${titleText} ${bodyText} ${(e.tags || []).join(' ')} ${e.mood || ''}`.toLowerCase();
+          const hay =
+            `${titleText} ${bodyText} ${(e.tags || []).join(' ')} ${e.mood || ''}`.toLowerCase();
           if (hay.includes(query)) {
-            matches.push({ dayStr, year: yr, diaryDate: e.diaryDate || `${yr}-${dayStr}`, title: titleText, tags: e.tags || [] });
+            matches.push({
+              dayStr,
+              year: yr,
+              diaryDate: e.diaryDate || `${yr}-${dayStr}`,
+              title: titleText,
+              tags: e.tags || [],
+            });
           }
         }
-      } else if (dayStr.includes(query) || (info.tags || []).some((t) => t.toLowerCase().includes(query))) {
+      } else if (
+        dayStr.includes(query) ||
+        (info.tags || []).some((t) => t.toLowerCase().includes(query))
+      ) {
         for (const yr of dayYears) {
           matches.push({ dayStr, year: yr, diaryDate: `${yr}-${dayStr}`, tags: info.tags || [] });
         }
@@ -1610,12 +1692,20 @@ class PerpetualDiaryApp {
       index: this.state.indexData,
       days,
     };
-    this.downloadFile('perpetual-diary-archive.json', JSON.stringify(payload, null, 2), 'application/json');
+    this.downloadFile(
+      'perpetual-diary-archive.json',
+      JSON.stringify(payload, null, 2),
+      'application/json'
+    );
   }
 
   async exportArchiveMarkdown() {
     const keys = Object.keys(this.state.indexData?.days || {}).sort();
-    const lines = ['# Perpetual Side-by-Side Diary Export', `Generated: ${new Date().toISOString()}`, ''];
+    const lines = [
+      '# Perpetual Side-by-Side Diary Export',
+      `Generated: ${new Date().toISOString()}`,
+      '',
+    ];
 
     for (const k of keys) {
       const doc = await this.getDayDocument(k, false);
@@ -1623,14 +1713,16 @@ class PerpetualDiaryApp {
       const years = Object.keys(doc.entries || {}).sort();
       for (const yr of years) {
         const e = doc.entries[yr];
-        const body = (await this.decryptFieldIfNeeded(e.body, Boolean(e.encrypted))) || '[Encrypted]';
+        const body =
+          (await this.decryptFieldIfNeeded(e.body, Boolean(e.encrypted))) || '[Encrypted]';
         const title = (await this.decryptFieldIfNeeded(e.title, Boolean(e.encrypted))) || '';
         lines.push(`### ${yr}${title ? ` — ${title}` : ''}`, '', body, '');
       }
       if (Array.isArray(doc.comments) && doc.comments.length) {
         lines.push('#### Margin Notes', '');
         for (const c of doc.comments) {
-          const cBody = (await this.decryptFieldIfNeeded(c.body, Boolean(c.encrypted))) || '[Encrypted]';
+          const cBody =
+            (await this.decryptFieldIfNeeded(c.body, Boolean(c.encrypted))) || '[Encrypted]';
           lines.push(`- **${c.author || 'Self'}**: ${cBody}`);
         }
         lines.push('');
@@ -1715,7 +1807,8 @@ class PerpetualDiaryApp {
       patStatus.textContent = `PAT expires: ${String(expiryStr).slice(0, 10)}`;
       if (daysLeft <= 0) {
         expiryWarn.hidden = false;
-        expiryWarn.textContent = 'Fine-Grained PAT has expired. Rotate and update it in GitHub.';
+        expiryWarn.textContent =
+          'Fine-Grained PAT has expired. Rotate and update it in GitHub.';
       } else if (daysLeft <= 14) {
         expiryWarn.hidden = false;
         expiryWarn.textContent = `PAT expires in ${daysLeft} day(s) (${String(expiryStr).slice(0, 10)}). Renew soon to avoid write interruptions.`;
@@ -1726,23 +1819,166 @@ class PerpetualDiaryApp {
   }
 
   openVaultModal() {
+    const vm = this.state.vaultMeta;
+    const hasConfiguredVault = Boolean(vm && (vm.canary || vm.canaryCipher));
+    const isV2 = Number(vm?.version) === 2;
+    const isLegacyV1 = hasConfiguredVault && !isV2;
+    const enabled = Boolean(vm?.enabled);
+
     const statusBanner = document.getElementById('vault-status-banner');
-    const enabled = Boolean(this.state.vaultMeta?.enabled);
     statusBanner.className = `status-callout ${enabled ? 'is-ok' : ''}`;
     statusBanner.textContent = enabled
-      ? `Vault Lock is currently ENABLED (${this.state.cryptoKey ? 'Unlocked in session' : 'Locked'}).`
-      : 'Vault Lock is currently DISABLED. Set a master password to encrypt entries and lock the screen.';
+      ? `Vault Lock is ACTIVE (${this.hasActiveSessionKey() ? 'Unlocked in session' : 'Locked'}) · ${isV2 ? 'v2 Envelope DEK/KEK' : 'v1 Legacy'}`
+      : hasConfiguredVault
+        ? `Vault configured (${isV2 ? 'v2 Envelope' : 'v1 Legacy'}) — Full Lock Screen currently OFF.`
+        : 'No Vault password configured yet. Set a master password to initialize v2 Envelope Encryption.';
+
+    const archPanel = document.getElementById('vault-arch-panel');
+    const slotsList = document.getElementById('vault-slots-list');
+    if (isV2) {
+      archPanel.hidden = false;
+      document.getElementById('vault-version-pill').textContent = 'V2 ENVELOPE · DEK/KEK';
+      document.getElementById('vault-fingerprint-label').textContent =
+        `DEK: ${vm.dekFingerprint || this.state.keyring?.dekFingerprint || 'ACTIVE'}`;
+
+      const slots = Array.isArray(vm.keySlots) ? vm.keySlots : [];
+      slotsList.innerHTML = slots
+        .map((s) => {
+          const rotDate = s.rotatedAt
+            ? new Date(s.rotatedAt).toLocaleDateString(undefined, {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+              })
+            : '—';
+          return `
+            <div class="vault-slot-card">
+              <div>
+                <strong>${escapeHtml(s.label || 'Key Slot')}</strong>
+                <span class="mono-meta"> · ${escapeHtml(s.kdf || 'PBKDF2-SHA256')} (${Number(s.iterations || 250000).toLocaleString()} iter)</span>
+              </div>
+              <span class="mono-meta">Rotated ${escapeHtml(rotDate)}</span>
+            </div>
+          `;
+        })
+        .join('');
+    } else {
+      archPanel.hidden = true;
+      slotsList.innerHTML = '';
+    }
+
+    document.getElementById('vault-upgrade-banner').hidden = !isLegacyV1;
+    document.getElementById('vault-migrate-banner').hidden = !(
+      isV2 &&
+      vm?.wrappedLegacyKey &&
+      this.state.keyring?.dek &&
+      this.state.keyring?.legacyKey
+    );
+    document.getElementById('vault-migrate-status').hidden = true;
 
     document.getElementById('vault-lock-enabled-checkbox').checked = enabled;
-    document.getElementById('vault-current-pass-group').hidden = !enabled;
+    document.getElementById('vault-current-pass-group').hidden = !hasConfiguredVault;
+    document.getElementById('vault-new-pass-label').textContent = hasConfiguredVault
+      ? 'Rotate Master Password (Instant — re-wraps DEK only)'
+      : 'Set Master Password (initializes v2 Envelope Vault)';
+    document.getElementById('vault-save-btn').textContent = hasConfiguredVault
+      ? 'Save / Rotate Vault'
+      : 'Initialize v2 Vault';
+
     document.getElementById('vault-current-password').value = '';
     document.getElementById('vault-new-password').value = '';
     document.getElementById('vault-confirm-password').value = '';
-    document.getElementById('vault-encrypt-pat-checkbox').checked = Boolean(
-      this.state.vaultMeta?.encryptedPat
-    );
+    document.getElementById('vault-encrypt-pat-checkbox').checked = Boolean(vm?.encryptedPat);
     document.getElementById('vault-error').hidden = true;
     document.getElementById('vault-modal').hidden = false;
+  }
+
+  async handleMigrateLegacyEntriesToV2() {
+    if (!this.state.keyring?.dek || !this.state.keyring?.legacyKey) {
+      this.showToast('Unlock your upgraded v2 vault first to migrate legacy entries.', 'warn');
+      return;
+    }
+
+    const statusEl = document.getElementById('vault-migrate-status');
+    const btn = document.getElementById('vault-migrate-entries-btn');
+    btn.disabled = true;
+    statusEl.hidden = false;
+
+    try {
+      const dayKeys = Object.keys(this.state.indexData?.days || {}).sort();
+      let migratedDays = 0;
+      let migratedItems = 0;
+
+      for (let i = 0; i < dayKeys.length; i += 1) {
+        const dayStr = dayKeys[i];
+        statusEl.textContent = `Scanning ${i + 1}/${dayKeys.length} (${dayStr})...`;
+        const doc = await this.getDayDocument(dayStr, true);
+        let dirty = false;
+
+        for (const [yrKey, entry] of Object.entries(doc.entries || {})) {
+          if (!entry) continue;
+          if (getPayloadVersion(entry.body) === 1 || getPayloadVersion(entry.title) === 1) {
+            const plainBody = await decryptText(entry.body, this.state.keyring);
+            const plainTitle = entry.title
+              ? await decryptText(entry.title, this.state.keyring)
+              : '';
+            doc.entries[yrKey] = {
+              ...entry,
+              body: await encryptText(plainBody, this.state.keyring.dek),
+              title: plainTitle ? await encryptText(plainTitle, this.state.keyring.dek) : '',
+              encrypted: true,
+              updatedAt: new Date().toISOString(),
+            };
+            dirty = true;
+            migratedItems += 1;
+          }
+        }
+
+        if (Array.isArray(doc.comments)) {
+          for (let cIdx = 0; cIdx < doc.comments.length; cIdx += 1) {
+            const cmt = doc.comments[cIdx];
+            if (cmt && getPayloadVersion(cmt.body) === 1) {
+              const plainCmt = await decryptText(cmt.body, this.state.keyring);
+              doc.comments[cIdx] = {
+                ...cmt,
+                body: await encryptText(plainCmt, this.state.keyring.dek),
+                encrypted: true,
+                updatedAt: new Date().toISOString(),
+              };
+              dirty = true;
+              migratedItems += 1;
+            }
+          }
+        }
+
+        if (dirty) {
+          await this.persistDayDocument(dayStr, doc, `diary: migrate ${dayStr} to v2 DEK`);
+          migratedDays += 1;
+        }
+      }
+
+      // Retire the legacy key bridge from vault.json once migration completes
+      const cleanedVault = {
+        ...this.state.vaultMeta,
+        wrappedLegacyKey: null,
+        updatedAt: new Date().toISOString(),
+      };
+      await this.persistVaultMeta(cleanedVault, 'diary: retire v1 legacy key bridge');
+      this.setActiveKeyring({
+        ...this.state.keyring,
+        legacyKey: null,
+      });
+
+      statusEl.textContent = `Migrated ${migratedItems} item(s) across ${migratedDays} day(s). Legacy bridge retired.`;
+      this.showToast(`Migrated ${migratedItems} legacy item(s) to v2 DEK.`, 'success');
+      this.openVaultModal();
+      await this.renderActiveView();
+    } catch (err) {
+      statusEl.textContent = `Migration interrupted: ${err.message}`;
+      this.showToast(err.message || 'Migration failed.', 'error');
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   bindEvents() {
@@ -1828,9 +2064,22 @@ class PerpetualDiaryApp {
 
     document.querySelectorAll('#col-width-group .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('#col-width-group .seg-btn').forEach((b) => b.classList.remove('is-active'));
+        document
+          .querySelectorAll('#col-width-group .seg-btn')
+          .forEach((b) => b.classList.remove('is-active'));
         btn.classList.add('is-active');
         this.state.colMode = btn.dataset.colMode;
+        this.renderReader();
+      });
+    });
+
+    document.querySelectorAll('#mobile-view-toggle .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        document
+          .querySelectorAll('#mobile-view-toggle .seg-btn')
+          .forEach((b) => b.classList.remove('is-active'));
+        btn.classList.add('is-active');
+        this.state.mobileMode = btn.dataset.mobileMode;
         this.renderReader();
       });
     });
@@ -1950,9 +2199,15 @@ class PerpetualDiaryApp {
     });
 
     // Composer Modal Events
-    document.getElementById('open-composer-btn')?.addEventListener('click', () => this.openComposer());
-    document.getElementById('composer-close-btn')?.addEventListener('click', () => this.closeComposer());
-    document.getElementById('entry-cancel-btn')?.addEventListener('click', () => this.closeComposer());
+    document
+      .getElementById('open-composer-btn')
+      ?.addEventListener('click', () => this.openComposer());
+    document
+      .getElementById('composer-close-btn')
+      ?.addEventListener('click', () => this.closeComposer());
+    document
+      .getElementById('entry-cancel-btn')
+      ?.addEventListener('click', () => this.closeComposer());
     document.getElementById('entry-form')?.addEventListener('submit', (e) => this.handleEntrySave(e));
 
     document.getElementById('entry-delete-btn')?.addEventListener('click', async () => {
@@ -2001,7 +2256,9 @@ class PerpetualDiaryApp {
 
     document.querySelectorAll('#editor-mode-group .seg-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
-        document.querySelectorAll('#editor-mode-group .seg-btn').forEach((b) => b.classList.remove('is-active'));
+        document
+          .querySelectorAll('#editor-mode-group .seg-btn')
+          .forEach((b) => b.classList.remove('is-active'));
         btn.classList.add('is-active');
         const mode = btn.dataset.editorMode;
         this.state.editorMode = mode;
@@ -2046,8 +2303,12 @@ class PerpetualDiaryApp {
     });
 
     // GitHub Settings & Split-Repo Events
-    document.getElementById('github-settings-btn')?.addEventListener('click', () => this.openGitHubModal());
-    document.getElementById('lock-open-settings-btn')?.addEventListener('click', () => this.openGitHubModal());
+    document
+      .getElementById('github-settings-btn')
+      ?.addEventListener('click', () => this.openGitHubModal());
+    document
+      .getElementById('lock-open-settings-btn')
+      ?.addEventListener('click', () => this.openGitHubModal());
     document.getElementById('github-close-btn')?.addEventListener('click', () => {
       document.getElementById('github-modal').hidden = true;
     });
@@ -2063,7 +2324,8 @@ class PerpetualDiaryApp {
       dataPath: document.getElementById('gh-datapath-input').value.trim() || 'data',
       usePrivateVault: Boolean(document.getElementById('gh-use-private-vault').checked),
       vaultOwner: document.getElementById('gh-vault-owner-input').value.trim(),
-      vaultRepo: document.getElementById('gh-vault-repo-input').value.trim() || 'perpetual-diary-vault',
+      vaultRepo:
+        document.getElementById('gh-vault-repo-input').value.trim() || 'perpetual-diary-vault',
       vaultBranch: document.getElementById('gh-vault-branch-input').value.trim() || 'main',
       vaultPath: document.getElementById('gh-vault-path-input').value.trim() || 'data',
       token: document.getElementById('gh-token-input').value.trim(),
@@ -2111,13 +2373,46 @@ class PerpetualDiaryApp {
       this.showToast('GitHub & Split-Repo settings saved.', 'success');
     });
 
-    // Vault Lock & Password Events
+    // Envelope Vault, Instant Rotation & Legacy Migration Events
     document.getElementById('vault-btn')?.addEventListener('click', () => this.openVaultModal());
     document.getElementById('vault-close-btn')?.addEventListener('click', () => {
       document.getElementById('vault-modal').hidden = true;
     });
     document.getElementById('vault-cancel-btn')?.addEventListener('click', () => {
       document.getElementById('vault-modal').hidden = true;
+    });
+
+    document.getElementById('vault-upgrade-btn')?.addEventListener('click', async () => {
+      const errBox = document.getElementById('vault-error');
+      errBox.hidden = true;
+      const currentPass = document.getElementById('vault-current-password').value;
+      if (!currentPass) {
+        errBox.textContent = 'Enter your Current Master Password below to upgrade to v2 Envelope.';
+        errBox.hidden = false;
+        return;
+      }
+      try {
+        const encryptPat = Boolean(document.getElementById('vault-encrypt-pat-checkbox').checked);
+        const res = await upgradeLegacyVaultToEnvelope(this.state.vaultMeta, currentPass, {
+          enabled: Boolean(document.getElementById('vault-lock-enabled-checkbox').checked),
+          encryptPat,
+          patToken: this.gh.hasToken() ? this.gh.config.token : null,
+        });
+        this.setActiveKeyring(res.keyring);
+        await this.persistVaultMeta(res.vaultMeta, 'diary: upgrade vault to v2 envelope');
+        this.showToast(
+          'Upgraded to v2 Envelope Encryption. Password rotations are now instant.',
+          'success'
+        );
+        this.openVaultModal();
+      } catch (err) {
+        errBox.textContent = err.message;
+        errBox.hidden = false;
+      }
+    });
+
+    document.getElementById('vault-migrate-entries-btn')?.addEventListener('click', async () => {
+      await this.handleMigrateLegacyEntriesToV2();
     });
 
     document.getElementById('vault-form')?.addEventListener('submit', async (e) => {
@@ -2131,43 +2426,63 @@ class PerpetualDiaryApp {
       const confirmPass = document.getElementById('vault-confirm-password').value;
       const encryptPat = Boolean(document.getElementById('vault-encrypt-pat-checkbox').checked);
 
+      const hasExistingVault = Boolean(
+        this.state.vaultMeta && (this.state.vaultMeta.canary || this.state.vaultMeta.canaryCipher)
+      );
+
       try {
-        if (this.state.vaultMeta?.canary && currentPass) {
-          const valid = await verifyVaultCanary(currentPass, this.state.vaultMeta);
-          if (!valid) throw new Error('Current master password is incorrect.');
-        }
-
-        let nextVault = {
-          ...(this.state.vaultMeta || {}),
-          enabled: lockEnabled,
-        };
-
-        if (newPass) {
+        if (!hasExistingVault) {
+          if (!newPass) {
+            throw new Error('Please enter a master password to initialize your vault.');
+          }
+          if (newPass !== confirmPass) {
+            throw new Error('Master password and confirmation do not match.');
+          }
+          const created = await createEnvelopeVault(newPass, {
+            enabled: lockEnabled,
+            patToken: encryptPat && this.gh.hasToken() ? this.gh.config.token : null,
+          });
+          this.setActiveKeyring(created.keyring);
+          await this.persistVaultMeta(created.vaultMeta, 'diary: initialize v2 envelope vault');
+          this.showToast('v2 Envelope Vault initialized.', 'success');
+        } else if (newPass) {
+          if (!currentPass) {
+            throw new Error('Enter your Current Master Password to rotate to a new password.');
+          }
           if (newPass !== confirmPass) {
             throw new Error('New password and confirmation do not match.');
           }
-          const canary = await createVaultCanary(newPass);
-          const derived = await deriveKey(newPass, canary.salt);
-          this.state.cryptoKey = derived;
-          nextVault = {
-            ...nextVault,
+          const rotated = await rotateVaultPassword(this.state.vaultMeta, currentPass, newPass, {
             enabled: lockEnabled,
-            salt: canary.salt,
-            iterations: canary.iterations,
-            canary: canary.canary,
+            encryptPat,
+            patToken: encryptPat && this.gh.hasToken() ? this.gh.config.token : null,
+          });
+          this.setActiveKeyring(rotated.keyring);
+          await this.persistVaultMeta(rotated.vaultMeta, 'diary: rotate master password key slot');
+          this.showToast(
+            'Password rotated instantly — DEK unchanged, 0 diary entries re-encrypted.',
+            'success'
+          );
+        } else {
+          // Only toggling Lock Screen or Encrypted PAT without changing password
+          const nextVault = {
+            ...this.state.vaultMeta,
+            enabled: lockEnabled,
+            updatedAt: new Date().toISOString(),
           };
           if (encryptPat && this.gh.hasToken()) {
-            nextVault.encryptedPat = await encryptPatToken(this.gh.config.token, derived);
-          } else {
-            delete nextVault.encryptedPat;
+            if (!this.hasActiveSessionKey()) {
+              throw new Error('Unlock your vault first to encrypt your GitHub PAT.');
+            }
+            nextVault.encryptedPat = await encryptPatToken(
+              this.gh.config.token,
+              this.state.keyring || this.state.cryptoKey
+            );
+          } else if (!encryptPat) {
+            nextVault.encryptedPat = null;
           }
-        }
-
-        this.state.vaultMeta = nextVault;
-        window.localStorage.setItem('perpetual_diary_vault_local_v1', JSON.stringify(nextVault));
-
-        if (this.gh.hasToken()) {
-          await this.gh.putJson('vault.json', nextVault, 'diary: update vault configuration');
+          await this.persistVaultMeta(nextVault, 'diary: update vault preferences');
+          this.showToast('Vault preferences updated.', 'success');
         }
 
         this.state.unlocked = true;
@@ -2175,7 +2490,6 @@ class PerpetualDiaryApp {
         document.getElementById('vault-modal').hidden = true;
         this.updateModeBadge();
         await this.renderActiveView();
-        this.showToast('Vault configuration saved.', 'success');
       } catch (err) {
         errBox.textContent = err.message;
         errBox.hidden = false;
@@ -2183,21 +2497,19 @@ class PerpetualDiaryApp {
     });
 
     document.getElementById('vault-disable-btn')?.addEventListener('click', async () => {
-      this.state.vaultMeta = { ...(this.state.vaultMeta || {}), enabled: false };
-      this.state.cryptoKey = null;
+      const nextVault = {
+        ...(this.state.vaultMeta || {}),
+        enabled: false,
+        updatedAt: new Date().toISOString(),
+      };
+      this.setActiveKeyring(null);
       this.state.unlocked = true;
-      window.localStorage.setItem(
-        'perpetual_diary_vault_local_v1',
-        JSON.stringify(this.state.vaultMeta)
-      );
-      if (this.gh.hasToken()) {
-        await this.gh.putJson('vault.json', this.state.vaultMeta, 'diary: disable vault lock').catch(() => {});
-      }
+      await this.persistVaultMeta(nextVault, 'diary: disable vault lock').catch(() => {});
       document.getElementById('lock-screen').hidden = true;
       document.getElementById('vault-modal').hidden = true;
       this.updateModeBadge();
       await this.renderActiveView();
-      this.showToast('Vault lock disabled.', 'info');
+      this.showToast('Vault lock screen disabled.', 'info');
     });
 
     document.getElementById('lock-form')?.addEventListener('submit', async (e) => {
@@ -2207,25 +2519,18 @@ class PerpetualDiaryApp {
       errEl.hidden = true;
 
       try {
-        const valid = await verifyVaultCanary(passInput.value, this.state.vaultMeta);
-        if (!valid) {
-          errEl.textContent = 'Incorrect password';
+        const res = await unlockVault(passInput.value, this.state.vaultMeta);
+        if (!res.ok) {
+          errEl.textContent = res.error || 'Incorrect password';
           errEl.hidden = false;
           return;
         }
-        const key = await deriveKey(passInput.value, this.state.vaultMeta.salt);
-        this.state.cryptoKey = key;
 
-        if (this.state.vaultMeta.encryptedPat && !this.gh.hasToken()) {
-          try {
-            const pat = await decryptPatToken(this.state.vaultMeta.encryptedPat, key);
-            if (pat) {
-              this.gh.updateConfig({ token: pat });
-              GitHubClient.saveConfig(this.gh.config, window.localStorage);
-            }
-          } catch {
-            // ignore PAT unwrap failure
-          }
+        this.setActiveKeyring(res.keyring);
+
+        if (res.pat && !this.gh.hasToken()) {
+          this.gh.updateConfig({ token: res.pat });
+          GitHubClient.saveConfig(this.gh.config, window.localStorage);
         }
 
         passInput.value = '';
@@ -2233,7 +2538,10 @@ class PerpetualDiaryApp {
         document.getElementById('lock-screen').hidden = true;
         this.updateModeBadge();
         await this.renderActiveView();
-        this.showToast('Diary unlocked.', 'success');
+        this.showToast(
+          res.version === 2 ? 'Envelope Vault unlocked.' : 'Legacy v1 Vault unlocked.',
+          'success'
+        );
       } catch {
         errEl.textContent = 'Incorrect password';
         errEl.hidden = false;
@@ -2241,7 +2549,7 @@ class PerpetualDiaryApp {
     });
 
     document.getElementById('lock-now-btn')?.addEventListener('click', () => {
-      this.state.cryptoKey = null;
+      this.setActiveKeyring(null);
       this.state.unlocked = false;
       document.getElementById('lock-screen').hidden = false;
       document.getElementById('lock-password-input')?.focus();
@@ -2272,9 +2580,15 @@ class PerpetualDiaryApp {
     });
 
     // Confirm Modal Events
-    document.getElementById('confirm-close-btn')?.addEventListener('click', () => this.closeConfirm(false));
-    document.getElementById('confirm-cancel-btn')?.addEventListener('click', () => this.closeConfirm(false));
-    document.getElementById('confirm-ok-btn')?.addEventListener('click', () => this.closeConfirm(true));
+    document
+      .getElementById('confirm-close-btn')
+      ?.addEventListener('click', () => this.closeConfirm(false));
+    document
+      .getElementById('confirm-cancel-btn')
+      ?.addEventListener('click', () => this.closeConfirm(false));
+    document
+      .getElementById('confirm-ok-btn')
+      ?.addEventListener('click', () => this.closeConfirm(true));
 
     // Global Hotkeys
     document.addEventListener('keydown', (e) => {
