@@ -1,12 +1,39 @@
-// js/crypto.js — Client-Side Envelope Cryptography (DEK/KEK + v3 AAD + Paper Recovery Key Slots)
-// Supports v3 (DEK + AAD), v2 (DEK), v1 (Legacy PBKDF2), and 256-bit Paper Recovery Key slots.
+/**
+ * js/crypto.js — Client-Side Envelope Cryptography & Binary Media (.enc) Vault
+ * Phase 6A:
+ * - Supports v3 AAD Text, v2 DEK Envelope, v1 Legacy PBKDF2, and 256-bit Paper Recovery Keys
+ * - Adds binary media encryption (.enc) with encrypted MIME header + AES-256-GCM AAD binding
+ * - Keeps backward-compatible helper exports so existing modules remain unbroken
+ */
 
 export const VAULT_CANARY_PLAINTEXT = 'PERPETUAL_VAULT_OK';
 export const DEFAULT_PBKDF2_ITERATIONS = 250000;
+export const DEFAULT_ITERATIONS = DEFAULT_PBKDF2_ITERATIONS;
+export const CIPHER_PREFIX = 'ENC:AES256GCM:v1:';
 
 const V3_PREFIX = 'ENC:AES256GCM:v3:';
 const V2_PREFIX = 'ENC:AES256GCM:v2:';
 const V1_PREFIX = 'ENC:AES256GCM:v1:';
+
+// Binary media envelope header: [4B "PENC"][1B ver=1][1B flags][12B IV][AES-GCM ciphertext]
+const PENC_MAGIC = new Uint8Array([0x50, 0x45, 0x4e, 0x43]); // "PENC"
+const PENC_VERSION = 1;
+const PENC_FLAG_AAD = 0x01;
+const PENC_HEADER_LEN = 18;
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+/**
+ * Verifies SubtleCrypto availability (requires HTTPS or localhost).
+ */
+function assertCryptoAvailable() {
+  if (typeof window === 'undefined' || !window.crypto || !window.crypto.subtle) {
+    throw new Error(
+      'Web Crypto API (crypto.subtle) is unavailable. Serve this site over HTTPS or localhost.'
+    );
+  }
+}
 
 export function bytesToBase64(bytes) {
   const arr = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
@@ -54,6 +81,8 @@ export function randomBytes(length) {
   return buf;
 }
 
+export const generateRandomBytes = randomBytes;
+
 export function normalizeRecoveryCode(code) {
   return String(code ?? '')
     .replace(/[^0-9a-fA-F]/g, '')
@@ -92,6 +121,17 @@ export function getPayloadVersion(value) {
   return 0;
 }
 
+/**
+ * Checks whether a media path points to an encrypted .enc binary vault blob.
+ * @param {unknown} src
+ * @returns {boolean}
+ */
+export function isEncryptedMediaPath(src) {
+  if (typeof src !== 'string') return false;
+  const clean = src.split('?')[0].split('#')[0].toLowerCase();
+  return clean.endsWith('.enc');
+}
+
 export function buildEntryAad(diaryDate, year, field = 'body') {
   return `perpetual:v3:entry:${String(diaryDate || '').trim()}:${String(year || '').trim()}:${String(
     field || 'body'
@@ -104,28 +144,48 @@ export function buildCommentAad(dayStr, commentId, field = 'body') {
   ).trim()}`;
 }
 
+/**
+ * Builds canonical AES-GCM AAD binding a binary .enc media blob to its exact path.
+ * @param {string} mediaSubpath
+ * @returns {string}
+ */
+export function buildMediaAad(mediaSubpath) {
+  const normalized = String(mediaSubpath || '')
+    .replace(/^(idb:\/\/|idb:|ram:)/i, '')
+    .replace(/^\/+/, '')
+    .replace(/^data\//i, '');
+  return `perpetual:v3:media:${normalized}`;
+}
+
 function resolvePrimaryKey(keyOrKeyring) {
   if (!keyOrKeyring) return null;
   if (keyOrKeyring instanceof CryptoKey) return keyOrKeyring;
   return keyOrKeyring.dek || keyOrKeyring.legacyKey || null;
 }
 
+function getCandidateKeys(keyOrKeyring) {
+  if (!keyOrKeyring) return [];
+  if (keyOrKeyring instanceof CryptoKey) return [keyOrKeyring];
+  return [keyOrKeyring.dek, keyOrKeyring.legacyKey].filter(Boolean);
+}
+
 export async function deriveKey(
   password,
-  saltB64,
+  saltInput,
   iterations = DEFAULT_PBKDF2_ITERATIONS,
   extractable = false
 ) {
-  const enc = new TextEncoder();
+  assertCryptoAvailable();
   const baseKey = await window.crypto.subtle.importKey(
     'raw',
-    enc.encode(String(password ?? '')),
+    textEncoder.encode(String(password ?? '')),
     { name: 'PBKDF2' },
     false,
     ['deriveKey']
   );
 
-  const salt = typeof saltB64 === 'string' ? base64ToBytes(saltB64) : new Uint8Array(saltB64);
+  const salt =
+    typeof saltInput === 'string' ? base64ToBytes(saltInput) : new Uint8Array(saltInput);
 
   return window.crypto.subtle.deriveKey(
     {
@@ -142,6 +202,7 @@ export async function deriveKey(
 }
 
 export async function importRecoveryKek(recoveryCode) {
+  assertCryptoAvailable();
   const cleanHex = normalizeRecoveryCode(recoveryCode);
   if (!/^[0-9A-F]{64}$/.test(cleanHex)) {
     throw new Error('Recovery key must contain 64 hexadecimal characters.');
@@ -157,6 +218,7 @@ export async function importRecoveryKek(recoveryCode) {
 }
 
 export async function generateDEK() {
+  assertCryptoAvailable();
   return window.crypto.subtle.generateKey(
     { name: 'AES-GCM', length: 256 },
     true,
@@ -172,12 +234,10 @@ export async function computeKeyFingerprint(cryptoKey) {
 
 export async function wrapKeyWithKEK(targetKey, kek) {
   const iv = randomBytes(12);
-  const wrapped = await window.crypto.subtle.wrapKey(
-    'raw',
-    targetKey,
-    kek,
-    { name: 'AES-GCM', iv }
-  );
+  const wrapped = await window.crypto.subtle.wrapKey('raw', targetKey, kek, {
+    name: 'AES-GCM',
+    iv,
+  });
   return {
     iv: bytesToBase64(iv),
     wrappedKey: bytesToBase64(new Uint8Array(wrapped)),
@@ -198,34 +258,49 @@ export async function unwrapKeyWithKEK(wrappedB64, ivB64, kek, extractable = tru
   );
 }
 
-export async function encryptText(plaintext, keyOrKeyring, aad = '') {
-  const key = resolvePrimaryKey(keyOrKeyring);
+/**
+ * Encrypts UTF-8 text.
+ * Supports Envelope DEK/Keyring (+ optional AAD for v3) as well as legacy raw password strings.
+ */
+export async function encryptText(plaintext, keyOrKeyringOrPassword, aadOrIterations = '') {
+  assertCryptoAvailable();
+
+  // Backward-compatible legacy call signature: encryptText(plain, "password", iterations)
+  if (typeof keyOrKeyringOrPassword === 'string') {
+    const salt = randomBytes(16);
+    const iv = randomBytes(12);
+    const iterations =
+      typeof aadOrIterations === 'number' ? aadOrIterations : DEFAULT_PBKDF2_ITERATIONS;
+    const derived = await deriveKey(keyOrKeyringOrPassword, salt, iterations, false);
+    const cipherBuf = await window.crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv },
+      derived,
+      textEncoder.encode(String(plaintext ?? ''))
+    );
+    return `${V1_PREFIX}${bytesToBase64(salt)}:${bytesToBase64(iv)}:${bytesToBase64(
+      new Uint8Array(cipherBuf)
+    )}`;
+  }
+
+  const key = resolvePrimaryKey(keyOrKeyringOrPassword);
   if (!key) {
     throw new Error('No encryption key available in session.');
   }
+
   const iv = randomBytes(12);
-  const enc = new TextEncoder();
-  const data = enc.encode(String(plaintext ?? ''));
-  const aadStr = String(aad || '').trim();
+  const data = textEncoder.encode(String(plaintext ?? ''));
+  const aadStr = typeof aadOrIterations === 'string' ? aadOrIterations.trim() : '';
 
   if (aadStr) {
     const cipherBuffer = await window.crypto.subtle.encrypt(
-      {
-        name: 'AES-GCM',
-        iv,
-        additionalData: enc.encode(aadStr),
-      },
+      { name: 'AES-GCM', iv, additionalData: textEncoder.encode(aadStr) },
       key,
       data
     );
     return `${V3_PREFIX}${bytesToBase64(iv)}:${bytesToBase64(new Uint8Array(cipherBuffer))}`;
   }
 
-  const cipherBuffer = await window.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    data
-  );
+  const cipherBuffer = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, data);
   return `${V2_PREFIX}${bytesToBase64(iv)}:${bytesToBase64(new Uint8Array(cipherBuffer))}`;
 }
 
@@ -233,37 +308,52 @@ async function decryptAesGcmRaw(ivB64, cipherB64, key, aadStr = '') {
   const iv = base64ToBytes(ivB64);
   const cipherBytes = base64ToBytes(cipherB64);
   const algo = aadStr
-    ? { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(aadStr) }
+    ? { name: 'AES-GCM', iv, additionalData: textEncoder.encode(aadStr) }
     : { name: 'AES-GCM', iv };
 
   const plainBuf = await window.crypto.subtle.decrypt(algo, key, cipherBytes);
-  return new TextDecoder().decode(plainBuf);
+  return textDecoder.decode(plainBuf);
 }
 
-export async function decryptText(payload, keyOrKeyring, aad = '') {
+/**
+ * Decrypts v3 (AAD), v2 (DEK), or v1 (Legacy PBKDF2) text payloads.
+ */
+export async function decryptText(payload, keyOrKeyringOrPassword, aadOrIterations = '') {
   if (typeof payload !== 'string' || !isEncryptedPayload(payload)) {
     return String(payload ?? '');
   }
+  assertCryptoAvailable();
 
+  const isLegacyStringPass = typeof keyOrKeyringOrPassword === 'string';
   const dek =
-    keyOrKeyring instanceof CryptoKey ? keyOrKeyring : keyOrKeyring?.dek || null;
+    !isLegacyStringPass && keyOrKeyringOrPassword instanceof CryptoKey
+      ? keyOrKeyringOrPassword
+      : !isLegacyStringPass
+        ? keyOrKeyringOrPassword?.dek || null
+        : null;
   const legacyKey =
-    keyOrKeyring instanceof CryptoKey ? keyOrKeyring : keyOrKeyring?.legacyKey || null;
-  const sessionPassword =
-    keyOrKeyring && !(keyOrKeyring instanceof CryptoKey) ? keyOrKeyring.password || null : null;
+    !isLegacyStringPass && keyOrKeyringOrPassword instanceof CryptoKey
+      ? keyOrKeyringOrPassword
+      : !isLegacyStringPass
+        ? keyOrKeyringOrPassword?.legacyKey || null
+        : null;
+  const sessionPassword = isLegacyStringPass
+    ? keyOrKeyringOrPassword
+    : keyOrKeyringOrPassword?.password || null;
 
   const parts = payload.split(':');
-  const aadStr = String(aad || '').trim();
+  const aadStr = typeof aadOrIterations === 'string' ? aadOrIterations.trim() : '';
+  const fallbackIterations =
+    typeof aadOrIterations === 'number' ? aadOrIterations : DEFAULT_PBKDF2_ITERATIONS;
 
-  // v3 format (AAD Tamper-Bound): ENC:AES256GCM:v3:<ivB64>:<cipherB64>
+  // v3 AAD format
   if (payload.startsWith(V3_PREFIX) && parts.length === 5) {
     const [, , , ivB64, cipherB64] = parts;
-    const candidates = [dek, legacyKey].filter(Boolean);
-    for (const key of candidates) {
+    for (const key of [dek, legacyKey].filter(Boolean)) {
       try {
         return await decryptAesGcmRaw(ivB64, cipherB64, key, aadStr);
       } catch {
-        // try next candidate
+        // try next key candidate
       }
     }
     const tamperErr = new Error(
@@ -274,15 +364,14 @@ export async function decryptText(payload, keyOrKeyring, aad = '') {
     throw tamperErr;
   }
 
-  // v2 format (Envelope DEK without AAD): ENC:AES256GCM:v2:<ivB64>:<cipherB64>
+  // v2 Envelope format
   if (payload.startsWith(V2_PREFIX) && parts.length === 5) {
     const [, , , ivB64, cipherB64] = parts;
-    const candidates = [dek, legacyKey].filter(Boolean);
-    for (const key of candidates) {
+    for (const key of [dek, legacyKey].filter(Boolean)) {
       try {
         return await decryptAesGcmRaw(ivB64, cipherB64, key);
       } catch {
-        // try next key candidate
+        // try next candidate
       }
     }
     const err = new Error('Unable to decrypt v2 ciphertext with active session key.');
@@ -290,28 +379,27 @@ export async function decryptText(payload, keyOrKeyring, aad = '') {
     throw err;
   }
 
-  // v1 format (Legacy): ENC:AES256GCM:v1:<saltB64>:<ivB64>:<cipherB64>
+  // v1 Legacy format
   if (payload.startsWith(V1_PREFIX)) {
     const hasEmbeddedSalt = parts.length === 6;
     const saltB64 = hasEmbeddedSalt ? parts[3] : null;
     const ivB64 = hasEmbeddedSalt ? parts[4] : parts[3];
     const cipherB64 = hasEmbeddedSalt ? parts[5] : parts[4];
 
-    const candidates = [legacyKey, dek].filter(Boolean);
-    for (const key of candidates) {
+    for (const key of [legacyKey, dek].filter(Boolean)) {
       try {
         return await decryptAesGcmRaw(ivB64, cipherB64, key);
       } catch {
-        // try next key candidate
+        // try next candidate
       }
     }
 
     if (hasEmbeddedSalt && saltB64 && sessionPassword) {
       try {
-        const derived = await deriveKey(sessionPassword, saltB64, DEFAULT_PBKDF2_ITERATIONS, false);
+        const derived = await deriveKey(sessionPassword, saltB64, fallbackIterations, false);
         return await decryptAesGcmRaw(ivB64, cipherB64, derived);
       } catch {
-        // fall through to error
+        // fall through
       }
     }
 
@@ -321,6 +409,154 @@ export async function decryptText(payload, keyOrKeyring, aad = '') {
   }
 
   throw new Error('Unsupported ciphertext envelope format.');
+}
+
+/**
+ * Encrypts raw binary media (images/audio) into an opaque .enc PENC v1 blob
+ * containing an encrypted MIME header + optional AES-256-GCM AAD path binding.
+ * @param {ArrayBuffer | Uint8Array} rawBufferOrBytes
+ * @param {CryptoKey | Object} keyOrKeyring
+ * @param {{ mime?: string, aad?: string }} [options]
+ * @returns {Promise<Uint8Array>}
+ */
+export async function encryptBinary(
+  rawBufferOrBytes,
+  keyOrKeyring,
+  { mime = 'image/webp', aad = '' } = {}
+) {
+  assertCryptoAvailable();
+  const key = resolvePrimaryKey(keyOrKeyring);
+  if (!key) {
+    throw new Error('Unlock your Vault before encrypting media files.');
+  }
+
+  const rawBytes =
+    rawBufferOrBytes instanceof Uint8Array
+      ? rawBufferOrBytes
+      : new Uint8Array(rawBufferOrBytes);
+
+  const metaJsonBytes = textEncoder.encode(
+    JSON.stringify({ mime: String(mime || 'application/octet-stream') })
+  );
+  if (metaJsonBytes.length > 65535) {
+    throw new Error('Media metadata header exceeds size limit.');
+  }
+
+  // Inner plaintext: [2B big-endian metaLen][metaJsonBytes][rawBytes]
+  const innerPlain = new Uint8Array(2 + metaJsonBytes.length + rawBytes.length);
+  innerPlain[0] = (metaJsonBytes.length >> 8) & 0xff;
+  innerPlain[1] = metaJsonBytes.length & 0xff;
+  innerPlain.set(metaJsonBytes, 2);
+  innerPlain.set(rawBytes, 2 + metaJsonBytes.length);
+
+  const iv = randomBytes(12);
+  const aadStr = String(aad || '').trim();
+  const flags = aadStr ? PENC_FLAG_AAD : 0x00;
+
+  const algo = aadStr
+    ? { name: 'AES-GCM', iv, additionalData: textEncoder.encode(aadStr) }
+    : { name: 'AES-GCM', iv };
+
+  const cipherBuf = await window.crypto.subtle.encrypt(algo, key, innerPlain);
+  const cipherBytes = new Uint8Array(cipherBuf);
+
+  const out = new Uint8Array(PENC_HEADER_LEN + cipherBytes.length);
+  out.set(PENC_MAGIC, 0);
+  out[4] = PENC_VERSION;
+  out[5] = flags;
+  out.set(iv, 6);
+  out.set(cipherBytes, PENC_HEADER_LEN);
+  return out;
+}
+
+/**
+ * Decrypts a PENC v1 .enc binary blob back into { bytes, mime, aadBound }.
+ * Rejects tampered or path-transplanted files when AAD is enabled.
+ * @param {ArrayBuffer | Uint8Array} encryptedBufferOrBytes
+ * @param {CryptoKey | Object} keyOrKeyring
+ * @param {{ aad?: string }} [options]
+ * @returns {Promise<{ bytes: Uint8Array, mime: string, aadBound: boolean }>}
+ */
+export async function decryptBinary(encryptedBufferOrBytes, keyOrKeyring, { aad = '' } = {}) {
+  assertCryptoAvailable();
+  const candidates = getCandidateKeys(keyOrKeyring);
+  if (candidates.length === 0) {
+    const lockErr = new Error('Vault is locked. Unlock to decrypt this photo.');
+    lockErr.code = 'VAULT_LOCKED';
+    throw lockErr;
+  }
+
+  const data =
+    encryptedBufferOrBytes instanceof Uint8Array
+      ? encryptedBufferOrBytes
+      : new Uint8Array(encryptedBufferOrBytes);
+
+  if (data.length <= PENC_HEADER_LEN + 16) {
+    throw new Error('Encrypted media blob is truncated or malformed.');
+  }
+
+  for (let i = 0; i < 4; i += 1) {
+    if (data[i] !== PENC_MAGIC[i]) {
+      throw new Error('Unrecognized encrypted media header.');
+    }
+  }
+
+  const version = data[4];
+  if (version !== PENC_VERSION) {
+    throw new Error(`Unsupported encrypted media version: ${version}`);
+  }
+
+  const flags = data[5];
+  const aadBound = Boolean(flags & PENC_FLAG_AAD);
+  const iv = data.subarray(6, 18);
+  const cipherBytes = data.subarray(PENC_HEADER_LEN);
+  const aadStr = String(aad || '').trim();
+
+  const algo =
+    aadBound && aadStr
+      ? { name: 'AES-GCM', iv, additionalData: textEncoder.encode(aadStr) }
+      : { name: 'AES-GCM', iv };
+
+  let plainBuf = null;
+  for (const key of candidates) {
+    try {
+      plainBuf = await window.crypto.subtle.decrypt(algo, key, cipherBytes);
+      break;
+    } catch {
+      // try next key candidate
+    }
+  }
+
+  if (!plainBuf) {
+    const err = new Error(
+      aadBound
+        ? 'Encrypted photo failed AAD integrity verification or key mismatch.'
+        : 'Unable to decrypt photo with active session key.'
+    );
+    err.code = aadBound ? 'AAD_TAMPER_ERROR' : 'DECRYPT_FAILED';
+    throw err;
+  }
+
+  const plainBytes = new Uint8Array(plainBuf);
+  if (plainBytes.length < 2) {
+    throw new Error('Decrypted media payload is corrupted.');
+  }
+  const metaLen = (plainBytes[0] << 8) | plainBytes[1];
+  if (2 + metaLen > plainBytes.length) {
+    throw new Error('Decrypted media metadata length is invalid.');
+  }
+
+  let mime = 'image/webp';
+  try {
+    const metaJson = textDecoder.decode(plainBytes.subarray(2, 2 + metaLen));
+    const parsed = JSON.parse(metaJson);
+    if (parsed && parsed.mime) mime = String(parsed.mime);
+  } catch {
+    mime = 'image/webp';
+  }
+
+  const mediaBytes = plainBytes.slice(2 + metaLen);
+  return { bytes: mediaBytes, mime, aadBound };
 }
 
 export async function createPasswordSlot(password, dek, options = {}) {
@@ -377,11 +613,7 @@ export async function attachPaperRecoverySlot(vaultMeta, keyring) {
     updatedAt: new Date().toISOString(),
   };
 
-  return {
-    recoveryCode,
-    recoverySlot,
-    vaultMeta: nextVault,
-  };
+  return { recoveryCode, recoverySlot, vaultMeta: nextVault };
 }
 
 export async function createEnvelopeVault(password, options = {}) {
@@ -394,15 +626,8 @@ export async function createEnvelopeVault(password, options = {}) {
     iterations: options.iterations || DEFAULT_PBKDF2_ITERATIONS,
   });
 
-  let wrappedLegacyKey = null;
-  if (options.legacyKey) {
-    wrappedLegacyKey = await wrapKeyWithKEK(options.legacyKey, dek);
-  }
-
-  let encryptedPat = null;
-  if (options.patToken) {
-    encryptedPat = await encryptPatToken(options.patToken, dek);
-  }
+  const wrappedLegacyKey = options.legacyKey ? await wrapKeyWithKEK(options.legacyKey, dek) : null;
+  const encryptedPat = options.patToken ? await encryptPatToken(options.patToken, dek) : null;
 
   const nowIso = new Date().toISOString();
   const vaultMeta = {
@@ -410,6 +635,7 @@ export async function createEnvelopeVault(password, options = {}) {
     enabled: options.enabled !== undefined ? Boolean(options.enabled) : true,
     architecture: 'envelope-dek-kek',
     aadSupported: true,
+    encryptedMediaDefault: true,
     autoLockMinutes: Number.isFinite(Number(options.autoLockMinutes))
       ? Number(options.autoLockMinutes)
       : 15,
@@ -480,7 +706,6 @@ export async function unlockVault(secretInput, vaultMeta) {
     return { ok: false, error: 'Vault metadata not found.' };
   }
 
-  // v2 Envelope Vault (tries Password slots, then Recovery Key slots if 64-hex)
   if (Number(vaultMeta.version) === 2 && Array.isArray(vaultMeta.keySlots)) {
     const pwSlots = vaultMeta.keySlots.filter((s) => s && s.type === 'password');
     for (const slot of pwSlots) {
@@ -516,7 +741,6 @@ export async function unlockVault(secretInput, vaultMeta) {
     return { ok: false, error: 'Incorrect password or recovery key.' };
   }
 
-  // Legacy v1 Vault fallback
   const canaryCipher = vaultMeta.canary || vaultMeta.canaryCipher;
   if (!vaultMeta.salt || !canaryCipher) {
     return { ok: false, error: 'Invalid vault configuration.' };
@@ -620,28 +844,17 @@ export async function rotateVaultPasswordWithKeyring(vaultMeta, keyring, newPass
   };
 }
 
-export async function rotateVaultPassword(
-  vaultMeta,
-  currentPassword,
-  newPassword,
-  options = {}
-) {
+export async function rotateVaultPassword(vaultMeta, currentPassword, newPassword, options = {}) {
   if (!newPassword || String(newPassword).length < 4) {
     throw new Error('New master password must be at least 4 characters.');
   }
-
   const unlocked = await unlockVault(currentPassword, vaultMeta);
   if (!unlocked.ok) {
     throw new Error('Current master password or recovery key is incorrect.');
   }
-
   if (unlocked.version === 1) {
-    return upgradeLegacyVaultToEnvelope(vaultMeta, currentPassword, {
-      ...options,
-      newPassword,
-    });
+    return upgradeLegacyVaultToEnvelope(vaultMeta, currentPassword, { ...options, newPassword });
   }
-
   return rotateVaultPasswordWithKeyring(vaultMeta, unlocked.keyring, newPassword, options);
 }
 
@@ -650,19 +863,11 @@ export async function upgradeLegacyVaultToEnvelope(vaultMeta, currentPassword, o
   if (!unlocked.ok) {
     throw new Error('Current master password is incorrect.');
   }
-
   if (unlocked.version === 2) {
-    return {
-      vaultMeta,
-      keyring: unlocked.keyring,
-      upgraded: false,
-    };
+    return { vaultMeta, keyring: unlocked.keyring, upgraded: false };
   }
-
   const targetPassword = options.newPassword || currentPassword;
-  const patToSave =
-    options.encryptPat === false ? null : options.patToken || unlocked.pat || null;
-
+  const patToSave = options.encryptPat === false ? null : options.patToken || unlocked.pat || null;
   const created = await createEnvelopeVault(targetPassword, {
     enabled: options.enabled !== undefined ? Boolean(options.enabled) : Boolean(vaultMeta.enabled),
     autoLockMinutes: options.autoLockMinutes ?? 15,
@@ -670,14 +875,10 @@ export async function upgradeLegacyVaultToEnvelope(vaultMeta, currentPassword, o
     patToken: options.encryptPat === false ? null : patToSave,
     createdAt: vaultMeta.createdAt,
   });
-
-  return {
-    ...created,
-    upgraded: true,
-  };
+  return { ...created, upgraded: true };
 }
 
-// Backward-compatible legacy helper exports
+// Backward-compatible legacy helpers
 export async function createVaultCanary(password, iterations = DEFAULT_PBKDF2_ITERATIONS) {
   const salt = bytesToBase64(randomBytes(16));
   const key = await deriveKey(password, salt, iterations, false);
@@ -685,10 +886,25 @@ export async function createVaultCanary(password, iterations = DEFAULT_PBKDF2_IT
   const cipherBuf = await window.crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
     key,
-    new TextEncoder().encode(VAULT_CANARY_PLAINTEXT)
+    textEncoder.encode(VAULT_CANARY_PLAINTEXT)
   );
   const canary = `${V1_PREFIX}${salt}:${bytesToBase64(iv)}:${bytesToBase64(new Uint8Array(cipherBuf))}`;
   return { salt, iterations, canary, canaryCipher: canary };
+}
+
+export async function createVaultConfig(password, options = {}) {
+  const iterations = Number(options.iterations) || DEFAULT_PBKDF2_ITERATIONS;
+  const c = await createVaultCanary(password, iterations);
+  return {
+    version: 1,
+    enabled: options.enabled !== undefined ? Boolean(options.enabled) : true,
+    kdf: 'PBKDF2-SHA256',
+    iterations,
+    salt: c.salt,
+    canaryCipher: c.canaryCipher,
+    encryptedPat: options.encryptedPat || null,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 export async function verifyVaultCanary(password, vaultMeta) {
@@ -696,12 +912,17 @@ export async function verifyVaultCanary(password, vaultMeta) {
   return Boolean(res.ok);
 }
 
-export async function encryptPatToken(pat, keyOrKeyring) {
+export const verifyVaultPassword = verifyVaultCanary;
+
+export async function encryptPatToken(pat, keyOrKeyringOrPassword, iterations = DEFAULT_PBKDF2_ITERATIONS) {
   if (!pat) return null;
-  return encryptText(String(pat), keyOrKeyring);
+  return encryptText(String(pat).trim(), keyOrKeyringOrPassword, iterations);
 }
 
-export async function decryptPatToken(encryptedPat, keyOrKeyring) {
+export async function decryptPatToken(encryptedPat, keyOrKeyringOrPassword, iterations = DEFAULT_PBKDF2_ITERATIONS) {
   if (!encryptedPat) return null;
-  return decryptText(encryptedPat, keyOrKeyring);
+  return decryptText(encryptedPat, keyOrKeyringOrPassword, iterations);
 }
+
+export const encryptPat = encryptPatToken;
+export const decryptPat = decryptPatToken;
