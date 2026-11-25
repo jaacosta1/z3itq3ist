@@ -1,694 +1,516 @@
-/**
- * Perpetual Side-by-Side Web Diary — GitHub Contents API & Sync Engine
- * Provides UTF-8/emoji-safe Base64 encoding, binary media uploads to /data/media/,
- * conflict-safe JSON updates with automatic 409 retry, Neocities-safe overwrite
- * deletion support, and cache-busted static fallback reads.
- */
+// js/github.js — GitHub Contents API Client, Split-Repo Vault Support & Index Sync
 
-import { countWords } from './markdown.js';
-import { isEncryptedPayload } from './crypto.js';
-
-const GITHUB_API_BASE = 'https://api.github.com';
-const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder('utf-8');
-
-const EXT_MIME_MAP = {
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  png: 'image/png',
-  webp: 'image/webp',
-  gif: 'image/gif',
-  svg: 'image/svg+xml',
-};
-
-/**
- * Safely encodes any UTF-8 string (including emoji and CJK/non-ASCII) to Base64.
- * @param {string} str
- * @returns {string}
- */
 export function encodeBase64Utf8(str) {
-  const bytes = textEncoder.encode(String(str ?? ''));
-  return arrayBufferToBase64(bytes);
-}
-
-/**
- * Safely decodes a Base64 string (with or without GitHub line breaks) into UTF-8 text.
- * @param {string} b64
- * @returns {string}
- */
-export function decodeBase64Utf8(b64) {
-  const cleaned = String(b64 ?? '').replace(/\s+/g, '');
-  if (!cleaned) return '';
-  const binary = atob(cleaned);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return textDecoder.decode(bytes);
-}
-
-/**
- * Encodes an ArrayBuffer or Uint8Array into Base64 in safe chunks.
- * @param {ArrayBuffer | Uint8Array} buffer
- * @returns {string}
- */
-export function arrayBufferToBase64(buffer) {
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  const chunkSize = 0x8000;
+  const bytes = new TextEncoder().encode(String(str ?? ''));
   let binary = '';
+  const chunkSize = 0x8000;
   for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode.apply(null, chunk);
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
   }
   return btoa(binary);
 }
 
-/**
- * Creates a clean empty day structure for a given MM-DD calendar date.
- * @param {string} mmdd
- * @returns {{ day: string, entries: Record<string, any>, comments: any[] }}
- */
-export function emptyDayData(mmdd) {
-  return {
-    day: mmdd,
-    entries: {},
-    comments: [],
-  };
+export function decodeBase64Utf8(base64) {
+  const clean = String(base64 ?? '').replace(/\s+/g, '');
+  if (!clean) return '';
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoder().decode(bytes);
 }
 
-/**
- * Recalculates /data/index.json metadata for a single MM-DD day from its dayData.
- * Removes the day key from index.days when no entries and no comments remain.
- * @param {Object | null} indexData
- * @param {string} mmdd
- * @param {Object} dayData
- * @returns {Object}
- */
-export function recalculateIndexForDay(indexData, mmdd, dayData) {
-  const nextIndex = {
-    version: 1,
+export function arrayBufferToBase64(buffer) {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+export function recalculateIndexForDay(existingIndex, dayStr, dayDoc) {
+  const idx = {
     updatedAt: new Date().toISOString(),
-    days: {
-      ...(indexData && indexData.days && typeof indexData.days === 'object' ? indexData.days : {}),
-    },
+    days: { ...(existingIndex?.days || {}) },
   };
 
-  const entriesObj = dayData && dayData.entries && typeof dayData.entries === 'object'
-    ? dayData.entries
-    : {};
-  const commentsArr = dayData && Array.isArray(dayData.comments) ? dayData.comments : [];
+  const entries = dayDoc?.entries && typeof dayDoc.entries === 'object' ? dayDoc.entries : {};
+  const comments = Array.isArray(dayDoc?.comments) ? dayDoc.comments : [];
 
-  const years = Object.keys(entriesObj)
+  const years = Object.keys(entries)
     .map((y) => Number(y))
-    .filter((n) => Number.isInteger(n) && n >= 1000 && n <= 9999)
+    .filter((n) => Number.isFinite(n))
     .sort((a, b) => a - b);
 
   const tagSet = new Set();
   const wordCounts = {};
 
-  for (const yearNum of years) {
-    const entry = entriesObj[String(yearNum)];
+  for (const yr of years) {
+    const entry = entries[String(yr)];
     if (!entry) continue;
-
     if (Array.isArray(entry.tags)) {
-      for (const rawTag of entry.tags) {
-        const cleaned = String(rawTag || '').trim().toLowerCase();
+      for (const t of entry.tags) {
+        const cleaned = String(t || '').trim();
         if (cleaned) tagSet.add(cleaned);
       }
     }
-
-    if (entry.encrypted && isEncryptedPayload(entry.body)) {
-      // Preserve previously computed count if available rather than counting ciphertext tokens
-      const prevCount =
-        typeof entry.wordCount === 'number'
-          ? entry.wordCount
-          : nextIndex.days[mmdd]?.wordCounts?.[String(yearNum)] || 0;
-      wordCounts[String(yearNum)] = prevCount;
-    } else {
-      wordCounts[String(yearNum)] = countWords(entry.body || '');
-    }
+    const plain = entry.encrypted
+      ? ''
+      : String(entry.body || '')
+          .replace(/[#*_`>~-]+/g, ' ')
+          .trim();
+    const words = plain ? plain.split(/\s+/).filter(Boolean).length : 0;
+    wordCounts[String(yr)] = words;
   }
 
-  const commentCount = commentsArr.length;
-
-  if (years.length === 0 && commentCount === 0) {
-    delete nextIndex.days[mmdd];
+  if (years.length === 0 && comments.length === 0) {
+    delete idx.days[dayStr];
   } else {
-    nextIndex.days[mmdd] = {
+    idx.days[dayStr] = {
       years,
-      tags: Array.from(tagSet).sort(),
+      tags: Array.from(tagSet),
       wordCounts,
-      commentCount,
+      commentCount: comments.length,
     };
   }
 
-  return nextIndex;
+  return idx;
 }
 
-/**
- * Encodes each segment of a repository file path while preserving slashes.
- * @param {string} path
- * @returns {string}
- */
-function encodeRepoPath(path) {
-  return path
-    .split('/')
-    .filter((seg) => seg.length > 0)
-    .map((seg) => encodeURIComponent(seg))
-    .join('/');
-}
+const DEFAULT_CONFIG = Object.freeze({
+  owner: '',
+  repo: '',
+  branch: 'main',
+  dataPath: 'data',
+  token: '',
+  tokenExpiresAt: '',
+  readFromApiWhenAuthed: true,
+  usePrivateVault: true,
+  vaultOwner: '',
+  vaultRepo: 'perpetual-diary-vault',
+  vaultBranch: 'main',
+  vaultPath: 'data',
+});
 
-/**
- * GitHub Contents API & static fallback client.
- */
+const STORAGE_KEY = 'perpetual_diary_gh_config_v1';
+
 export class GitHubClient {
-  /**
-   * @param {{
-   *   owner?: string,
-   *   repo?: string,
-   *   branch?: string,
-   *   dataPath?: string,
-   *   token?: string,
-   *   readFromApi?: boolean
-   * }} [config]
-   */
-  constructor(config = {}) {
-    this.owner = '';
-    this.repo = '';
-    this.branch = 'main';
-    this.dataPath = 'data';
-    this.token = '';
-    this.readFromApi = true;
-    this.updateConfig(config);
+  constructor(initialConfig = {}) {
+    this.config = { ...DEFAULT_CONFIG, ...initialConfig };
   }
 
-  /**
-   * Updates client settings cleanly.
-   * @param {Object} partialConfig
-   */
-  updateConfig(partialConfig = {}) {
-    if (partialConfig.owner !== undefined) this.owner = String(partialConfig.owner || '').trim();
-    if (partialConfig.repo !== undefined) this.repo = String(partialConfig.repo || '').trim();
-    if (partialConfig.branch !== undefined) {
-      this.branch = String(partialConfig.branch || 'main').trim() || 'main';
-    }
-    if (partialConfig.dataPath !== undefined) {
-      this.dataPath = String(partialConfig.dataPath || 'data')
-        .trim()
-        .replace(/^\/+|\/+$/g, '') || 'data';
-    }
-    if (partialConfig.token !== undefined) this.token = String(partialConfig.token || '').trim();
-    if (partialConfig.readFromApi !== undefined) {
-      this.readFromApi = Boolean(partialConfig.readFromApi);
+  static loadConfig(storageTarget = null) {
+    try {
+      const store = storageTarget || (typeof window !== 'undefined' ? window.localStorage : null);
+      if (!store) return { ...DEFAULT_CONFIG };
+      const raw = store.getItem(STORAGE_KEY);
+      if (!raw) return { ...DEFAULT_CONFIG };
+      const parsed = JSON.parse(raw);
+      return { ...DEFAULT_CONFIG, ...(parsed || {}) };
+    } catch {
+      return { ...DEFAULT_CONFIG };
     }
   }
 
-  /**
-   * True when owner & repository are specified.
-   * @returns {boolean}
-   */
+  static saveConfig(cfg, storageTarget = null) {
+    const merged = { ...DEFAULT_CONFIG, ...(cfg || {}) };
+    if (storageTarget) {
+      storageTarget.setItem(STORAGE_KEY, JSON.stringify(merged));
+    }
+    return merged;
+  }
+
+  static clearConfig(storageTarget = null) {
+    if (storageTarget) {
+      try {
+        storageTarget.removeItem(STORAGE_KEY);
+      } catch {
+        // ignore storage errors
+      }
+    }
+    return { ...DEFAULT_CONFIG };
+  }
+
+  updateConfig(partial = {}) {
+    this.config = { ...this.config, ...(partial || {}) };
+    return this.config;
+  }
+
   isConfigured() {
-    return Boolean(this.owner && this.repo);
+    return Boolean(
+      String(this.config.owner || '').trim() && String(this.config.repo || '').trim()
+    );
   }
 
-  /**
-   * True when owner, repository, and Personal Access Token are all present.
-   * @returns {boolean}
-   */
-  canWrite() {
-    return Boolean(this.owner && this.repo && this.token);
+  hasToken() {
+    return Boolean(String(this.config.token || '').trim());
   }
 
-  /**
-   * Resolves a data-relative path (e.g., "days/11-24.json" or "data/days/11-24.json")
-   * against the configured dataPath folder without double-prefixing.
-   * @param {string} relativePath
-   * @returns {string}
-   */
-  resolvePath(relativePath) {
-    let clean = String(relativePath || '')
+  getDataTarget() {
+    const useVault = Boolean(this.config.usePrivateVault);
+    const owner = useVault
+      ? String(this.config.vaultOwner || this.config.owner || '').trim()
+      : String(this.config.owner || '').trim();
+    const repo = useVault
+      ? String(this.config.vaultRepo || 'perpetual-diary-vault').trim()
+      : String(this.config.repo || '').trim();
+    const branch = useVault
+      ? String(this.config.vaultBranch || this.config.branch || 'main').trim()
+      : String(this.config.branch || 'main').trim();
+    const basePath = String(
+      useVault ? this.config.vaultPath || 'data' : this.config.dataPath || 'data'
+    )
       .trim()
-      .replace(/^\.\/+/, '')
-      .replace(/^\/+/, '');
+      .replace(/^\/+|\/+$/g, '');
 
-    if (!clean) return this.dataPath;
-
-    if (clean === this.dataPath || clean.startsWith(`${this.dataPath}/`)) {
-      return clean;
-    }
-
-    // Normalize canonical "data/..." paths if user configured a custom dataPath
-    if (clean.startsWith('data/')) {
-      clean = clean.slice('data/'.length);
-    }
-
-    return this.dataPath ? `${this.dataPath}/${clean}` : clean;
+    return {
+      isSplitVault: useVault && Boolean(owner && repo),
+      owner,
+      repo,
+      branch: branch || 'main',
+      basePath: basePath || 'data',
+    };
   }
 
-  /**
-   * Builds standard headers for GitHub REST API v3 calls.
-   * @param {boolean} [includeContentType=false]
-   * @returns {Record<string, string>}
-   */
-  _headers(includeContentType = false) {
+  resolveDataPath(relativeSubpath) {
+    const { basePath } = this.getDataTarget();
+    const cleanSub = String(relativeSubpath || '').replace(/^\/+/, '');
+    return `${basePath}/${cleanSub}`;
+  }
+
+  async _apiRequest(url, options = {}) {
     const headers = {
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
+      ...(options.headers || {}),
     };
-    if (this.token) {
-      headers.Authorization = `Bearer ${this.token}`;
+    if (this.hasToken()) {
+      headers.Authorization = `Bearer ${String(this.config.token).trim()}`;
     }
-    if (includeContentType) {
-      headers['Content-Type'] = 'application/json';
-    }
-    return headers;
-  }
-
-  /**
-   * Parses GitHub API error payloads into clean Error instances with HTTP status.
-   * @param {Response} res
-   * @param {string} fallbackMessage
-   */
-  async _buildApiError(res, fallbackMessage) {
-    let detail = fallbackMessage;
-    try {
-      const json = await res.json();
-      if (json && json.message) {
-        detail = json.message;
-      }
-    } catch {
-      // Ignore JSON parse failure on non-JSON error responses
-    }
-    const err = new Error(`GitHub API (${res.status}): ${detail}`);
-    err.status = res.status;
-    return err;
-  }
-
-  /**
-   * Tests repository visibility, branch existence, and write/push permission.
-   * @returns {Promise<{ ok: boolean, repoFullName: string, permissions: Object | null, message: string }>}
-   */
-  async testConnection() {
-    if (!this.isConfigured()) {
-      return {
-        ok: false,
-        repoFullName: '',
-        permissions: null,
-        message: 'Enter both GitHub Username/Owner and Repository Name first.',
-      };
-    }
-
-    const repoUrl = `${GITHUB_API_BASE}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}`;
-    const res = await fetch(repoUrl, {
-      method: 'GET',
-      headers: this._headers(false),
-      cache: 'no-store',
-    });
-
-    if (!res.ok) {
-      const err = await this._buildApiError(res, 'Unable to reach repository.');
-      return {
-        ok: false,
-        repoFullName: `${this.owner}/${this.repo}`,
-        permissions: null,
-        message: err.message,
-      };
-    }
-
-    const repoData = await res.json();
-    const permissions = repoData.permissions || null;
-
-    // Verify configured branch exists
-    const branchUrl = `${repoUrl}/branches/${encodeURIComponent(this.branch)}`;
-    const branchRes = await fetch(branchUrl, {
-      method: 'GET',
-      headers: this._headers(false),
-      cache: 'no-store',
-    });
-
-    if (!branchRes.ok) {
-      return {
-        ok: false,
-        repoFullName: repoData.full_name || `${this.owner}/${this.repo}`,
-        permissions,
-        message: `Connected to ${repoData.full_name}, but branch "${this.branch}" was not found.`,
-      };
-    }
-
-    if (!this.token) {
-      return {
-        ok: true,
-        repoFullName: repoData.full_name,
-        permissions,
-        message: `Connected to ${repoData.full_name} (${this.branch}) in read-only mode. Add a Fine-Grained PAT with Contents: Read & Write to enable live saving.`,
-      };
-    }
-
-    const canPush = permissions ? Boolean(permissions.push || permissions.admin) : true;
-    if (!canPush) {
-      return {
-        ok: false,
-        repoFullName: repoData.full_name,
-        permissions,
-        message: `Connected to ${repoData.full_name}, but this token lacks push/write permission. Ensure Contents: Read and write is enabled.`,
-      };
-    }
-
-    return {
-      ok: true,
-      repoFullName: repoData.full_name,
-      permissions,
-      message: `Connected to ${repoData.full_name} (branch: ${this.branch}) with push/write access verified.`,
-    };
-  }
-
-  /**
-   * Fetches a file and its current SHA directly from the GitHub Contents API.
-   * Transparently handles >1MB blobs via the Git Blobs API.
-   * @param {string} relativePath
-   * @returns {Promise<{ exists: boolean, sha: string | null, content: string | null, rawBase64: string | null, path: string }>}
-   */
-  async getFile(relativePath) {
-    if (!this.isConfigured()) {
-      throw new Error('GitHub repository is not configured.');
-    }
-
-    const path = this.resolvePath(relativePath);
-    const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(
-      this.repo
-    )}/contents/${encodeRepoPath(path)}?ref=${encodeURIComponent(this.branch)}&t=${Date.now()}`;
-
     const res = await fetch(url, {
-      method: 'GET',
-      headers: this._headers(false),
-      cache: 'no-store',
-    });
-
-    if (res.status === 404) {
-      return { exists: false, sha: null, content: null, rawBase64: null, path };
-    }
-
-    if (!res.ok) {
-      throw await this._buildApiError(res, `Failed to read ${path}`);
-    }
-
-    const payload = await res.json();
-    let rawBase64 = typeof payload.content === 'string' ? payload.content.replace(/\s+/g, '') : '';
-
-    // GitHub omits inline content for files > 1MB; fetch via Git Blobs API
-    if (!rawBase64 && payload.sha) {
-      const blobUrl = `${GITHUB_API_BASE}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(
-        this.repo
-      )}/git/blobs/${encodeURIComponent(payload.sha)}`;
-      const blobRes = await fetch(blobUrl, {
-        method: 'GET',
-        headers: this._headers(false),
-        cache: 'no-store',
-      });
-      if (!blobRes.ok) {
-        throw await this._buildApiError(blobRes, `Failed to fetch blob for ${path}`);
-      }
-      const blobData = await blobRes.json();
-      rawBase64 = typeof blobData.content === 'string' ? blobData.content.replace(/\s+/g, '') : '';
-    }
-
-    return {
-      exists: true,
-      sha: payload.sha || null,
-      rawBase64,
-      content: rawBase64 ? decodeBase64Utf8(rawBase64) : '',
-      path,
-    };
-  }
-
-  /**
-   * Fetches and parses a JSON file from the GitHub Contents API.
-   * @param {string} relativePath
-   * @returns {Promise<{ exists: boolean, sha: string | null, data: any, path: string }>}
-   */
-  async getJson(relativePath) {
-    const file = await this.getFile(relativePath);
-    if (!file.exists) {
-      return { exists: false, sha: null, data: null, path: file.path };
-    }
-    try {
-      const data = JSON.parse(file.content || '{}');
-      return { exists: true, sha: file.sha, data, path: file.path };
-    } catch (err) {
-      throw new Error(`Invalid JSON in ${file.path}: ${err.message}`);
-    }
-  }
-
-  /**
-   * Creates or overwrites a file in GitHub via PUT /repos/{owner}/{repo}/contents/{path}.
-   * @param {string} relativePath
-   * @param {string} contentStr
-   * @param {string} message
-   * @param {{ sha?: string | null, isBase64?: boolean }} [options]
-   * @returns {Promise<{ sha: string | null, commitSha: string | null, path: string }>}
-   */
-  async putFile(relativePath, contentStr, message, options = {}) {
-    if (!this.canWrite()) {
-      throw new Error('GitHub write credentials are not configured.');
-    }
-
-    const path = this.resolvePath(relativePath);
-    let targetSha = options.sha;
-
-    // Auto-resolve latest SHA if caller omitted sha (undefined), unless explicitly null (new file)
-    if (targetSha === undefined) {
-      const existing = await this.getFile(path);
-      targetSha = existing.exists ? existing.sha : null;
-    }
-
-    const body = {
-      message: message || `diary: update ${path}`,
-      content: options.isBase64 ? String(contentStr).replace(/\s+/g, '') : encodeBase64Utf8(contentStr),
-      branch: this.branch,
-    };
-
-    if (targetSha) {
-      body.sha = targetSha;
-    }
-
-    const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(
-      this.repo
-    )}/contents/${encodeRepoPath(path)}`;
-
-    const res = await fetch(url, {
-      method: 'PUT',
-      headers: this._headers(true),
-      body: JSON.stringify(body),
+      ...options,
+      headers,
       cache: 'no-store',
     });
 
     if (!res.ok) {
-      throw await this._buildApiError(res, `Failed to commit ${path}`);
-    }
-
-    const result = await res.json();
-    return {
-      sha: result.content?.sha || null,
-      commitSha: result.commit?.sha || null,
-      path,
-    };
-  }
-
-  /**
-   * Commits a pretty-printed JSON object to GitHub (2-space indent + trailing newline).
-   * @param {string} relativePath
-   * @param {any} dataObj
-   * @param {string} message
-   * @param {string | null} [sha]
-   * @returns {Promise<{ sha: string | null, commitSha: string | null, path: string }>}
-   */
-  async putJson(relativePath, dataObj, message, sha) {
-    const serialized = `${JSON.stringify(dataObj, null, 2)}\n`;
-    return this.putFile(relativePath, serialized, message, { sha, isBase64: false });
-  }
-
-  /**
-   * Uploads a binary file (e.g., PNG/JPG/WebP/GIF image) directly to GitHub.
-   * @param {string} relativePath
-   * @param {ArrayBuffer | Uint8Array} arrayBuffer
-   * @param {string} message
-   * @returns {Promise<{ sha: string | null, commitSha: string | null, path: string }>}
-   */
-  async putBinary(relativePath, arrayBuffer, message) {
-    const b64 = arrayBufferToBase64(arrayBuffer);
-    return this.putFile(relativePath, b64, message, { sha: undefined, isBase64: true });
-  }
-
-  /**
-   * Deletes a file from GitHub (used for optional orphaned /data/media/ cleanup).
-   * Note: For day JSON deletions under Neocities cleanup: false, overwrite the day JSON
-   * with empty entries instead of calling deleteFile.
-   * @param {string} relativePath
-   * @param {string} message
-   * @param {string | null} [sha]
-   * @returns {Promise<{ deleted: boolean, path: string }>}
-   */
-  async deleteFile(relativePath, message, sha) {
-    if (!this.canWrite()) {
-      throw new Error('GitHub write credentials are not configured.');
-    }
-
-    const path = this.resolvePath(relativePath);
-    let targetSha = sha;
-
-    if (!targetSha) {
-      const existing = await this.getFile(path);
-      if (!existing.exists || !existing.sha) {
-        return { deleted: false, path };
-      }
-      targetSha = existing.sha;
-    }
-
-    const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(
-      this.repo
-    )}/contents/${encodeRepoPath(path)}`;
-
-    const res = await fetch(url, {
-      method: 'DELETE',
-      headers: this._headers(true),
-      body: JSON.stringify({
-        message: message || `diary: remove ${path}`,
-        sha: targetSha,
-        branch: this.branch,
-      }),
-      cache: 'no-store',
-    });
-
-    if (res.status === 404) {
-      return { deleted: false, path };
-    }
-
-    if (!res.ok) {
-      throw await this._buildApiError(res, `Failed to delete ${path}`);
-    }
-
-    return { deleted: true, path };
-  }
-
-  /**
-   * Conflict-safe read-modify-write helper for JSON files.
-   * Automatically retries once on HTTP 409 Conflict (or 422 stale SHA) by re-fetching
-   * the latest remote state and re-applying mutatorFn.
-   * @param {string} relativePath
-   * @param {(currentData: any) => Promise<any> | any} mutatorFn
-   * @param {string} commitMessage
-   * @returns {Promise<{ data: any, sha: string | null, commitSha: string | null }>}
-   */
-  async updateJsonWithRetry(relativePath, mutatorFn, commitMessage) {
-    const maxAttempts = 2;
-    let lastError = null;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const remote = await this.getJson(relativePath);
-      const nextData = await mutatorFn(remote.exists ? remote.data : null);
-
+      let detail = res.statusText;
       try {
-        const res = await this.putJson(
-          relativePath,
-          nextData,
-          commitMessage,
-          remote.exists ? remote.sha : null
+        const errJson = await res.json();
+        if (errJson && errJson.message) detail = errJson.message;
+      } catch {
+        // ignore JSON parse failure
+      }
+      const err = new Error(`GitHub API (${res.status}): ${detail}`);
+      err.status = res.status;
+      throw err;
+    }
+
+    const expirationHeader = res.headers.get('github-authentication-token-expiration');
+    if (expirationHeader && !this.config.tokenExpiresAt) {
+      this.config.tokenExpiresAt = expirationHeader;
+    }
+
+    return res.json();
+  }
+
+  async getRepoHealth() {
+    const target = this.getDataTarget();
+    const appOwner = String(this.config.owner || '').trim();
+    const appRepo = String(this.config.repo || '').trim();
+
+    if (!this.hasToken() && !appOwner) {
+      return {
+        mode: 'sandbox',
+        vaultRepoName: target.repo || 'perpetual-diary-vault',
+        vaultPrivate: true,
+        vaultSizeKb: 0,
+        appSizeKb: 0,
+        totalSizeKb: 0,
+        pagesLimitKb: 1024 * 1024,
+        usagePercent: 0,
+        rateLimitRemaining: null,
+        tokenExpiry: this.config.tokenExpiresAt || '',
+      };
+    }
+
+    let vaultMeta = null;
+    let appMeta = null;
+
+    if (target.owner && target.repo) {
+      try {
+        vaultMeta = await this._apiRequest(
+          `https://api.github.com/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(
+            target.repo
+          )}`
         );
-        return {
-          data: nextData,
-          sha: res.sha,
-          commitSha: res.commitSha,
-        };
       } catch (err) {
-        lastError = err;
-        const isConflict = err && (err.status === 409 || err.status === 422);
-        if (isConflict && attempt < maxAttempts) {
-          continue;
+        if (!this.hasToken()) {
+          return {
+            mode: 'static',
+            vaultRepoName: `${target.owner}/${target.repo}`,
+            vaultPrivate: Boolean(this.config.usePrivateVault),
+            vaultSizeKb: 0,
+            appSizeKb: 0,
+            totalSizeKb: 0,
+            pagesLimitKb: 1024 * 1024,
+            usagePercent: 0,
+            error: err.message,
+            tokenExpiry: this.config.tokenExpiresAt || '',
+          };
         }
         throw err;
       }
     }
 
-    throw lastError || new Error(`Failed to update ${relativePath}`);
-  }
-
-  /**
-   * Fetches a static JSON file directly from the hosted Neocities/static origin
-   * with strict cache-busting so deployed edits and deletions never show stale data.
-   * @param {string} relativePath
-   * @returns {Promise<{ exists: boolean, data: any }>}
-   */
-  async fetchStaticJson(relativePath) {
-    const path = this.resolvePath(relativePath);
-    const url = `./${path}?t=${Date.now()}`;
-
-    const res = await fetch(url, {
-      method: 'GET',
-      cache: 'no-store',
-    });
-
-    if (res.status === 404) {
-      return { exists: false, data: null };
+    if (appOwner && appRepo && `${appOwner}/${appRepo}` !== `${target.owner}/${target.repo}`) {
+      try {
+        appMeta = await this._apiRequest(
+          `https://api.github.com/repos/${encodeURIComponent(appOwner)}/${encodeURIComponent(
+            appRepo
+          )}`
+        );
+      } catch {
+        appMeta = null;
+      }
     }
 
-    if (!res.ok) {
-      throw new Error(`Failed to load static file ${path} (HTTP ${res.status})`);
-    }
+    const vaultSizeKb = Number(vaultMeta?.size || 0);
+    const appSizeKb = Number(appMeta?.size || 0);
+    const combinedKb = target.isSplitVault ? vaultSizeKb : vaultSizeKb || appSizeKb;
+    const pagesLimitKb = 1024 * 1024; // 1 GB GitHub Pages reference limit
+    const usagePercent = Math.min(100, Number(((combinedKb / pagesLimitKb) * 100).toFixed(2)));
 
-    const data = await res.json();
-    return { exists: true, data };
-  }
-
-  /**
-   * Unified JSON reader:
-   * - Uses GitHub API directly when authenticated and readFromApi is enabled (zero deploy lag).
-   * - Falls back to cache-busted static Neocities files otherwise.
-   * @param {string} relativePath
-   * @returns {Promise<{ exists: boolean, data: any, sha: string | null, source: 'github' | 'static' }>}
-   */
-  async readJson(relativePath) {
-    if (this.canWrite() && this.readFromApi) {
-      const remote = await this.getJson(relativePath);
-      return {
-        exists: remote.exists,
-        data: remote.data,
-        sha: remote.sha,
-        source: 'github',
-      };
-    }
-
-    const localStatic = await this.fetchStaticJson(relativePath);
     return {
-      exists: localStatic.exists,
-      data: localStatic.data,
-      sha: null,
-      source: 'static',
+      mode: this.hasToken() ? 'live-api' : 'public-api',
+      vaultRepoName: vaultMeta?.full_name || `${target.owner}/${target.repo}`,
+      vaultPrivate: Boolean(vaultMeta?.private ?? this.config.usePrivateVault),
+      defaultBranch: vaultMeta?.default_branch || target.branch,
+      vaultSizeKb,
+      appSizeKb,
+      totalSizeKb: combinedKb,
+      pagesLimitKb,
+      usagePercent,
+      tokenExpiry: this.config.tokenExpiresAt || '',
     };
   }
 
-  /**
-   * Fetches a media file directly from the GitHub API and returns an object URL,
-   * allowing newly uploaded images to render immediately before Neocities finishes deploying.
-   * @param {string} relativePath
-   * @returns {Promise<string>}
-   */
-  async fetchRawMediaBlobUrl(relativePath) {
-    const file = await this.getFile(relativePath);
-    if (!file.exists || !file.rawBase64) {
-      throw new Error(`Media file not found on GitHub: ${file.path}`);
+  async testConnection() {
+    const target = this.getDataTarget();
+    if (!target.owner || !target.repo) {
+      throw new Error('Please enter your GitHub username and repository name first.');
+    }
+    const repoData = await this._apiRequest(
+      `https://api.github.com/repos/${encodeURIComponent(target.owner)}/${encodeURIComponent(
+        target.repo
+      )}`
+    );
+    const canPush = Boolean(repoData?.permissions?.push || repoData?.permissions?.admin);
+    return {
+      ok: true,
+      fullName: repoData.full_name,
+      isPrivate: Boolean(repoData.private),
+      canPush,
+      defaultBranch: repoData.default_branch || target.branch,
+    };
+  }
+
+  async getFileMeta(relativeSubpath, explicitTarget = null) {
+    const target = explicitTarget || this.getDataTarget();
+    const repoPath = `${target.basePath}/${String(relativeSubpath || '').replace(/^\/+/, '')}`;
+
+    if (this.hasToken() && this.config.readFromApiWhenAuthed && target.owner && target.repo) {
+      try {
+        const apiUrl = `https://api.github.com/repos/${encodeURIComponent(
+          target.owner
+        )}/${encodeURIComponent(target.repo)}/contents/${repoPath
+          .split('/')
+          .map(encodeURIComponent)
+          .join('/')}?ref=${encodeURIComponent(target.branch)}&_t=${Date.now()}`;
+        const data = await this._apiRequest(apiUrl);
+        if (Array.isArray(data)) {
+          return { exists: false, sha: null, content: null, raw: data };
+        }
+        const decodedText = decodeBase64Utf8(data.content || '');
+        return {
+          exists: true,
+          sha: data.sha,
+          content: decodedText,
+          raw: data,
+        };
+      } catch (err) {
+        if (err.status === 404) {
+          return { exists: false, sha: null, content: null, raw: null };
+        }
+        throw err;
+      }
     }
 
-    const extMatch = file.path.toLowerCase().match(/\.([a-z0-9]+)$/);
-    const ext = extMatch ? extMatch[1] : 'jpg';
-    const mimeType = EXT_MIME_MAP[ext] || 'application/octet-stream';
+    const staticUrl = `./${repoPath}?t=${Date.now()}`;
+    const res = await fetch(staticUrl, { cache: 'no-store' });
+    if (res.status === 404) {
+      return { exists: false, sha: null, content: null, raw: null };
+    }
+    if (!res.ok) {
+      throw new Error(`Failed to fetch static file (${res.status}): ${repoPath}`);
+    }
+    const text = await res.text();
+    return { exists: true, sha: null, content: text, raw: null };
+  }
 
-    const binary = atob(file.rawBase64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i += 1) {
-      bytes[i] = binary.charCodeAt(i);
+  async readJson(relativeSubpath, fallback = null) {
+    const meta = await this.getFileMeta(relativeSubpath);
+    if (!meta.exists || !meta.content) return fallback;
+    try {
+      return JSON.parse(meta.content);
+    } catch {
+      return fallback;
+    }
+  }
+
+  async putFile(relativeSubpath, contentStringOrBase64, commitMessage, options = {}) {
+    if (!this.hasToken()) {
+      throw new Error('GitHub Personal Access Token is required to write to GitHub.');
+    }
+    const target = options.target || this.getDataTarget();
+    if (!target.owner || !target.repo) {
+      throw new Error('GitHub owner and repository are not configured.');
     }
 
-    const blob = new Blob([bytes], { type: mimeType });
-    return URL.createObjectURL(blob);
+    const repoPath = `${target.basePath}/${String(relativeSubpath || '').replace(/^\/+/, '')}`;
+    const encodedPath = repoPath.split('/').map(encodeURIComponent).join('/');
+    const endpoint = `https://api.github.com/repos/${encodeURIComponent(
+      target.owner
+    )}/${encodeURIComponent(target.repo)}/contents/${encodedPath}`;
+
+    const base64Content = options.isBase64
+      ? String(contentStringOrBase64 || '')
+      : encodeBase64Utf8(String(contentStringOrBase64 ?? ''));
+
+    const attemptPut = async (knownSha) => {
+      let sha = knownSha;
+      if (!sha) {
+        try {
+          const existing = await this._apiRequest(
+            `${endpoint}?ref=${encodeURIComponent(target.branch)}&_t=${Date.now()}`
+          );
+          if (existing && existing.sha) sha = existing.sha;
+        } catch (err) {
+          if (err.status !== 404) throw err;
+        }
+      }
+
+      const payload = {
+        message: commitMessage || `diary: update ${repoPath}`,
+        content: base64Content,
+        branch: target.branch,
+      };
+      if (sha) payload.sha = sha;
+
+      return this._apiRequest(endpoint, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+    };
+
+    try {
+      return await attemptPut(options.sha || null);
+    } catch (err) {
+      if (err.status === 409 && !options._retried) {
+        return this.putFile(relativeSubpath, contentStringOrBase64, commitMessage, {
+          ...options,
+          sha: null,
+          _retried: true,
+        });
+      }
+      throw err;
+    }
+  }
+
+  async putJson(relativeSubpath, obj, commitMessage, options = {}) {
+    const serialized = JSON.stringify(obj, null, 2);
+    return this.putFile(relativeSubpath, serialized, commitMessage, {
+      ...options,
+      isBase64: false,
+    });
+  }
+
+  async uploadBinaryMedia(relativeMediaSubpath, arrayBufferOrBytes, commitMessage) {
+    const base64 = arrayBufferToBase64(arrayBufferOrBytes);
+    return this.putFile(relativeMediaSubpath, base64, commitMessage, {
+      isBase64: true,
+    });
+  }
+
+  async deleteFile(relativeSubpath, commitMessage, options = {}) {
+    if (!this.hasToken()) {
+      throw new Error('GitHub Personal Access Token is required to delete files on GitHub.');
+    }
+    const target = options.target || this.getDataTarget();
+    const repoPath = `${target.basePath}/${String(relativeSubpath || '').replace(/^\/+/, '')}`;
+    const encodedPath = repoPath.split('/').map(encodeURIComponent).join('/');
+    const endpoint = `https://api.github.com/repos/${encodeURIComponent(
+      target.owner
+    )}/${encodeURIComponent(target.repo)}/contents/${encodedPath}`;
+
+    let sha = options.sha || null;
+    if (!sha) {
+      try {
+        const existing = await this._apiRequest(
+          `${endpoint}?ref=${encodeURIComponent(target.branch)}&_t=${Date.now()}`
+        );
+        sha = existing?.sha || null;
+      } catch (err) {
+        if (err.status === 404) return { deleted: false, reason: 'not-found' };
+        throw err;
+      }
+    }
+
+    if (!sha) return { deleted: false, reason: 'missing-sha' };
+
+    await this._apiRequest(endpoint, {
+      method: 'DELETE',
+      body: JSON.stringify({
+        message: commitMessage || `diary: delete ${repoPath}`,
+        sha,
+        branch: target.branch,
+      }),
+    });
+
+    return { deleted: true, path: repoPath };
+  }
+
+  async updateDayAndIndex(dayStr, dayDoc, commitMessage, options = {}) {
+    const daySubpath = `days/${dayStr}.json`;
+    const indexSubpath = 'index.json';
+
+    const saveDayResult = await this.putJson(daySubpath, dayDoc, commitMessage, options);
+
+    let currentIndex = null;
+    try {
+      const existingIdxMeta = await this.getFileMeta(indexSubpath);
+      if (existingIdxMeta.exists && existingIdxMeta.content) {
+        currentIndex = JSON.parse(existingIdxMeta.content);
+      }
+    } catch {
+      currentIndex = null;
+    }
+
+    const nextIndex = recalculateIndexForDay(currentIndex, dayStr, dayDoc);
+    const saveIndexResult = await this.putJson(
+      indexSubpath,
+      nextIndex,
+      `${commitMessage} (index ${dayStr})`,
+      { _retried: false }
+    );
+
+    return {
+      dayResult: saveDayResult,
+      indexResult: saveIndexResult,
+      index: nextIndex,
+    };
   }
 }
