@@ -6,6 +6,8 @@
  * - Keeps backward-compatible helper exports so existing modules remain unbroken
  */
 
+import { deriveArgon2idCryptoKey } from './kdf.js';
+
 export const VAULT_CANARY_PLAINTEXT = 'PERPETUAL_VAULT_OK';
 export const DEFAULT_PBKDF2_ITERATIONS = 250000;
 export const DEFAULT_ITERATIONS = DEFAULT_PBKDF2_ITERATIONS;
@@ -198,6 +200,29 @@ export async function deriveKey(
     { name: 'AES-GCM', length: 256 },
     Boolean(extractable),
     ['encrypt', 'decrypt', 'wrapKey', 'unwrapKey']
+  );
+}
+
+/**
+ * Unified KEK derivation supporting both RFC 9106 Argon2id (memory-hard Web Worker)
+ * and PBKDF2-SHA256 for seamless backward compatibility.
+ */
+export async function deriveSlotKek(password, slot, extractable = false) {
+  const saltBytes =
+    typeof slot.salt === 'string' ? base64ToBytes(slot.salt) : new Uint8Array(slot.salt);
+  if (String(slot.kdf || '').toLowerCase() === 'argon2id') {
+    const { key } = await deriveArgon2idCryptoKey(password, saltBytes, {
+      memoryKiB: Number(slot.memoryKiB) || 16384,
+      timeCost: Number(slot.timeCost) || 2,
+      extractable,
+    });
+    return key;
+  }
+  return deriveKey(
+    password,
+    saltBytes,
+    Number(slot.iterations) || DEFAULT_PBKDF2_ITERATIONS,
+    extractable
   );
 }
 
@@ -560,11 +585,40 @@ export async function decryptBinary(encryptedBufferOrBytes, keyOrKeyring, { aad 
 }
 
 export async function createPasswordSlot(password, dek, options = {}) {
-  const salt = bytesToBase64(randomBytes(16));
+  const saltBytes = randomBytes(16);
+  const salt = bytesToBase64(saltBytes);
+  const kdfChoice = String(options.kdf || 'PBKDF2-SHA256');
+  const nowIso = new Date().toISOString();
+
+  if (kdfChoice.toLowerCase() === 'argon2id') {
+    const memoryKiB = Number(options.memoryKiB) || 16384;
+    const timeCost = Number(options.timeCost) || 2;
+    const parallelism = 1;
+    const { key: kek } = await deriveArgon2idCryptoKey(password, saltBytes, {
+      memoryKiB,
+      timeCost,
+      extractable: false,
+    });
+    const { iv, wrappedKey } = await wrapKeyWithKEK(dek, kek);
+    return {
+      id: options.id || `slot-pw-${Date.now().toString(36)}`,
+      type: 'password',
+      label: options.label || 'Master Password',
+      kdf: 'Argon2id',
+      memoryKiB,
+      timeCost,
+      parallelism,
+      salt,
+      iv,
+      wrappedDek: wrappedKey,
+      createdAt: options.createdAt || nowIso,
+      rotatedAt: nowIso,
+    };
+  }
+
   const iterations = Number(options.iterations) || DEFAULT_PBKDF2_ITERATIONS;
   const kek = await deriveKey(password, salt, iterations, false);
   const { iv, wrappedKey } = await wrapKeyWithKEK(dek, kek);
-  const nowIso = new Date().toISOString();
 
   return {
     id: options.id || `slot-pw-${Date.now().toString(36)}`,
@@ -623,6 +677,9 @@ export async function createEnvelopeVault(password, options = {}) {
   const primarySlot = await createPasswordSlot(password, dek, {
     id: 'slot-primary-password',
     label: options.slotLabel || 'Master Password',
+    kdf: options.kdf || 'PBKDF2-SHA256',
+    memoryKiB: options.memoryKiB,
+    timeCost: options.timeCost,
     iterations: options.iterations || DEFAULT_PBKDF2_ITERATIONS,
   });
 
@@ -710,12 +767,7 @@ export async function unlockVault(secretInput, vaultMeta) {
     const pwSlots = vaultMeta.keySlots.filter((s) => s && s.type === 'password');
     for (const slot of pwSlots) {
       try {
-        const kek = await deriveKey(
-          secretInput,
-          slot.salt,
-          slot.iterations || DEFAULT_PBKDF2_ITERATIONS,
-          false
-        );
+        const kek = await deriveSlotKek(secretInput, slot, false);
         const dek = await unwrapKeyWithKEK(slot.wrappedDek, slot.iv, kek, true);
         const done = await finishEnvelopeUnlock(vaultMeta, dek, slot, 'password');
         if (done) return done;
@@ -800,6 +852,9 @@ export async function rotateVaultPasswordWithKeyring(vaultMeta, keyring, newPass
     id: originalSlot?.id || 'slot-primary-password',
     label: originalSlot?.label || 'Master Password',
     createdAt: originalSlot?.createdAt,
+    kdf: options.kdf || originalSlot?.kdf || 'PBKDF2-SHA256',
+    memoryKiB: options.memoryKiB || originalSlot?.memoryKiB,
+    timeCost: options.timeCost || originalSlot?.timeCost,
     iterations: options.iterations || DEFAULT_PBKDF2_ITERATIONS,
   });
 
@@ -910,6 +965,26 @@ export async function createVaultConfig(password, options = {}) {
 export async function verifyVaultCanary(password, vaultMeta) {
   const res = await unlockVault(password, vaultMeta);
   return Boolean(res.ok);
+}
+
+/**
+ * Upgrades the primary password key slot in-place to memory-hard Argon2id (or back to PBKDF2)
+ * without changing the underlying DEK or re-encrypting any diary entries.
+ */
+export async function upgradePasswordSlotKdf(
+  vaultMeta,
+  currentPassword,
+  { kdf = 'Argon2id', memoryKiB = 16384, timeCost = 2 } = {}
+) {
+  const unlocked = await unlockVault(currentPassword, vaultMeta);
+  if (!unlocked.ok || unlocked.version !== 2) {
+    throw new Error('Current master password is incorrect (v2 Envelope Vault required).');
+  }
+  return rotateVaultPasswordWithKeyring(vaultMeta, unlocked.keyring, currentPassword, {
+    kdf,
+    memoryKiB,
+    timeCost,
+  });
 }
 
 export const verifyVaultPassword = verifyVaultCanary;
