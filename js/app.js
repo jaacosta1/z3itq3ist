@@ -1,5 +1,5 @@
 // js/app.js — Perpetual Side-by-Side Diary Main Application Controller
-// Phase 3: AES-GCM AAD Tamper Binding, Auto-Lock Inactivity Timer & Panic Hotkey (Ctrl+Shift+L)
+// Phase 4: Shared-Computer Zero-Footprint Mode & Emergency Paper Recovery Kit
 
 import {
   encryptText,
@@ -9,8 +9,10 @@ import {
   buildEntryAad,
   buildCommentAad,
   createEnvelopeVault,
+  attachPaperRecoverySlot,
   unlockVault,
   rotateVaultPassword,
+  rotateVaultPasswordWithKeyring,
   upgradeLegacyVaultToEnvelope,
   encryptPatToken,
 } from './crypto.js';
@@ -29,6 +31,10 @@ import {
   AlignmentStudio,
   attachInlineAlignController,
 } from './media.js';
+import {
+  openPrintableRecoveryCard,
+  buildOfflineDecryptorHtml,
+} from './recovery.js';
 
 const MONTHS = [
   'January',
@@ -215,10 +221,14 @@ class PerpetualDiaryApp {
       compareDateB: '2026-11-24',
       indexData: { updatedAt: '', days: {} },
       dayCache: {},
+      sandboxRamDays: null,
+      ramMediaUrls: new Map(),
       vaultMeta: null,
       keyring: null,
       cryptoKey: null,
       unlocked: true,
+      zeroFootprint: false,
+      recentRecoveryCode: null,
       autoLockMinutes: Number.isFinite(savedAutoLock) && savedAutoLock >= 0 ? savedAutoLock : 15,
       pendingQuote: null,
       editingCommentId: null,
@@ -242,12 +252,125 @@ class PerpetualDiaryApp {
     this.autoLockWarned = false;
   }
 
+  // Zero-Footprint Storage Gateways
+  storageSet(key, value) {
+    if (this.state.zeroFootprint) return false;
+    try {
+      window.localStorage.setItem(key, value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  storageGet(key) {
+    if (this.state.zeroFootprint) return null;
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  storageRemove(key) {
+    try {
+      window.localStorage.removeItem(key);
+    } catch {
+      // ignore
+    }
+  }
+
+  setZeroFootprintMode(enabled, notify = false) {
+    const next = Boolean(enabled);
+    this.state.zeroFootprint = next;
+
+    const badge = document.getElementById('zero-footprint-badge');
+    if (badge) badge.hidden = !next;
+
+    const lockCb = document.getElementById('lock-zero-footprint-checkbox');
+    if (lockCb) lockCb.checked = next;
+
+    const ghCb = document.getElementById('gh-zero-footprint-checkbox');
+    if (ghCb) ghCb.checked = next;
+
+    const draftStatus = document.getElementById('entry-draft-status');
+    if (draftStatus) {
+      draftStatus.textContent = next
+        ? 'Zero-Footprint: drafts kept in RAM only'
+        : 'Drafts auto-saved locally';
+    }
+
+    if (notify) {
+      this.showToast(
+        next
+          ? 'Zero-Footprint Mode ON — all keys, PAT, and drafts stay strictly in RAM.'
+          : 'Zero-Footprint Mode OFF — local browser persistence re-enabled.',
+        'info'
+      );
+    }
+  }
+
+  revokeRamMediaUrls() {
+    for (const url of this.state.ramMediaUrls.values()) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        // ignore
+      }
+    }
+    this.state.ramMediaUrls.clear();
+  }
+
+  async resolveMediaUrlSafe(src) {
+    if (!src) return '';
+    if (String(src).startsWith('ram:')) {
+      return this.state.ramMediaUrls.get(src) || '';
+    }
+    return resolveMediaSrc(src, this.gh, this.state.zeroFootprint ? null : this.mediaStore);
+  }
+
+  async wipeAllLocalBrowserTraces() {
+    const keysToRemove = [];
+    try {
+      for (let i = 0; i < window.localStorage.length; i += 1) {
+        const k = window.localStorage.key(i);
+        if (k && (k.startsWith('perpetual_') || k.startsWith('diary_'))) {
+          keysToRemove.push(k);
+        }
+      }
+      keysToRemove.forEach((k) => window.localStorage.removeItem(k));
+    } catch {
+      // ignore
+    }
+
+    try {
+      window.sessionStorage.clear();
+    } catch {
+      // ignore
+    }
+
+    try {
+      await new Promise((resolve) => {
+        const req = window.indexedDB.deleteDatabase('PerpetualDiaryMediaDB');
+        req.onsuccess = () => resolve();
+        req.onerror = () => resolve();
+        req.onblocked = () => resolve();
+      });
+    } catch {
+      // ignore
+    }
+
+    this.revokeRamMediaUrls();
+  }
+
   hasActiveSessionKey() {
     return Boolean(this.state.keyring?.dek || this.state.keyring?.legacyKey || this.state.cryptoKey);
   }
 
   hasConfiguredVault() {
-    return Boolean(this.state.vaultMeta && (this.state.vaultMeta.canary || this.state.vaultMeta.canaryCipher));
+    return Boolean(
+      this.state.vaultMeta && (this.state.vaultMeta.canary || this.state.vaultMeta.canaryCipher)
+    );
   }
 
   setActiveKeyring(keyring) {
@@ -330,11 +453,20 @@ class PerpetualDiaryApp {
   }
 
   scrubSensitiveDom() {
-    const clearHtmlIds = ['columns-stage', 'comments-list', 'archive-results', 'entry-preview-pane'];
+    const clearHtmlIds = [
+      'columns-stage',
+      'comments-list',
+      'archive-results',
+      'entry-preview-pane',
+      'vault-recovery-code-display',
+    ];
     for (const id of clearHtmlIds) {
       const el = document.getElementById(id);
       if (el) el.innerHTML = '';
     }
+
+    const recBox = document.getElementById('vault-recovery-code-box');
+    if (recBox) recBox.hidden = true;
 
     const clearValueIds = [
       'entry-title-input',
@@ -345,6 +477,7 @@ class PerpetualDiaryApp {
       'vault-current-password',
       'vault-new-password',
       'vault-confirm-password',
+      'gh-token-input',
     ];
     for (const id of clearValueIds) {
       const el = document.getElementById(id);
@@ -368,13 +501,13 @@ class PerpetualDiaryApp {
       return;
     }
 
-    // Flush unsaved composer draft to localStorage before scrubbing if user was mid-sentence
+    // Flush unsaved composer draft ONLY if Zero-Footprint Mode is OFF
     const composerOpen = !document.getElementById('composer-modal')?.hidden;
-    if (composerOpen) {
+    if (composerOpen && !this.state.zeroFootprint) {
       const diaryDate = document.getElementById('entry-date-input')?.value;
       const bodyVal = document.getElementById('entry-body-input')?.value || '';
       if (diaryDate && bodyVal.trim() && !this.state.editingEntryKey) {
-        window.localStorage.setItem(
+        this.storageSet(
           `perpetual_draft_${diaryDate}`,
           JSON.stringify({
             diaryDate,
@@ -389,21 +522,32 @@ class PerpetualDiaryApp {
     }
 
     this.setActiveKeyring(null);
+    this.state.recentRecoveryCode = null;
     this.state.unlocked = false;
     this.state.dayCache = {};
+    this.revokeRamMediaUrls();
+
+    if (this.state.zeroFootprint) {
+      this.gh.updateConfig({ token: '' });
+    }
+
     this.scrubSensitiveDom();
 
     const reasonBadge = document.getElementById('lock-reason-badge');
     if (reasonBadge) {
       if (reason === 'panic') {
-        reasonBadge.textContent = 'PANIC LOCK ACTIVATED (CTRL+SHIFT+L) · MEMORY WIPED';
+        reasonBadge.textContent = this.state.zeroFootprint
+          ? 'PANIC LOCK (ZERO-FOOTPRINT) · RAM & PAT WIPED'
+          : 'PANIC LOCK ACTIVATED (CTRL+SHIFT+L) · MEMORY WIPED';
         reasonBadge.hidden = false;
       } else if (reason === 'inactivity') {
         const mins = this.getEffectiveAutoLockMinutes();
         reasonBadge.textContent = `AUTO-LOCKED AFTER ${mins}M OF INACTIVITY`;
         reasonBadge.hidden = false;
       } else if (reason === 'manual') {
-        reasonBadge.textContent = 'LOCKED · SESSION KEY WIPED';
+        reasonBadge.textContent = this.state.zeroFootprint
+          ? 'LOCKED · ZERO-FOOTPRINT RAM & PAT WIPED'
+          : 'LOCKED · SESSION KEY WIPED';
         reasonBadge.hidden = false;
       } else {
         reasonBadge.hidden = true;
@@ -426,10 +570,12 @@ class PerpetualDiaryApp {
     this.initAlignmentStudios();
     this.bindEvents();
 
-    try {
-      await this.mediaStore.open();
-    } catch {
-      // IndexedDB fallback handled gracefully
+    if (!this.state.zeroFootprint) {
+      try {
+        await this.mediaStore.open();
+      } catch {
+        // IndexedDB fallback handled gracefully
+      }
     }
 
     await this.loadVaultAndIndex();
@@ -441,14 +587,14 @@ class PerpetualDiaryApp {
   }
 
   initTheme() {
-    const savedTheme = window.localStorage.getItem('perpetual_diary_theme') || 'dark';
-    this.setTheme(savedTheme);
+    const savedTheme = this.storageGet('perpetual_diary_theme') || 'dark';
+    this.setTheme(savedTheme, false);
   }
 
-  setTheme(theme) {
+  setTheme(theme, persist = true) {
     const next = theme === 'light' ? 'light' : 'dark';
     document.documentElement.setAttribute('data-theme', next);
-    window.localStorage.setItem('perpetual_diary_theme', next);
+    if (persist) this.storageSet('perpetual_diary_theme', next);
     const icon = document.getElementById('theme-icon');
     if (icon) icon.textContent = next === 'dark' ? '☀' : '☾';
   }
@@ -552,7 +698,7 @@ class PerpetualDiaryApp {
   }
 
   async loadVaultAndIndex() {
-    const localVaultRaw = window.localStorage.getItem('perpetual_diary_vault_local_v1');
+    const localVaultRaw = this.storageGet('perpetual_diary_vault_local_v1');
     let vaultMeta = null;
 
     if (this.gh.hasToken() || this.gh.isConfigured()) {
@@ -574,7 +720,7 @@ class PerpetualDiaryApp {
     this.state.vaultMeta = vaultMeta;
     if (Number.isFinite(Number(vaultMeta?.autoLockMinutes))) {
       this.state.autoLockMinutes = Number(vaultMeta.autoLockMinutes);
-      window.localStorage.setItem(AUTOLOCK_STORAGE_KEY, String(this.state.autoLockMinutes));
+      this.storageSet(AUTOLOCK_STORAGE_KEY, String(this.state.autoLockMinutes));
     }
 
     if (vaultMeta && vaultMeta.enabled && !this.hasActiveSessionKey()) {
@@ -595,7 +741,7 @@ class PerpetualDiaryApp {
       }
     }
 
-    const sandboxIdxRaw = window.localStorage.getItem('perpetual_diary_sandbox_index_v1');
+    const sandboxIdxRaw = this.storageGet('perpetual_diary_sandbox_index_v1');
     if (sandboxIdxRaw) {
       try {
         this.state.indexData = JSON.parse(sandboxIdxRaw);
@@ -606,10 +752,7 @@ class PerpetualDiaryApp {
     }
 
     this.state.indexData = JSON.parse(JSON.stringify(SANDBOX_SEED_INDEX));
-    window.localStorage.setItem(
-      'perpetual_diary_sandbox_index_v1',
-      JSON.stringify(this.state.indexData)
-    );
+    this.storageSet('perpetual_diary_sandbox_index_v1', JSON.stringify(this.state.indexData));
   }
 
   async getDayDocument(dayStr, forceRefresh = false) {
@@ -630,17 +773,20 @@ class PerpetualDiaryApp {
       }
     }
 
-    const sandboxDaysRaw = window.localStorage.getItem('perpetual_diary_sandbox_days_v1');
-    let sandboxDays = {};
-    if (sandboxDaysRaw) {
-      try {
-        sandboxDays = JSON.parse(sandboxDaysRaw);
-      } catch {
-        sandboxDays = {};
+    let sandboxDays = this.state.sandboxRamDays;
+    if (!sandboxDays) {
+      const sandboxDaysRaw = this.storageGet('perpetual_diary_sandbox_days_v1');
+      if (sandboxDaysRaw) {
+        try {
+          sandboxDays = JSON.parse(sandboxDaysRaw);
+        } catch {
+          sandboxDays = JSON.parse(JSON.stringify(SANDBOX_SEED_DAYS));
+        }
+      } else {
+        sandboxDays = JSON.parse(JSON.stringify(SANDBOX_SEED_DAYS));
+        this.storageSet('perpetual_diary_sandbox_days_v1', JSON.stringify(sandboxDays));
       }
-    } else {
-      sandboxDays = JSON.parse(JSON.stringify(SANDBOX_SEED_DAYS));
-      window.localStorage.setItem('perpetual_diary_sandbox_days_v1', JSON.stringify(sandboxDays));
+      this.state.sandboxRamDays = sandboxDays;
     }
 
     const doc = sandboxDays[dayStr] || {
@@ -667,26 +813,17 @@ class PerpetualDiaryApp {
       return normalized;
     }
 
-    const sandboxDaysRaw = window.localStorage.getItem('perpetual_diary_sandbox_days_v1');
-    let sandboxDays = {};
-    try {
-      sandboxDays = sandboxDaysRaw ? JSON.parse(sandboxDaysRaw) : {};
-    } catch {
-      sandboxDays = {};
-    }
-
+    const sandboxDays = this.state.sandboxRamDays || JSON.parse(JSON.stringify(SANDBOX_SEED_DAYS));
     if (Object.keys(normalized.entries).length === 0 && normalized.comments.length === 0) {
       delete sandboxDays[dayStr];
     } else {
       sandboxDays[dayStr] = normalized;
     }
+    this.state.sandboxRamDays = sandboxDays;
+    this.storageSet('perpetual_diary_sandbox_days_v1', JSON.stringify(sandboxDays));
 
-    window.localStorage.setItem('perpetual_diary_sandbox_days_v1', JSON.stringify(sandboxDays));
     this.state.indexData = recalculateIndexForDay(this.state.indexData, dayStr, normalized);
-    window.localStorage.setItem(
-      'perpetual_diary_sandbox_index_v1',
-      JSON.stringify(this.state.indexData)
-    );
+    this.storageSet('perpetual_diary_sandbox_index_v1', JSON.stringify(this.state.indexData));
     return normalized;
   }
 
@@ -694,9 +831,9 @@ class PerpetualDiaryApp {
     this.state.vaultMeta = vaultMeta;
     if (Number.isFinite(Number(vaultMeta?.autoLockMinutes))) {
       this.state.autoLockMinutes = Number(vaultMeta.autoLockMinutes);
-      window.localStorage.setItem(AUTOLOCK_STORAGE_KEY, String(this.state.autoLockMinutes));
+      this.storageSet(AUTOLOCK_STORAGE_KEY, String(this.state.autoLockMinutes));
     }
-    window.localStorage.setItem('perpetual_diary_vault_local_v1', JSON.stringify(vaultMeta));
+    this.storageSet('perpetual_diary_vault_local_v1', JSON.stringify(vaultMeta));
     if (this.gh.hasToken()) {
       await this.gh.putJson('vault.json', vaultMeta, commitMessage);
     }
@@ -994,7 +1131,7 @@ class PerpetualDiaryApp {
 
     let mediaHtml = '';
     if (!isLockedEntry && !isTampered && entry.image && entry.image.src) {
-      const resolvedSrc = await resolveMediaSrc(entry.image.src, this.gh, this.mediaStore);
+      const resolvedSrc = await this.resolveMediaUrlSafe(entry.image.src);
       if (resolvedSrc) {
         const align = entry.image.align || 'full';
         const posX = Number.isFinite(Number(entry.image.posX)) ? Number(entry.image.posX) : 50;
@@ -1225,7 +1362,7 @@ class PerpetualDiaryApp {
 
       let photoHtml = '';
       if (!isLocked && !isTampered && cmt.image && cmt.image.src) {
-        const resolved = await resolveMediaSrc(cmt.image.src, this.gh, this.mediaStore);
+        const resolved = await this.resolveMediaUrlSafe(cmt.image.src);
         if (resolved) {
           photoHtml = `
             <figure class="comment-figure">
@@ -1321,7 +1458,7 @@ class PerpetualDiaryApp {
     document.getElementById('comment-photo-remove-btn').hidden = !this.state.commentDraftPhoto;
     document.getElementById('comment-photo-caption').value = cmt.image?.caption || '';
     if (this.state.commentDraftPhoto) {
-      resolveMediaSrc(this.state.commentDraftPhoto.src, this.gh, this.mediaStore).then((src) => {
+      this.resolveMediaUrlSafe(this.state.commentDraftPhoto.src).then((src) => {
         this.commentStudio.setMedia(src, this.state.commentDraftPhoto);
       });
     } else {
@@ -1349,6 +1486,17 @@ class PerpetualDiaryApp {
     document.getElementById('comment-quote-attachment').hidden = true;
     document.getElementById('comment-quote-preview').textContent = '';
     document.getElementById('comment-quote-source').textContent = '';
+  }
+
+  async storeLocalMediaBuffer(mediaSubpath, buffer, mime) {
+    if (this.state.zeroFootprint) {
+      const ramKey = `ram:${mediaSubpath}`;
+      const blobUrl = URL.createObjectURL(new Blob([buffer], { type: mime || 'image/jpeg' }));
+      this.state.ramMediaUrls.set(ramKey, blobUrl);
+      return ramKey;
+    }
+    await this.mediaStore.putImage(mediaSubpath, buffer, mime);
+    return `idb:${mediaSubpath}`;
   }
 
   async handleCommentSubmit(ev) {
@@ -1395,12 +1543,11 @@ class PerpetualDiaryApp {
           );
           imagePayload.src = `${this.gh.getDataTarget().basePath}/${mediaSubpath}`;
         } else {
-          await this.mediaStore.putImage(
+          imagePayload.src = await this.storeLocalMediaBuffer(
             mediaSubpath,
             imagePayload._pendingBuffer,
             imagePayload._mime
           );
-          imagePayload.src = `idb:${mediaSubpath}`;
         }
         delete imagePayload._pendingBuffer;
         delete imagePayload._ext;
@@ -1504,7 +1651,7 @@ class PerpetualDiaryApp {
         this.state.entryDraftPhoto = { ...editEntry.image };
         document.getElementById('entry-photo-caption').value = editEntry.image.caption || '';
         document.getElementById('entry-photo-remove-btn').hidden = false;
-        resolveMediaSrc(editEntry.image.src, this.gh, this.mediaStore).then((resolved) => {
+        this.resolveMediaUrlSafe(editEntry.image.src).then((resolved) => {
           this.entryStudio.setMedia(resolved, editEntry.image);
         });
       } else {
@@ -1528,6 +1675,13 @@ class PerpetualDiaryApp {
       deleteBtn.hidden = true;
     }
 
+    const statusEl = document.getElementById('entry-draft-status');
+    if (statusEl) {
+      statusEl.textContent = this.state.zeroFootprint
+        ? 'Zero-Footprint: drafts kept in RAM only'
+        : 'Drafts auto-saved locally';
+    }
+
     this.updateEditorCounts();
     this.checkDraftBanner(dateInput.value);
     modal.hidden = false;
@@ -1540,8 +1694,10 @@ class PerpetualDiaryApp {
   }
 
   scheduleDraftAutosave() {
+    if (this.state.zeroFootprint) return;
     if (this.draftSaveTimer) window.clearTimeout(this.draftSaveTimer);
     this.draftSaveTimer = window.setTimeout(() => {
+      if (this.state.zeroFootprint) return;
       const diaryDate = document.getElementById('entry-date-input')?.value;
       if (!diaryDate) return;
       const draftPayload = {
@@ -1552,7 +1708,7 @@ class PerpetualDiaryApp {
         body: document.getElementById('entry-body-input').value,
         savedAt: new Date().toISOString(),
       };
-      window.localStorage.setItem(`perpetual_draft_${diaryDate}`, JSON.stringify(draftPayload));
+      this.storageSet(`perpetual_draft_${diaryDate}`, JSON.stringify(draftPayload));
       const statusEl = document.getElementById('entry-draft-status');
       if (statusEl) statusEl.textContent = 'Draft saved locally';
     }, 800);
@@ -1560,11 +1716,11 @@ class PerpetualDiaryApp {
 
   checkDraftBanner(diaryDate) {
     const banner = document.getElementById('draft-recovery-banner');
-    if (!banner || this.state.editingEntryKey) {
+    if (!banner || this.state.editingEntryKey || this.state.zeroFootprint) {
       if (banner) banner.hidden = true;
       return;
     }
-    const raw = window.localStorage.getItem(`perpetual_draft_${diaryDate}`);
+    const raw = this.storageGet(`perpetual_draft_${diaryDate}`);
     if (!raw) {
       banner.hidden = true;
       return;
@@ -1679,8 +1835,11 @@ class PerpetualDiaryApp {
           );
           imageObj.src = `${this.gh.getDataTarget().basePath}/${mediaSubpath}`;
         } else {
-          await this.mediaStore.putImage(mediaSubpath, imageObj._pendingBuffer, imageObj._mime);
-          imageObj.src = `idb:${mediaSubpath}`;
+          imageObj.src = await this.storeLocalMediaBuffer(
+            mediaSubpath,
+            imageObj._pendingBuffer,
+            imageObj._mime
+          );
         }
         delete imageObj._pendingBuffer;
         delete imageObj._ext;
@@ -1727,10 +1886,13 @@ class PerpetualDiaryApp {
         `diary: save entry ${diaryDate}`
       );
 
-      window.localStorage.removeItem(`perpetual_draft_${diaryDate}`);
+      this.storageRemove(`perpetual_draft_${diaryDate}`);
       this.state.activeDay = newDayStr;
       this.closeComposer();
-      this.showToast(`Saved entry for ${diaryDate}${encryptFlag ? ' (v3 AAD verified)' : ''}.`, 'success');
+      this.showToast(
+        `Saved entry for ${diaryDate}${encryptFlag ? ' (v3 AAD verified)' : ''}.`,
+        'success'
+      );
       await this.renderReader();
     } catch (err) {
       this.showToast(err.message || 'Failed to save entry.', 'error');
@@ -2038,6 +2200,7 @@ class PerpetualDiaryApp {
       ? String(cfg.tokenExpiresAt).slice(0, 10)
       : '';
     document.getElementById('gh-read-api-checkbox').checked = Boolean(cfg.readFromApiWhenAuthed);
+    document.getElementById('gh-zero-footprint-checkbox').checked = this.state.zeroFootprint;
     document.getElementById('gh-test-result').hidden = true;
 
     document.getElementById('github-modal').hidden = false;
@@ -2055,7 +2218,9 @@ class PerpetualDiaryApp {
     const health = await this.gh.getRepoHealth();
     modePill.textContent =
       health.mode === 'live-api'
-        ? 'LIVE API · READ/WRITE'
+        ? this.state.zeroFootprint
+          ? 'LIVE API · RAM ONLY'
+          : 'LIVE API · READ/WRITE'
         : health.mode === 'public-api'
           ? 'PUBLIC API · READ-ONLY'
           : 'LOCAL SANDBOX';
@@ -2097,14 +2262,17 @@ class PerpetualDiaryApp {
     const isV2 = Number(vm?.version) === 2;
     const isLegacyV1 = hasConfiguredVault && !isV2;
     const enabled = Boolean(vm?.enabled);
+    const unlockedViaRecovery = this.state.keyring?.unlockedVia === 'recovery';
 
     const statusBanner = document.getElementById('vault-status-banner');
     statusBanner.className = `status-callout ${enabled ? 'is-ok' : ''}`;
-    statusBanner.textContent = enabled
-      ? `Vault Lock is ACTIVE (${this.hasActiveSessionKey() ? 'Unlocked in session' : 'Locked'}) · ${isV2 ? 'v2 Envelope + v3 AAD' : 'v1 Legacy'}`
-      : hasConfiguredVault
-        ? `Vault configured (${isV2 ? 'v2 Envelope + v3 AAD' : 'v1 Legacy'}) — Full Lock Screen currently OFF.`
-        : 'No Vault password configured yet. Set a master password to initialize v2 Envelope Encryption + AAD.';
+    statusBanner.textContent = unlockedViaRecovery
+      ? 'Unlocked via Paper Recovery Key — you can set a new Master Password directly below without your old password.'
+      : enabled
+        ? `Vault Lock is ACTIVE (${this.hasActiveSessionKey() ? 'Unlocked in session' : 'Locked'}) · ${isV2 ? 'v2 Envelope + v3 AAD' : 'v1 Legacy'}`
+        : hasConfiguredVault
+          ? `Vault configured (${isV2 ? 'v2 Envelope + v3 AAD' : 'v1 Legacy'}) — Full Lock Screen currently OFF.`
+          : 'No Vault password configured yet. Set a master password to initialize v2 Envelope Encryption + AAD.';
 
     const archPanel = document.getElementById('vault-arch-panel');
     const slotsList = document.getElementById('vault-slots-list');
@@ -2124,13 +2292,17 @@ class PerpetualDiaryApp {
                 year: 'numeric',
               })
             : '—';
+          const spec =
+            s.type === 'recovery'
+              ? '256-bit Raw Hex Recovery Slot'
+              : `${s.kdf || 'PBKDF2-SHA256'} (${Number(s.iterations || 250000).toLocaleString()} iter)`;
           return `
             <div class="vault-slot-card">
               <div>
                 <strong>${escapeHtml(s.label || 'Key Slot')}</strong>
-                <span class="mono-meta"> · ${escapeHtml(s.kdf || 'PBKDF2-SHA256')} (${Number(s.iterations || 250000).toLocaleString()} iter)</span>
+                <span class="mono-meta"> · ${escapeHtml(spec)}</span>
               </div>
-              <span class="mono-meta">Rotated ${escapeHtml(rotDate)}</span>
+              <span class="mono-meta">${s.type === 'recovery' ? 'Issued' : 'Rotated'} ${escapeHtml(rotDate)}</span>
             </div>
           `;
         })
@@ -2138,6 +2310,32 @@ class PerpetualDiaryApp {
     } else {
       archPanel.hidden = true;
       slotsList.innerHTML = '';
+    }
+
+    // Emergency Paper Recovery Kit panel
+    const recoveryPanel = document.getElementById('vault-recovery-panel');
+    const recSlot = (vm?.keySlots || []).find((s) => s && s.type === 'recovery');
+    recoveryPanel.hidden = !isV2;
+    if (isV2) {
+      document.getElementById('vault-recovery-slot-status').textContent = recSlot
+        ? `Slot active (${new Date(recSlot.createdAt).toLocaleDateString()})`
+        : 'No recovery slot yet';
+      document.getElementById('vault-gen-recovery-btn').textContent = recSlot
+        ? 'Regenerate Recovery Key'
+        : 'Generate Recovery Key';
+
+      const codeBox = document.getElementById('vault-recovery-code-box');
+      const codeDisplay = document.getElementById('vault-recovery-code-display');
+      const printBtn = document.getElementById('vault-print-card-btn');
+      if (this.state.recentRecoveryCode) {
+        codeBox.hidden = false;
+        codeDisplay.textContent = this.state.recentRecoveryCode;
+        printBtn.disabled = false;
+      } else {
+        codeBox.hidden = true;
+        codeDisplay.textContent = '';
+        printBtn.disabled = true;
+      }
     }
 
     document.getElementById('vault-upgrade-banner').hidden = !isLegacyV1;
@@ -2148,10 +2346,13 @@ class PerpetualDiaryApp {
     document.getElementById('vault-autolock-select').value = String(
       this.getEffectiveAutoLockMinutes()
     );
-    document.getElementById('vault-current-pass-group').hidden = !hasConfiguredVault;
-    document.getElementById('vault-new-pass-label').textContent = hasConfiguredVault
-      ? 'Rotate Master Password (Instant — re-wraps DEK only)'
-      : 'Set Master Password (initializes v2 Envelope Vault)';
+    document.getElementById('vault-current-pass-group').hidden =
+      !hasConfiguredVault || unlockedViaRecovery;
+    document.getElementById('vault-new-pass-label').textContent = unlockedViaRecovery
+      ? 'Set New Master Password (Recovery Reset — instant)'
+      : hasConfiguredVault
+        ? 'Rotate Master Password (Instant — re-wraps DEK only)'
+        : 'Set Master Password (initializes v2 Envelope Vault)';
     document.getElementById('vault-save-btn').textContent = hasConfiguredVault
       ? 'Save / Rotate Vault'
       : 'Initialize v2 Vault';
@@ -2162,6 +2363,39 @@ class PerpetualDiaryApp {
     document.getElementById('vault-encrypt-pat-checkbox').checked = Boolean(vm?.encryptedPat);
     document.getElementById('vault-error').hidden = true;
     document.getElementById('vault-modal').hidden = false;
+  }
+
+  async handleGenerateRecoveryKey() {
+    if (!this.state.keyring?.dek || Number(this.state.vaultMeta?.version) !== 2) {
+      this.showToast('Unlock your v2 Envelope Vault first to generate a Paper Recovery Key.', 'warn');
+      return;
+    }
+
+    const hasExisting = (this.state.vaultMeta?.keySlots || []).some(
+      (s) => s && s.type === 'recovery'
+    );
+    if (hasExisting) {
+      const ok = await this.openConfirm({
+        title: 'Regenerate Paper Recovery Key',
+        message:
+          'Generating a new Paper Recovery Key immediately invalidates your previously printed sheet. Continue?',
+        confirmLabel: 'Regenerate Key',
+      });
+      if (!ok) return;
+    }
+
+    try {
+      const { recoveryCode, vaultMeta } = await attachPaperRecoverySlot(
+        this.state.vaultMeta,
+        this.state.keyring
+      );
+      await this.persistVaultMeta(vaultMeta, 'diary: update paper recovery key slot');
+      this.state.recentRecoveryCode = recoveryCode;
+      this.showToast('256-bit Paper Recovery Key generated. Print or save it now.', 'success');
+      this.openVaultModal();
+    } catch (err) {
+      this.showToast(err.message || 'Failed to generate recovery key.', 'error');
+    }
   }
 
   async handleMigrateLegacyEntriesToV3Aad() {
@@ -2190,7 +2424,11 @@ class PerpetualDiaryApp {
           if (!entry || !entry.encrypted) continue;
           const bodyVer = getPayloadVersion(entry.body);
           const titleVer = entry.title ? getPayloadVersion(entry.title) : 3;
-          if (bodyVer === 1 || bodyVer === 2 || (entry.title && (titleVer === 1 || titleVer === 2))) {
+          if (
+            bodyVer === 1 ||
+            bodyVer === 2 ||
+            (entry.title && (titleVer === 1 || titleVer === 2))
+          ) {
             const expectedDate = `${yrKey}-${dayStr}`;
             const plainBody = await decryptText(entry.body, this.state.keyring);
             const plainTitle = entry.title ? await decryptText(entry.title, this.state.keyring) : '';
@@ -2274,6 +2512,19 @@ class PerpetualDiaryApp {
   }
 
   bindEvents() {
+    // Zero-Footprint automatic RAM wipe on tab close/unload
+    const wipeOnUnload = () => {
+      if (!this.state.zeroFootprint) return;
+      this.setActiveKeyring(null);
+      this.state.recentRecoveryCode = null;
+      this.state.dayCache = {};
+      this.gh.updateConfig({ token: '' });
+      this.revokeRamMediaUrls();
+      this.scrubSensitiveDom();
+    };
+    window.addEventListener('pagehide', wipeOnUnload);
+    window.addEventListener('beforeunload', wipeOnUnload);
+
     // Activity tracking for Auto-Lock Inactivity Timer
     document.addEventListener('pointerdown', () => this.recordUserActivity(false), { passive: true });
     document.addEventListener('keydown', () => this.recordUserActivity(false), { passive: true });
@@ -2545,7 +2796,7 @@ class PerpetualDiaryApp {
 
     document.getElementById('draft-restore-btn')?.addEventListener('click', () => {
       const diaryDate = document.getElementById('entry-date-input').value;
-      const raw = window.localStorage.getItem(`perpetual_draft_${diaryDate}`);
+      const raw = this.storageGet(`perpetual_draft_${diaryDate}`);
       if (raw) {
         const draft = JSON.parse(raw);
         document.getElementById('entry-title-input').value = draft.title || '';
@@ -2559,7 +2810,7 @@ class PerpetualDiaryApp {
 
     document.getElementById('draft-discard-btn')?.addEventListener('click', () => {
       const diaryDate = document.getElementById('entry-date-input').value;
-      window.localStorage.removeItem(`perpetual_draft_${diaryDate}`);
+      this.storageRemove(`perpetual_draft_${diaryDate}`);
       document.getElementById('draft-recovery-banner').hidden = true;
     });
 
@@ -2615,7 +2866,7 @@ class PerpetualDiaryApp {
       this.entryStudio.clear();
     });
 
-    // GitHub Settings & Split-Repo Events
+    // GitHub Settings, Split-Repo & Zero-Footprint Events
     document
       .getElementById('github-settings-btn')
       ?.addEventListener('click', () => this.openGitHubModal());
@@ -2628,6 +2879,10 @@ class PerpetualDiaryApp {
 
     document.getElementById('gh-use-private-vault')?.addEventListener('change', (e) => {
       document.getElementById('split-vault-fields').hidden = !e.target.checked;
+    });
+
+    document.getElementById('lock-zero-footprint-checkbox')?.addEventListener('change', (e) => {
+      this.setZeroFootprintMode(e.target.checked, true);
     });
 
     const collectGitHubFormConfig = () => ({
@@ -2666,33 +2921,91 @@ class PerpetualDiaryApp {
     document.getElementById('gh-clear-token-btn')?.addEventListener('click', () => {
       document.getElementById('gh-token-input').value = '';
       this.gh.updateConfig({ token: '', tokenExpiresAt: '' });
-      GitHubClient.saveConfig(this.gh.config, window.localStorage);
+      if (!this.state.zeroFootprint) {
+        GitHubClient.saveConfig(this.gh.config, window.localStorage);
+      }
       this.updateModeBadge();
       this.refreshRepoHealthPanel();
       this.showToast('Cleared token from browser.', 'info');
     });
 
+    document.getElementById('gh-wipe-local-btn')?.addEventListener('click', async () => {
+      const ok = await this.openConfirm({
+        title: 'Wipe Local Browser Traces',
+        message:
+          'Erase all locally stored GitHub config, PAT, cached drafts, and IndexedDB media from this browser? (Your GitHub repository data is untouched.)',
+        confirmLabel: 'Wipe This Browser',
+      });
+      if (!ok) return;
+      await this.wipeAllLocalBrowserTraces();
+      this.gh.updateConfig({ token: '' });
+      this.setZeroFootprintMode(true, false);
+      this.updateModeBadge();
+      this.refreshRepoHealthPanel();
+      this.showToast('All local browser traces wiped. Switched to Zero-Footprint RAM mode.', 'success');
+    });
+
     document.getElementById('github-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
+      const nextZeroFootprint = Boolean(
+        document.getElementById('gh-zero-footprint-checkbox').checked
+      );
+      this.setZeroFootprintMode(nextZeroFootprint, false);
+
       const nextCfg = collectGitHubFormConfig();
       this.gh.updateConfig(nextCfg);
-      GitHubClient.saveConfig(nextCfg, window.localStorage);
+      if (!this.state.zeroFootprint) {
+        GitHubClient.saveConfig(nextCfg, window.localStorage);
+      }
       this.state.dayCache = {};
       this.updateModeBadge();
       await this.loadVaultAndIndex();
       await this.renderActiveView();
       await this.refreshRepoHealthPanel();
       document.getElementById('github-modal').hidden = true;
-      this.showToast('GitHub & Split-Repo settings saved.', 'success');
+      this.showToast(
+        this.state.zeroFootprint
+          ? 'Settings applied in RAM only (Zero-Footprint Mode).'
+          : 'GitHub & Split-Repo settings saved.',
+        'success'
+      );
     });
 
-    // Envelope Vault, AAD Migration & Auto-Lock Events
+    // Envelope Vault, AAD Migration & Paper Recovery Kit Events
     document.getElementById('vault-btn')?.addEventListener('click', () => this.openVaultModal());
     document.getElementById('vault-close-btn')?.addEventListener('click', () => {
       document.getElementById('vault-modal').hidden = true;
     });
     document.getElementById('vault-cancel-btn')?.addEventListener('click', () => {
       document.getElementById('vault-modal').hidden = true;
+    });
+
+    document.getElementById('vault-gen-recovery-btn')?.addEventListener('click', () => {
+      this.handleGenerateRecoveryKey();
+    });
+
+    document.getElementById('vault-print-card-btn')?.addEventListener('click', () => {
+      if (!this.state.recentRecoveryCode) {
+        this.showToast('Generate a Paper Recovery Key first so it can be printed.', 'warn');
+        return;
+      }
+      const res = openPrintableRecoveryCard({
+        recoveryCode: this.state.recentRecoveryCode,
+        vaultMeta: this.state.vaultMeta,
+        repoConfig: this.gh.config,
+      });
+      if (!res.openedWindow) {
+        this.showToast('Popup blocked — downloaded printable recovery card HTML instead.', 'info');
+      }
+    });
+
+    document.getElementById('vault-download-decryptor-btn')?.addEventListener('click', () => {
+      const html = buildOfflineDecryptorHtml({
+        vaultMeta: this.state.vaultMeta,
+        repoConfig: this.gh.config,
+      });
+      this.downloadFile('perpetual-offline-decryptor.html', html, 'text/html;charset=utf-8');
+      this.showToast('Downloaded standalone offline decryptor (.HTML).', 'success');
     });
 
     document.getElementById('vault-upgrade-btn')?.addEventListener('click', async () => {
@@ -2715,7 +3028,7 @@ class PerpetualDiaryApp {
         });
         this.setActiveKeyring(res.keyring);
         await this.persistVaultMeta(res.vaultMeta, 'diary: upgrade vault to v2 envelope');
-        this.showToast('Upgraded to v2 Envelope Encryption with v3 AAD support.', 'success');
+        this.showToast('Upgraded to v2 Envelope Encryption with v3 AAD & Recovery Kit.', 'success');
         this.openVaultModal();
       } catch (err) {
         errBox.textContent = err.message;
@@ -2740,6 +3053,7 @@ class PerpetualDiaryApp {
       const encryptPat = Boolean(document.getElementById('vault-encrypt-pat-checkbox').checked);
 
       const hasExistingVault = this.hasConfiguredVault();
+      const unlockedViaRecovery = this.state.keyring?.unlockedVia === 'recovery';
 
       try {
         if (!hasExistingVault) {
@@ -2758,18 +3072,35 @@ class PerpetualDiaryApp {
           await this.persistVaultMeta(created.vaultMeta, 'diary: initialize v2 envelope vault');
           this.showToast('v2 Envelope Vault initialized with v3 AAD protection.', 'success');
         } else if (newPass) {
-          if (!currentPass) {
-            throw new Error('Enter your Current Master Password to rotate to a new password.');
-          }
           if (newPass !== confirmPass) {
             throw new Error('New password and confirmation do not match.');
           }
-          const rotated = await rotateVaultPassword(this.state.vaultMeta, currentPass, newPass, {
-            enabled: lockEnabled,
-            autoLockMinutes,
-            encryptPat,
-            patToken: encryptPat && this.gh.hasToken() ? this.gh.config.token : null,
-          });
+
+          let rotated;
+          if (unlockedViaRecovery && this.state.keyring?.dek) {
+            rotated = await rotateVaultPasswordWithKeyring(
+              this.state.vaultMeta,
+              this.state.keyring,
+              newPass,
+              {
+                enabled: lockEnabled,
+                autoLockMinutes,
+                encryptPat,
+                patToken: encryptPat && this.gh.hasToken() ? this.gh.config.token : null,
+              }
+            );
+          } else {
+            if (!currentPass) {
+              throw new Error('Enter your Current Master Password (or Recovery Key) to rotate.');
+            }
+            rotated = await rotateVaultPassword(this.state.vaultMeta, currentPass, newPass, {
+              enabled: lockEnabled,
+              autoLockMinutes,
+              encryptPat,
+              patToken: encryptPat && this.gh.hasToken() ? this.gh.config.token : null,
+            });
+          }
+
           this.setActiveKeyring(rotated.keyring);
           await this.persistVaultMeta(rotated.vaultMeta, 'diary: rotate master password key slot');
           this.showToast(
@@ -2831,12 +3162,14 @@ class PerpetualDiaryApp {
       e.preventDefault();
       const errEl = document.getElementById('lock-error');
       const passInput = document.getElementById('lock-password-input');
+      const zfChecked = Boolean(document.getElementById('lock-zero-footprint-checkbox')?.checked);
       errEl.hidden = true;
 
       try {
+        this.setZeroFootprintMode(zfChecked, false);
         const res = await unlockVault(passInput.value, this.state.vaultMeta);
         if (!res.ok) {
-          errEl.textContent = res.error || 'Incorrect password';
+          errEl.textContent = res.error || 'Incorrect password or recovery key';
           errEl.hidden = false;
           return;
         }
@@ -2845,7 +3178,9 @@ class PerpetualDiaryApp {
 
         if (res.pat && !this.gh.hasToken()) {
           this.gh.updateConfig({ token: res.pat });
-          GitHubClient.saveConfig(this.gh.config, window.localStorage);
+          if (!this.state.zeroFootprint) {
+            GitHubClient.saveConfig(this.gh.config, window.localStorage);
+          }
         }
 
         passInput.value = '';
@@ -2855,12 +3190,24 @@ class PerpetualDiaryApp {
         document.getElementById('lock-screen').hidden = true;
         this.updateModeBadge();
         await this.renderActiveView();
-        this.showToast(
-          res.version === 2 ? 'Envelope Vault unlocked.' : 'Legacy v1 Vault unlocked.',
-          'success'
-        );
+
+        if (res.unlockedVia === 'recovery') {
+          this.showToast(
+            'Unlocked via Paper Recovery Key. Open Vault (⛨) to set a new Master Password.',
+            'warn'
+          );
+        } else {
+          this.showToast(
+            this.state.zeroFootprint
+              ? 'Vault unlocked in Zero-Footprint Mode (RAM only).'
+              : res.version === 2
+                ? 'Envelope Vault unlocked.'
+                : 'Legacy v1 Vault unlocked.',
+            'success'
+          );
+        }
       } catch {
-        errEl.textContent = 'Incorrect password';
+        errEl.textContent = 'Incorrect password or recovery key';
         errEl.hidden = false;
       }
     });
