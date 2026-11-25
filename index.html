@@ -489,11 +489,16 @@
                 Remove Photo
               </button>
               <select id="entry-webp-preset" class="select-compact select-xs" title="Browser-side WebP compression preset">
+                <option value="thumb">Thumbnail (480px · ~30 KB)</option>
                 <option value="balanced" selected>WebP Balanced (1200px)</option>
                 <option value="compact">WebP Compact (960px)</option>
                 <option value="high">WebP High (1600px)</option>
                 <option value="original">Original (No Resize)</option>
               </select>
+              <label class="checkbox-inline checkbox-xs" title="Keep only the compressed WebP/thumbnail in GitHub and download the untouched original for your offline hard drive">
+                <input type="checkbox" id="entry-archive-original-checkbox" />
+                <span>Archive original locally</span>
+              </label>
               <label class="checkbox-inline checkbox-xs" title="Encrypt photo binary into an opaque .enc blob before committing">
                 <input type="checkbox" id="entry-photo-encrypt-checkbox" checked />
                 <span>Encrypt photo (.enc)</span>
@@ -596,6 +601,37 @@
                 <span class="field-label">Vault Data Folder</span>
                 <input type="text" id="gh-vault-path-input" class="input-text" value="data" />
               </label>
+            </div>
+          </div>
+
+          <div class="settings-section-label">2b. Yearly / Era Media-Repo Sharding (Bypass 1 GB Limit)</div>
+          <label class="checkbox-inline">
+            <input type="checkbox" id="gh-use-media-sharding" />
+            <span>Route photo uploads to yearly/era sibling repos (keeps main diary repo tiny)</span>
+          </label>
+
+          <div id="media-shard-fields" class="split-vault-box" hidden>
+            <div class="form-grid-2">
+              <label class="field-group">
+                <span class="field-label">Shard Repo Pattern ({year} or {decade})</span>
+                <input
+                  type="text"
+                  id="gh-media-shard-pattern"
+                  class="input-text"
+                  value="diary-media-{year}"
+                  placeholder="e.g., diary-media-{year}"
+                />
+              </label>
+              <label class="field-group">
+                <span class="field-label">Shard Branch</span>
+                <input type="text" id="gh-media-shard-branch" class="input-text" value="main" />
+              </label>
+            </div>
+            <div class="shard-test-row">
+              <span id="gh-media-shard-preview" class="mono-meta">Active shard: diary-media-2026</span>
+              <button type="button" id="gh-test-shard-btn" class="btn btn-ghost btn-sm">
+                Test Current Year Shard
+              </button>
             </div>
           </div>
 
