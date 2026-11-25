@@ -50,6 +50,9 @@
           <button type="submit" id="lock-unlock-btn" class="btn btn-primary btn-full">
             Unlock Diary
           </button>
+          <button type="button" id="lock-passkey-btn" class="btn btn-outline btn-full lock-passkey-btn" hidden>
+            ⚷ Unlock with Biometrics / Passkey
+          </button>
         </form>
         <div class="lock-footer">
           <button type="button" id="lock-open-settings-btn" class="btn-link">
@@ -475,6 +478,35 @@
             </label>
           </div>
 
+          <!-- Phase 9: Optional Double-Lock Entry (2nd Independent Passphrase) -->
+          <div class="doublelock-composer-box">
+            <label class="checkbox-inline">
+              <input type="checkbox" id="entry-doublelock-checkbox" />
+              <span>Double-Lock this entry with a 2nd independent passphrase (stays sealed even when diary is open)</span>
+            </label>
+            <div id="entry-doublelock-fields" class="form-grid-2" hidden>
+              <label class="field-group">
+                <span class="field-label">Double-Lock Passphrase (min 4 chars)</span>
+                <input
+                  type="password"
+                  id="entry-doublelock-passphrase"
+                  class="input-text"
+                  placeholder="Enter independent 2nd passphrase"
+                  autocomplete="off"
+                />
+              </label>
+              <label class="field-group">
+                <span class="field-label">Optional Memory Hint (shown on sealed card)</span>
+                <input
+                  type="text"
+                  id="entry-doublelock-hint"
+                  class="input-text"
+                  placeholder="e.g., childhood street name"
+                />
+              </label>
+            </div>
+          </div>
+
           <div class="media-attach-bar">
             <div class="media-attach-controls">
               <label class="btn btn-ghost btn-sm file-btn">
@@ -803,6 +835,74 @@
           <div class="recovery-actions">
             <button type="button" id="vault-migrate-cloak-btn" class="btn btn-primary btn-sm">
               Migrate Repo → Cloaked Shards
+            </button>
+          </div>
+        </div>
+
+        <!-- Phase 9: Biometric / Passkey Unlock (WebAuthn PRF) -->
+        <div id="vault-passkey-panel" class="vault-passkey-panel" hidden>
+          <div class="vault-arch-header">
+            <span class="mono-label">BIOMETRIC / PASSKEY UNLOCK (WEBAUTHN PRF)</span>
+            <span id="vault-passkey-status" class="mono-meta">Not enrolled</span>
+          </div>
+          <p class="section-subtext">
+            Enroll Face ID, Touch ID, Windows Hello, or a hardware security key to unwrap your Envelope DEK without typing your master password. Your password remains your universal fallback.
+          </p>
+          <div id="vault-passkey-list" class="vault-slots-list"></div>
+          <div class="passkey-enroll-row">
+            <input
+              type="text"
+              id="vault-passkey-label-input"
+              class="input-text input-sm"
+              placeholder="Device label (e.g., MacBook Touch ID, Windows Hello)"
+            />
+            <button type="button" id="vault-register-passkey-btn" class="btn btn-primary btn-sm">
+              + Enroll Passkey
+            </button>
+          </div>
+        </div>
+
+        <!-- Phase 9: Plausible Deniability ("Decoy" Vault) -->
+        <div id="vault-decoy-panel" class="vault-decoy-panel" hidden>
+          <div class="vault-arch-header">
+            <span class="mono-label">PLAUSIBLE DENIABILITY · DECOY VAULT</span>
+            <span id="vault-decoy-status" class="mono-meta">Not configured</span>
+          </div>
+          <p class="section-subtext">
+            Configure a secondary decoy password backed by its own isolated DEK. Entering the decoy password unlocks only casual/plaintext entries (and entries written inside the decoy session) with zero visible trace of your real encrypted vault.
+          </p>
+          <div class="form-grid-2">
+            <label class="field-group">
+              <span class="field-label">Decoy Password</span>
+              <input
+                type="password"
+                id="vault-decoy-password"
+                class="input-text"
+                placeholder="Different from Master Password"
+                autocomplete="off"
+              />
+            </label>
+            <label class="field-group">
+              <span class="field-label">Confirm Decoy Password</span>
+              <input
+                type="password"
+                id="vault-decoy-confirm"
+                class="input-text"
+                placeholder="Re-enter decoy password"
+                autocomplete="off"
+              />
+            </label>
+          </div>
+          <label class="checkbox-inline">
+            <input type="checkbox" id="vault-decoy-include-plain" checked />
+            <span>Show unencrypted (plaintext) casual entries when unlocked with Decoy Password</span>
+          </label>
+          <div class="recovery-actions">
+            <button type="button" id="vault-save-decoy-btn" class="btn btn-outline btn-sm">
+              Save Decoy Password
+            </button>
+            <button type="button" id="vault-remove-decoy-btn" class="btn btn-danger btn-sm" hidden>
+              Remove Decoy
             </button>
           </div>
         </div>
