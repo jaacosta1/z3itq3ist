@@ -45,8 +45,23 @@ import {
   attachInlineAlignController,
 } from './media.js';
 import { migratePlaintextMediaToEncryptedVault } from './media-vault.js';
+import {
+  isShardPointer,
+  parseShardPointer,
+  buildShardPointer,
+  resolveShardRepoName,
+  computeFileShortHash,
+  downloadOriginalForColdArchive,
+} from './media-sharding.js';
 import { openPrintableRecoveryCard, buildOfflineDecryptorHtml } from './recovery.js';
 import { renderDiffHtml, buildThreeWayMerge, mergeTags } from './conflict.js';
+import {
+  computeDayShardSubpath,
+  decryptManifestIndex,
+  unsealDayDocument,
+  createCloakAdapter,
+  migrateRepositoryToCloakedMode,
+} from './cloak.js';
 
 const MONTHS = [
   'January',
@@ -419,6 +434,36 @@ class PerpetualDiaryApp {
     );
   }
 
+  isMetadataCloakingActive() {
+    return Boolean(
+      this.state.vaultMeta?.metadataCloaking &&
+        Number(this.state.vaultMeta?.version) === 2 &&
+        this.hasActiveSessionKey()
+    );
+  }
+
+  isGenericCommitsActive() {
+    return Boolean(
+      this.state.vaultMeta?.genericCommitMessages ||
+        this.state.vaultMeta?.metadataCloaking ||
+        this.gh.config.genericCommitMessages
+    );
+  }
+
+  buildCloakTxAdapter() {
+    if (!this.isMetadataCloakingActive()) return null;
+    return createCloakAdapter(
+      this.state.keyring || this.state.cryptoKey,
+      this.isGenericCommitsActive()
+    );
+  }
+
+  saveGitHubConfigLocally() {
+    if (!this.state.zeroFootprint) {
+      GitHubClient.saveConfig(this.gh.config, window.localStorage);
+    }
+  }
+
   setActiveKeyring(keyring) {
     this.state.keyring = keyring || null;
     this.state.cryptoKey = keyring ? keyring.dek || keyring.legacyKey || null : null;
@@ -681,108 +726,16 @@ class PerpetualDiaryApp {
     if (lockNowBtn) {
       lockNowBtn.hidden = !this.hasActiveSessionKey() && !this.hasConfiguredVault();
     }
-  }
 
-  showToast(message, type = 'info') {
-    const stack = document.getElementById('toast-container');
-    if (!stack) return;
-    const toast = document.createElement('div');
-    toast.className = `toast toast-${type}`;
-    toast.textContent = message;
-    stack.appendChild(toast);
-    window.setTimeout(() => {
-      toast.classList.add('is-leaving');
-      window.setTimeout(() => toast.remove(), 220);
-    }, 3600);
-  }
-
-  openConfirm({ title = 'Confirm Action', message = 'Are you sure?', confirmLabel = 'Confirm' }) {
-    return new Promise((resolve) => {
-      this.state.confirmResolver = resolve;
-      const modal = document.getElementById('confirm-modal');
-      document.getElementById('confirm-modal-title').textContent = title;
-      document.getElementById('confirm-modal-message').textContent = message;
-      document.getElementById('confirm-ok-btn').textContent = confirmLabel;
-      modal.hidden = false;
-    });
-  }
-
-  closeConfirm(result = false) {
-    const modal = document.getElementById('confirm-modal');
-    if (modal) modal.hidden = true;
-    const resolver = this.state.confirmResolver;
-    this.state.confirmResolver = null;
-    if (resolver) resolver(Boolean(result));
-  }
-
-  populateDateSelectors() {
-    const monthSel = document.getElementById('month-select');
-    const daySel = document.getElementById('day-select');
-    if (!monthSel || !daySel) return;
-
-    monthSel.innerHTML = MONTHS.map(
-      (name, idx) =>
-        `<option value="${pad2(idx + 1)}">${pad2(idx + 1)} · ${name.slice(0, 3).toUpperCase()}</option>`
-    ).join('');
-
-    this.syncDaySelectorOptions(11, 24);
-  }
-
-  syncDaySelectorOptions(month, selectedDay = 1) {
-    const daySel = document.getElementById('day-select');
-    if (!daySel) return;
-    const maxDay = DAYS_IN_MONTH[month - 1] || 31;
-    const clampedDay = Math.min(maxDay, Math.max(1, Number(selectedDay) || 1));
-    daySel.innerHTML = Array.from({ length: maxDay }, (_, i) => {
-      const d = i + 1;
-      return `<option value="${pad2(d)}">${pad2(d)}</option>`;
-    }).join('');
-    daySel.value = pad2(clampedDay);
-  }
-
-  initAlignmentStudios() {
-    this.entryStudio = new AlignmentStudio(document.getElementById('entry-alignment-host'), {
-      onChange: (layout) => {
-        if (this.state.entryDraftPhoto) {
-          this.state.entryDraftPhoto = { ...this.state.entryDraftPhoto, ...layout };
-          this.scheduleDraftAutosave();
-        }
-      },
-    });
-
-    this.commentStudio = new AlignmentStudio(document.getElementById('comment-alignment-host'), {
-      onChange: (layout) => {
-        if (this.state.commentDraftPhoto) {
-          this.state.commentDraftPhoto = { ...this.state.commentDraftPhoto, ...layout };
-        }
-      },
-    });
-  }
-
-  /* ========================================================================
-     DATA LOADING & PERSISTENCE
-     ======================================================================== */
-  async loadVaultAndIndex() {
-    const localVaultRaw = this.storageGet('perpetual_diary_vault_local_v1');
-    let vaultMeta = null;
-
-    if (this.gh.hasToken() || this.gh.isConfigured()) {
-      try {
-        vaultMeta = await this.gh.readJson('vault.json', null);
-      } catch {
-        vaultMeta = null;
-      }
+    const cloakBadge = document.getElementById('cloak-mode-badge');
+    if (cloakBadge) {
+      cloakBadge.hidden = !Boolean(this.state.vaultMeta?.metadataCloaking);
     }
-
-    if (!vaultMeta && localVaultRaw) {
-      try {
-        vaultMeta = JSON.parse(localVaultRaw);
-      } catch {
-        vaultMeta = null;
-      }
-    }
-
+  }
     this.state.vaultMeta = vaultMeta;
+    if (vaultMeta?.genericCommitMessages || vaultMeta?.metadataCloaking) {
+      this.gh.updateConfig({ genericCommitMessages: true });
+    }
     if (Number.isFinite(Number(vaultMeta?.autoLockMinutes))) {
       this.state.autoLockMinutes = Number(vaultMeta.autoLockMinutes);
       this.storageSet(AUTOLOCK_STORAGE_KEY, String(this.state.autoLockMinutes));
@@ -792,13 +745,41 @@ class PerpetualDiaryApp {
       this.state.unlocked = false;
       const lockScreen = document.getElementById('lock-screen');
       if (lockScreen) lockScreen.hidden = false;
+      // When metadata cloaking is on, do not load or expose any index before unlock
+      if (vaultMeta.metadataCloaking) {
+        this.state.indexData = { updatedAt: '', days: {} };
+        return;
+      }
     } else {
       this.state.unlocked = true;
       const lockScreen = document.getElementById('lock-screen');
       if (lockScreen) lockScreen.hidden = true;
     }
 
+    await this.loadManifestIndex();
+  }
+
+  async loadManifestIndex() {
     if (this.gh.hasToken() || this.gh.isConfigured()) {
+      // Phase 8: Prefer encrypted index.enc when cloaking is active & vault is unlocked
+      if (this.isMetadataCloakingActive()) {
+        try {
+          const encMeta = await this.gh.getFileMeta('index.enc');
+          if (encMeta.exists && encMeta.content) {
+            const decIndex = await decryptManifestIndex(
+              encMeta.content,
+              this.state.keyring || this.state.cryptoKey
+            );
+            if (decIndex && decIndex.days) {
+              this.state.indexData = decIndex;
+              return;
+            }
+          }
+        } catch {
+          // Fall back to plaintext index.json below if not yet migrated
+        }
+      }
+
       const remoteIndex = await this.gh.readJson('index.json', null);
       if (remoteIndex && remoteIndex.days) {
         this.state.indexData = remoteIndex;
@@ -826,6 +807,36 @@ class PerpetualDiaryApp {
     }
 
     if (this.gh.hasToken() || this.gh.isConfigured()) {
+      // Phase 8: Read cloaked HMAC day shard first when Metadata Cloaking is active
+      if (this.isMetadataCloakingActive()) {
+        try {
+          const shardSubpath = await computeDayShardSubpath(
+            dayStr,
+            this.state.keyring || this.state.cryptoKey
+          );
+          const shardMeta = await this.gh.getFileMeta(shardSubpath);
+          if (shardMeta.exists && shardMeta.content) {
+            if (shardMeta.sha) this.state.dayShas[dayStr] = shardMeta.sha;
+            const unsealed = await unsealDayDocument(
+              dayStr,
+              shardMeta.content,
+              this.state.keyring || this.state.cryptoKey
+            );
+            if (unsealed && typeof unsealed === 'object') {
+              const normalized = {
+                day: dayStr,
+                entries: unsealed.entries || {},
+                comments: Array.isArray(unsealed.comments) ? unsealed.comments : [],
+              };
+              this.state.dayCache[dayStr] = normalized;
+              return normalized;
+            }
+          }
+        } catch (err) {
+          this.showToast(`Cloaked shard read warning (${dayStr}): ${err.message}`, 'warn');
+        }
+      }
+
       const { data: remoteDoc, sha } = await this.gh.readJsonWithMeta(`days/${dayStr}.json`, null);
       if (sha) this.state.dayShas[dayStr] = sha;
       if (remoteDoc && typeof remoteDoc === 'object') {
@@ -843,50 +854,6 @@ class PerpetualDiaryApp {
         return emptyRemote;
       }
     }
-
-    let sandboxDays = this.state.sandboxRamDays;
-    if (!sandboxDays) {
-      const sandboxDaysRaw = this.storageGet('perpetual_diary_sandbox_days_v1');
-      if (sandboxDaysRaw) {
-        try {
-          sandboxDays = JSON.parse(sandboxDaysRaw);
-        } catch {
-          sandboxDays = JSON.parse(JSON.stringify(SANDBOX_SEED_DAYS));
-        }
-      } else {
-        sandboxDays = JSON.parse(JSON.stringify(SANDBOX_SEED_DAYS));
-        this.storageSet('perpetual_diary_sandbox_days_v1', JSON.stringify(sandboxDays));
-      }
-      this.state.sandboxRamDays = sandboxDays;
-    }
-
-    const doc = sandboxDays[dayStr] || { day: dayStr, entries: {}, comments: [] };
-    this.state.dayCache[dayStr] = doc;
-    return doc;
-  }
-
-  async persistSandboxDay(dayStr, nextDoc) {
-    const normalized = {
-      day: dayStr,
-      entries: nextDoc.entries || {},
-      comments: Array.isArray(nextDoc.comments) ? nextDoc.comments : [],
-    };
-    this.state.dayCache[dayStr] = normalized;
-
-    const sandboxDays = this.state.sandboxRamDays || JSON.parse(JSON.stringify(SANDBOX_SEED_DAYS));
-    if (Object.keys(normalized.entries).length === 0 && normalized.comments.length === 0) {
-      delete sandboxDays[dayStr];
-    } else {
-      sandboxDays[dayStr] = normalized;
-    }
-    this.state.sandboxRamDays = sandboxDays;
-    this.storageSet('perpetual_diary_sandbox_days_v1', JSON.stringify(sandboxDays));
-
-    this.state.indexData = recalculateIndexForDay(this.state.indexData, dayStr, normalized);
-    this.storageSet('perpetual_diary_sandbox_index_v1', JSON.stringify(this.state.indexData));
-    return normalized;
-  }
-
   async persistDayDocument(dayStr, nextDoc, commitMessage) {
     const normalized = {
       day: dayStr,
@@ -895,7 +862,12 @@ class PerpetualDiaryApp {
     };
 
     if (this.gh.hasToken()) {
-      const res = await this.gh.updateDayAndIndex(dayStr, normalized, commitMessage);
+      const res = await this.gh.updateDayAndIndex(
+        dayStr,
+        normalized,
+        commitMessage,
+        this.buildCloakTxAdapter()
+      );
       this.state.dayCache[dayStr] = normalized;
       if (res.daySha) this.state.dayShas[dayStr] = res.daySha;
       this.state.indexData = res.index;
@@ -905,70 +877,6 @@ class PerpetualDiaryApp {
     await this.persistSandboxDay(dayStr, normalized);
     return { doc: normalized, commitSha: '' };
   }
-
-  async persistVaultMeta(vaultMeta, commitMessage = 'diary: update envelope vault') {
-    this.state.vaultMeta = vaultMeta;
-    if (Number.isFinite(Number(vaultMeta?.autoLockMinutes))) {
-      this.state.autoLockMinutes = Number(vaultMeta.autoLockMinutes);
-      this.storageSet(AUTOLOCK_STORAGE_KEY, String(this.state.autoLockMinutes));
-    }
-    this.storageSet('perpetual_diary_vault_local_v1', JSON.stringify(vaultMeta));
-    if (this.gh.hasToken()) {
-      await this.gh.putJson('vault.json', vaultMeta, commitMessage);
-    }
-  }
-
-  async decryptFieldDetailed(value, isEncrypted, aad = '') {
-    if (!isEncrypted && !isEncryptedPayload(value)) {
-      return { status: 'plain', text: String(value ?? ''), version: 0 };
-    }
-    const version = getPayloadVersion(value);
-    if (!this.hasActiveSessionKey()) {
-      return { status: 'locked', text: null, version };
-    }
-    try {
-      const text = await decryptText(value, this.state.keyring || this.state.cryptoKey, aad);
-      return { status: 'ok', text, version };
-    } catch (err) {
-      if (err?.code === 'AAD_TAMPER_ERROR' || version === 3) {
-        return { status: 'tampered', text: null, version, error: err.message };
-      }
-      return { status: 'locked', text: null, version, error: err.message };
-    }
-  }
-
-  async decryptFieldIfNeeded(value, isEncrypted, aad = '') {
-    const res = await this.decryptFieldDetailed(value, isEncrypted, aad);
-    return res.status === 'plain' || res.status === 'ok' ? res.text : null;
-  }
-
-  /* ========================================================================
-     ROUTING & VIEW RENDERING
-     ======================================================================== */
-  applyHashRoute() {
-    const rawHash = (window.location.hash || '').replace(/^#/, '');
-    if (!rawHash || rawHash === 'today') {
-      this.state.activeDay = getTodayDayKey();
-      return;
-    }
-
-    if (rawHash.startsWith('compare?')) {
-      const params = new URLSearchParams(rawHash.slice('compare?'.length));
-      const a = params.get('a');
-      const b = params.get('b');
-      if (a && b) {
-        this.state.compare2Active = true;
-        this.state.compareDateA = a;
-        this.state.compareDateB = b;
-        this.state.activeDay = a.slice(5);
-        return;
-      }
-    }
-
-    const [dayPart] = rawHash.split('?');
-    if (/^\d{2}-\d{2}$/.test(dayPart)) {
-      this.state.activeDay = dayPart;
-    }
   }
 
   syncHashRoute() {
@@ -1249,6 +1157,7 @@ class PerpetualDiaryApp {
                 style="object-position:${posX}% ${posY}%;"
               />
               ${asset.encrypted ? '<span class="media-enc-badge" title="Decrypted from AES-256-GCM .enc blob in RAM">🔒 .ENC</span>' : ''}
+              ${entry.image.originalRef ? `<span class="media-orig-badge" title="Original archived offline: ${escapeHtml(entry.image.originalRef.archiveFilename)}">ORIG OFFLINE</span>` : ''}
               <button type="button" class="btn btn-ghost btn-sm inline-realign-btn" title="Adjust photo pan & alignment">
                 ⇄ Drag Align
               </button>
@@ -1702,6 +1611,7 @@ class PerpetualDiaryApp {
           ],
           mediaUploads,
           commitMessage: `diary: ${op} comment on ${dayStr}`,
+          cloak: this.buildCloakTxAdapter(),
         });
         this.state.dayCache[dayStr] = res.docs[dayStr];
         if (res.dayShas?.[dayStr]) this.state.dayShas[dayStr] = res.dayShas[dayStr];
@@ -1760,6 +1670,7 @@ class PerpetualDiaryApp {
           ],
           mediaDeletes,
           commitMessage: `diary: delete comment on ${dayStr}`,
+          cloak: this.buildCloakTxAdapter(),
         });
         this.state.dayCache[dayStr] = res.docs[dayStr];
         if (res.dayShas?.[dayStr]) this.state.dayShas[dayStr] = res.dayShas[dayStr];
@@ -1791,6 +1702,7 @@ class PerpetualDiaryApp {
     const bodyInput = document.getElementById('entry-body-input');
     const encryptCb = document.getElementById('entry-encrypt-checkbox');
     const photoEncryptCb = document.getElementById('entry-photo-encrypt-checkbox');
+    const archiveOrigCb = document.getElementById('entry-archive-original-checkbox');
     const photoStatsEl = document.getElementById('entry-photo-stats');
     const deleteBtn = document.getElementById('entry-delete-btn');
 
@@ -1802,6 +1714,7 @@ class PerpetualDiaryApp {
       photoStatsEl.hidden = true;
     }
     if (photoEncryptCb) photoEncryptCb.checked = this.hasActiveSessionKey();
+    if (archiveOrigCb) archiveOrigCb.checked = false;
     this.entryStudio.clear();
 
     if (editEntry) {
@@ -2166,6 +2079,7 @@ class PerpetualDiaryApp {
         dayMutations,
         mediaUploads: c.mediaUploads || [],
         commitMessage: `diary: resolve 3-way conflict ${diaryDate}`,
+        cloak: this.buildCloakTxAdapter(),
       });
 
       for (const [dKey, doc] of Object.entries(res.docs || {})) {
@@ -2246,6 +2160,25 @@ class PerpetualDiaryApp {
           document.getElementById('entry-photo-encrypt-checkbox')?.checked &&
             this.hasActiveSessionKey()
         );
+        const archiveOriginal = Boolean(
+          document.getElementById('entry-archive-original-checkbox')?.checked
+        );
+
+        if (archiveOriginal && imageObj._rawFile) {
+          const shortHash = await computeFileShortHash(imageObj._rawFile);
+          const archiveFilename = downloadOriginalForColdArchive(
+            imageObj._rawFile,
+            diaryDate,
+            shortHash
+          );
+          imageObj.originalRef = {
+            archiveFilename,
+            sha256Short: shortHash,
+            originalBytes: imageObj._rawFile.size,
+            archivedAt: new Date().toISOString(),
+          };
+        }
+
         const prepared = await prepareMediaPayloadForStorage({
           buffer: imageObj._pendingBuffer,
           mime: imageObj._mime || 'image/webp',
@@ -2257,8 +2190,19 @@ class PerpetualDiaryApp {
         imageObj.encrypted = prepared.encrypted;
 
         if (this.gh.hasToken()) {
-          mediaUploads.push({ subpath: prepared.mediaSubpath, buffer: prepared.uploadBuffer });
-          imageObj.src = `${this.gh.getDataTarget().basePath}/${prepared.mediaSubpath}`;
+          const mediaTarget = this.gh.getMediaTarget(yearNum);
+          if (mediaTarget.isSharded) {
+            const uploaded = await this.gh.uploadMediaToShard(
+              yearNum,
+              prepared.mediaSubpath,
+              prepared.uploadBuffer,
+              `diary: upload sharded media ${diaryDate}`
+            );
+            imageObj.src = buildShardPointer(uploaded.repo, uploaded.path);
+          } else {
+            mediaUploads.push({ subpath: prepared.mediaSubpath, buffer: prepared.uploadBuffer });
+            imageObj.src = `${this.gh.getDataTarget().basePath}/${prepared.mediaSubpath}`;
+          }
         } else {
           imageObj.src = await this.storeLocalMediaBuffer(
             prepared.mediaSubpath,
@@ -2268,6 +2212,7 @@ class PerpetualDiaryApp {
           );
         }
         delete imageObj._pendingBuffer;
+        delete imageObj._rawFile;
         delete imageObj._ext;
         delete imageObj._mime;
       }
@@ -2329,6 +2274,7 @@ class PerpetualDiaryApp {
           dayMutations,
           mediaUploads,
           commitMessage: commitMsg,
+          cloak: this.buildCloakTxAdapter(),
         });
 
         for (const [dKey, doc] of Object.entries(res.docs || {})) {
@@ -2399,12 +2345,31 @@ class PerpetualDiaryApp {
         const basePrefix = `${this.gh.getDataTarget().basePath}/`;
         if (entryObj?.image?.src?.startsWith(basePrefix)) {
           mediaDeletes.push(entryObj.image.src.slice(basePrefix.length));
+        } else if (isShardPointer(entryObj?.image?.src)) {
+          const dt = this.gh.getDataTarget();
+          const shard = parseShardPointer(
+            entryObj.image.src,
+            dt.owner,
+            this.gh.config.mediaShardBranch || 'main'
+          );
+          if (shard) {
+            await this.gh
+              .deleteShardedMedia(
+                shard.owner,
+                shard.repo,
+                shard.branch,
+                shard.subpath,
+                `diary: delete sharded media ${shard.subpath}`
+              )
+              .catch(() => {});
+          }
         }
 
         const res = await this.gh.commitAtomicDayMutations({
           dayMutations: [{ dayStr, mode: 'entry-delete', yearKey }],
           mediaDeletes,
           commitMessage: `diary: delete entry ${entryObj.diaryDate || `${yearKey}-${dayStr}`}`,
+          cloak: this.buildCloakTxAdapter(),
         });
 
         this.state.dayCache[dayStr] = res.docs[dayStr];
@@ -2699,6 +2664,17 @@ class PerpetualDiaryApp {
     document.getElementById('gh-vault-branch-input').value = cfg.vaultBranch || 'main';
     document.getElementById('gh-vault-path-input').value = cfg.vaultPath || 'data';
 
+    const useSharding = Boolean(cfg.useMediaSharding);
+    document.getElementById('gh-use-media-sharding').checked = useSharding;
+    document.getElementById('media-shard-fields').hidden = !useSharding;
+    document.getElementById('gh-media-shard-pattern').value =
+      cfg.mediaShardPattern || 'diary-media-{year}';
+    document.getElementById('gh-media-shard-branch').value = cfg.mediaShardBranch || 'main';
+    document.getElementById('gh-media-shard-preview').textContent = `Active shard: ${resolveShardRepoName(
+      cfg.mediaShardPattern || 'diary-media-{year}',
+      new Date().getFullYear()
+    )}`;
+
     document.getElementById('gh-token-input').value = cfg.token || '';
     document.getElementById('gh-token-expiry-input').value = cfg.tokenExpiresAt
       ? String(cfg.tokenExpiresAt).slice(0, 10)
@@ -2856,6 +2832,24 @@ class PerpetualDiaryApp {
     if (mediaMigrateBanner) mediaMigrateBanner.hidden = !this.hasActiveSessionKey();
     const mediaMigrateStatus = document.getElementById('vault-media-migrate-status');
     if (mediaMigrateStatus) mediaMigrateStatus.hidden = true;
+
+    // Phase 8: Metadata Cloaking Panel
+    const cloakPanel = document.getElementById('vault-cloak-panel');
+    if (cloakPanel) {
+      cloakPanel.hidden = !isV2;
+      if (isV2) {
+        const cloakOn = Boolean(vm?.metadataCloaking);
+        const genericOn = Boolean(vm?.genericCommitMessages || this.gh.config.genericCommitMessages);
+        const pill = document.getElementById('vault-cloak-status-pill');
+        if (pill) {
+          pill.textContent = cloakOn ? 'CLOAKED · ACTIVE' : 'OFF';
+        }
+        document.getElementById('vault-cloak-enabled-checkbox').checked = cloakOn;
+        document.getElementById('vault-generic-commits-checkbox').checked = genericOn;
+        const cloakStatus = document.getElementById('vault-cloak-migrate-status');
+        if (cloakStatus) cloakStatus.hidden = true;
+      }
+    }
 
     document.getElementById('vault-lock-enabled-checkbox').checked = enabled;
     document.getElementById('vault-autolock-select').value = String(
@@ -3422,6 +3416,7 @@ class PerpetualDiaryApp {
           width: 100,
           height: 240,
           _pendingBuffer: processed.arrayBuffer,
+          _rawFile: file,
           _ext: processed.ext,
           _mime: processed.mime,
         };
@@ -3485,6 +3480,17 @@ class PerpetualDiaryApp {
       document.getElementById('split-vault-fields').hidden = !e.target.checked;
     });
 
+    document.getElementById('gh-use-media-sharding')?.addEventListener('change', (e) => {
+      document.getElementById('media-shard-fields').hidden = !e.target.checked;
+    });
+
+    document.getElementById('gh-media-shard-pattern')?.addEventListener('input', (e) => {
+      document.getElementById('gh-media-shard-preview').textContent = `Active shard: ${resolveShardRepoName(
+        e.target.value,
+        new Date().getFullYear()
+      )}`;
+    });
+
     document.getElementById('lock-zero-footprint-checkbox')?.addEventListener('change', (e) => {
       this.setZeroFootprintMode(e.target.checked, true);
     });
@@ -3500,9 +3506,29 @@ class PerpetualDiaryApp {
         document.getElementById('gh-vault-repo-input').value.trim() || 'perpetual-diary-vault',
       vaultBranch: document.getElementById('gh-vault-branch-input').value.trim() || 'main',
       vaultPath: document.getElementById('gh-vault-path-input').value.trim() || 'data',
+      useMediaSharding: Boolean(document.getElementById('gh-use-media-sharding').checked),
+      mediaShardPattern:
+        document.getElementById('gh-media-shard-pattern').value.trim() || 'diary-media-{year}',
+      mediaShardBranch: document.getElementById('gh-media-shard-branch').value.trim() || 'main',
       token: document.getElementById('gh-token-input').value.trim(),
       tokenExpiresAt: document.getElementById('gh-token-expiry-input').value.trim(),
       readFromApiWhenAuthed: Boolean(document.getElementById('gh-read-api-checkbox').checked),
+    });
+
+    document.getElementById('gh-test-shard-btn')?.addEventListener('click', async () => {
+      const testBox = document.getElementById('gh-test-result');
+      testBox.hidden = false;
+      testBox.className = 'status-callout';
+      testBox.textContent = 'Testing media shard repository...';
+      this.gh.updateConfig(collectGitHubFormConfig());
+      try {
+        const res = await this.gh.testMediaShard(new Date().getFullYear());
+        testBox.className = 'status-callout is-ok';
+        testBox.textContent = `Media shard ready: ${res.fullName} (${res.isPrivate ? 'Private' : 'Public'}) — ${(res.sizeKb / 1024).toFixed(2)} MB used · Write: ${res.canPush ? 'YES' : 'NO'}.`;
+      } catch (err) {
+        testBox.className = 'status-callout is-err';
+        testBox.textContent = `Shard check failed: ${err.message} (Create this repo on GitHub & add it to your Fine-Grained PAT.)`;
+      }
     });
 
     document.getElementById('gh-test-btn')?.addEventListener('click', async () => {
@@ -3675,6 +3701,94 @@ class PerpetualDiaryApp {
       }
     });
 
+    // Phase 8: Metadata Cloaking Live Toggles & One-Click Atomic Repo Migration
+    document.getElementById('vault-cloak-enabled-checkbox')?.addEventListener('change', async (e) => {
+      const enabled = Boolean(e.target.checked);
+      if (enabled && (!this.hasActiveSessionKey() || Number(this.state.vaultMeta?.version) !== 2)) {
+        e.target.checked = false;
+        this.showToast('Unlock a v2 Envelope Vault first to enable Metadata Cloaking.', 'warn');
+        return;
+      }
+      const nextVault = {
+        ...this.state.vaultMeta,
+        metadataCloaking: enabled,
+        genericCommitMessages: enabled ? true : Boolean(this.state.vaultMeta?.genericCommitMessages),
+        updatedAt: new Date().toISOString(),
+      };
+      if (enabled) {
+        document.getElementById('vault-generic-commits-checkbox').checked = true;
+        this.gh.updateConfig({ genericCommitMessages: true });
+        this.saveGitHubConfigLocally();
+      }
+      await this.persistVaultMeta(nextVault, 'diary: toggle metadata cloaking');
+      this.updateModeBadge();
+      const pill = document.getElementById('vault-cloak-status-pill');
+      if (pill) pill.textContent = enabled ? 'CLOAKED · ACTIVE' : 'OFF';
+      this.showToast(
+        enabled
+          ? 'Metadata Cloaking enabled for all new saves. Click "Migrate Repo → Cloaked Shards" to cloak existing files.'
+          : 'Metadata Cloaking turned off for future saves.',
+        'info'
+      );
+    });
+
+    document.getElementById('vault-generic-commits-checkbox')?.addEventListener('change', async (e) => {
+      const genericOn = Boolean(e.target.checked);
+      this.gh.updateConfig({ genericCommitMessages: genericOn });
+      this.saveGitHubConfigLocally();
+      if (this.state.vaultMeta) {
+        const nextVault = {
+          ...this.state.vaultMeta,
+          genericCommitMessages: genericOn,
+          updatedAt: new Date().toISOString(),
+        };
+        await this.persistVaultMeta(nextVault, 'sync: update');
+      }
+      this.showToast(
+        genericOn
+          ? 'Generic commit messages ("sync: update") enabled.'
+          : 'Descriptive Git commit messages restored.',
+        'info'
+      );
+    });
+
+    document.getElementById('vault-migrate-cloak-btn')?.addEventListener('click', async () => {
+      const ok = await this.openConfirm({
+        title: 'Migrate Repository to Cloaked Shards',
+        message:
+          'Convert all existing plaintext days/MM-DD.json and index.json files into encrypted HMAC shards (shards/<hash>.enc) and index.enc, and remove old plaintext files in 1 atomic commit?',
+        confirmLabel: 'Cloak Repository',
+      });
+      if (!ok) return;
+
+      const btn = document.getElementById('vault-migrate-cloak-btn');
+      const statusEl = document.getElementById('vault-cloak-migrate-status');
+      btn.disabled = true;
+      statusEl.hidden = false;
+
+      try {
+        const res = await migrateRepositoryToCloakedMode({
+          app: this,
+          onProgress: (msg) => {
+            statusEl.textContent = msg;
+          },
+        });
+        const shaTxt = res.commitSha ? ` (#${res.commitSha.slice(0, 7)})` : '';
+        statusEl.textContent = `Cloaked ${res.migratedDays} calendar day(s) + index.enc atomically${shaTxt}.`;
+        this.state.dayCache = {};
+        this.state.dayShas = {};
+        this.updateModeBadge();
+        this.openVaultModal();
+        await this.renderActiveView();
+        this.showToast(statusEl.textContent, 'success');
+      } catch (err) {
+        statusEl.textContent = `Cloaking interrupted: ${err.message}`;
+        this.showToast(err.message || 'Metadata cloaking migration failed.', 'error');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
     document.getElementById('vault-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
       const errBox = document.getElementById('vault-error');
@@ -3824,6 +3938,7 @@ class PerpetualDiaryApp {
         if (reasonBadge) reasonBadge.hidden = true;
         document.getElementById('lock-screen').hidden = true;
         this.updateModeBadge();
+        await this.loadManifestIndex();
         await this.renderActiveView();
 
         if (res.unlockedVia === 'recovery') {
