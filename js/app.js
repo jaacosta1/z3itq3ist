@@ -62,6 +62,20 @@ import {
   createCloakAdapter,
   migrateRepositoryToCloakedMode,
 } from './cloak.js';
+import {
+  isDoubleLockedPayload,
+  buildDoubleLockAad,
+  encryptDoubleLockedText,
+  decryptDoubleLockedText,
+  isWebAuthnSupported,
+  hasPasskeySlots,
+  registerPasskeySlot,
+  unlockVaultWithPasskey,
+  removePasskeySlot,
+  configureDecoyVault,
+  removeDecoyVault,
+  unlockVaultOrDecoy,
+} from './vault-auth.js';
 
 const MONTHS = [
   'January',
@@ -255,6 +269,9 @@ class PerpetualDiaryApp {
       keyring: null,
       cryptoKey: null,
       unlocked: true,
+      isDecoySession: false,
+      decoyPolicy: null,
+      doubleLockUnlocked: new Map(),
       zeroFootprint: false,
       recentRecoveryCode: null,
       autoLockMinutes: Number.isFinite(savedAutoLock) && savedAutoLock >= 0 ? savedAutoLock : 15,
@@ -570,6 +587,10 @@ class PerpetualDiaryApp {
       'vault-current-password',
       'vault-new-password',
       'vault-confirm-password',
+      'vault-decoy-password',
+      'vault-decoy-confirm',
+      'entry-doublelock-passphrase',
+      'entry-doublelock-hint',
       'gh-token-input',
       'conflict-merged-title',
       'conflict-merged-mood',
@@ -626,6 +647,9 @@ class PerpetualDiaryApp {
     this.setActiveKeyring(null);
     this.state.recentRecoveryCode = null;
     this.state.activeConflict = null;
+    this.state.isDecoySession = false;
+    this.state.decoyPolicy = null;
+    this.state.doubleLockUnlocked.clear();
     this.state.unlocked = false;
     this.state.dayCache = {};
     this.state.dayShas = {};
@@ -660,12 +684,19 @@ class PerpetualDiaryApp {
 
     const lockScreen = document.getElementById('lock-screen');
     if (lockScreen) lockScreen.hidden = false;
+    this.syncPasskeyLockButton();
     const passInput = document.getElementById('lock-password-input');
     if (passInput) {
       passInput.value = '';
       passInput.focus();
     }
     this.updateModeBadge();
+  }
+
+  syncPasskeyLockButton() {
+    const btn = document.getElementById('lock-passkey-btn');
+    if (!btn) return;
+    btn.hidden = !(isWebAuthnSupported() && hasPasskeySlots(this.state.vaultMeta));
   }
 
   /* ========================================================================
@@ -745,6 +776,7 @@ class PerpetualDiaryApp {
       this.state.unlocked = false;
       const lockScreen = document.getElementById('lock-screen');
       if (lockScreen) lockScreen.hidden = false;
+      this.syncPasskeyLockButton();
       // When metadata cloaking is on, do not load or expose any index before unlock
       if (vaultMeta.metadataCloaking) {
         this.state.indexData = { updatedAt: '', days: {} };
@@ -1029,9 +1061,13 @@ class PerpetualDiaryApp {
 
     stage.innerHTML = '';
 
+    let visibleYearCount = 0;
     for (const yr of years) {
       const entry = entries[String(yr)];
       const card = await this.buildEntryColumnCard(entry, dayStr, String(yr));
+      // Plausible Deniability: silently skip non-decoy hidden entries during a decoy session
+      if (!card) continue;
+      visibleYearCount += 1;
       if (
         this.state.mobileMode === 'tabs' &&
         Number(this.state.mobileSelectedYear) !== Number(yr)
@@ -1040,6 +1076,9 @@ class PerpetualDiaryApp {
       }
       stage.appendChild(card);
     }
+
+    document.getElementById('recorded-years-count').textContent =
+      `${visibleYearCount} ${visibleYearCount === 1 ? 'YEAR' : 'YEARS'}`;
 
     const addCard = document.createElement('article');
     addCard.className = 'year-column add-year-card';
@@ -1088,10 +1127,36 @@ class PerpetualDiaryApp {
       titleAad
     );
 
+    // Plausible Deniability filter: during a Decoy session, hide real encrypted entries
+    // (and plaintext entries if disabled by decoyPolicy) without showing any lock hint.
+    if (this.state.isDecoySession) {
+      const isPlainEntry = !entry.encrypted && !isEncryptedPayload(entry.body);
+      if (isPlainEntry && this.state.decoyPolicy && !this.state.decoyPolicy.includePlaintext) {
+        return null;
+      }
+      if (!isPlainEntry && bodyResult.status !== 'ok') {
+        return null;
+      }
+    }
+
     const isTampered = bodyResult.status === 'tampered' || titleResult.status === 'tampered';
     const isLockedEntry = !isTampered && bodyResult.status === 'locked';
-    const decryptedBody = bodyResult.text;
-    const decryptedTitle = titleResult.text;
+    let decryptedBody = bodyResult.text;
+    let decryptedTitle = titleResult.text;
+
+    // Phase 9: Double-Lock Per-Entry Second Passphrase Check
+    const dlSlotKey = `${dayStr}:${yearKey}`;
+    const isDoubleLocked =
+      !isTampered &&
+      !isLockedEntry &&
+      (isDoubleLockedPayload(decryptedBody) || Boolean(entry.doubleLocked));
+    const dlRamCache = isDoubleLocked ? this.state.doubleLockUnlocked.get(dlSlotKey) : null;
+    const isDoubleLockSealed = isDoubleLocked && !dlRamCache;
+
+    if (isDoubleLocked && dlRamCache) {
+      decryptedBody = dlRamCache.body;
+      decryptedTitle = dlRamCache.title;
+    }
 
     let bodyHtml = '';
     let plainWords = 0;
@@ -1114,6 +1179,22 @@ class PerpetualDiaryApp {
           <button type="button" class="btn btn-outline btn-sm unlock-inline-btn">Unlock Vault</button>
         </div>
       `;
+    } else if (isDoubleLockSealed) {
+      const hintLine = entry.doubleLockHint
+        ? `<div class="mono-meta dl-hint-line">Hint: ${escapeHtml(entry.doubleLockHint)}</div>`
+        : '';
+      bodyHtml = `
+        <div class="doublelock-sealed-card">
+          <div class="mono-label">⚿ DOUBLE-LOCKED ENTRY · 2ND PASSPHRASE REQUIRED</div>
+          <p class="section-subtext">This entry remains sealed even while your diary is unlocked.</p>
+          ${hintLine}
+          <form class="dl-unlock-form" autocomplete="off">
+            <input type="password" class="input-text input-sm dl-pass-input" placeholder="Enter 2nd passphrase" required />
+            <button type="submit" class="btn btn-primary btn-sm">Unseal</button>
+          </form>
+          <div class="form-error dl-error" role="alert" hidden></div>
+        </div>
+      `;
     } else {
       bodyHtml = renderMarkdown(decryptedBody);
       plainWords = countWords(stripMarkdown(decryptedBody));
@@ -1121,49 +1202,7 @@ class PerpetualDiaryApp {
 
     // Phase 6B: Encrypted (.enc) & Plaintext Media Resolution
     let mediaHtml = '';
-    if (!isLockedEntry && !isTampered && entry.image && entry.image.src) {
-      const asset = await this.resolveMediaAssetSafe(entry.image.src);
-      if (asset.status === 'locked') {
-        mediaHtml = `
-          <div class="encrypted-media-card">
-            <span class="mono-label">🔒 ENCRYPTED PHOTO (.ENC)</span>
-            <p class="section-subtext">Unlock the Vault to decrypt and view this photo in RAM.</p>
-          </div>
-        `;
-      } else if (asset.status === 'tampered') {
-        mediaHtml = `
-          <div class="tamper-alert-card" role="alert">
-            <div class="mono-label">⚠ PHOTO INTEGRITY ALERT · AAD MISMATCH</div>
-            <p>Encrypted photo failed AES-GCM AAD verification and was blocked from rendering.</p>
-          </div>
-        `;
-      } else if (asset.status === 'ok' && asset.url) {
-        const align = entry.image.align || 'full';
-        const posX = Number.isFinite(Number(entry.image.posX)) ? Number(entry.image.posX) : 50;
-        const posY = Number.isFinite(Number(entry.image.posY)) ? Number(entry.image.posY) : 50;
-        const widthPct = Number.isFinite(Number(entry.image.width))
-          ? Number(entry.image.width)
-          : 100;
-        const heightPx = Number.isFinite(Number(entry.image.height))
-          ? Number(entry.image.height)
-          : 240;
-
-        mediaHtml = `
-          <figure class="entry-figure align-${escapeHtml(align)}" style="width:${widthPct}%;max-width:100%;">
-            <div class="entry-figure-frame" style="height:${heightPx}px;">
-              <img
-                src="${escapeHtml(asset.url)}"
-                alt="${escapeHtml(entry.image.caption || `Photo from ${resolvedDate}`)}"
-                style="object-position:${posX}% ${posY}%;"
-              />
-              ${asset.encrypted ? '<span class="media-enc-badge" title="Decrypted from AES-256-GCM .enc blob in RAM">🔒 .ENC</span>' : ''}
-              ${entry.image.originalRef ? `<span class="media-orig-badge" title="Original archived offline: ${escapeHtml(entry.image.originalRef.archiveFilename)}">ORIG OFFLINE</span>` : ''}
-              <button type="button" class="btn btn-ghost btn-sm inline-realign-btn" title="Adjust photo pan & alignment">
-                ⇄ Drag Align
-              </button>
-            </div>
-            ${entry.image.caption ? `<figcaption class="figure-caption">${escapeHtml(entry.image.caption)}</figcaption>` : ''}
-          </figure>
+    if (!isLockedEntry && !isTampered && !isDoubleLockSealed && entry.image && entry.image.src) {
         `;
       }
     }
@@ -1195,6 +1234,9 @@ class PerpetualDiaryApp {
         : payloadVer
           ? ` · v${payloadVer}`
           : '';
+    const dlBadge = isDoubleLocked
+      ? ' · <span class="dl-status-tag">⚿ DOUBLE-LOCK</span>'
+      : '';
 
     col.innerHTML = `
       <header class="year-col-header">
@@ -1203,26 +1245,73 @@ class PerpetualDiaryApp {
           ${backdateBadge}
         </div>
         <div class="year-col-actions">
-          <button type="button" class="btn btn-ghost btn-sm col-quote-btn" title="Quote in margin comment" ${isTampered || isLockedEntry ? 'disabled' : ''}>❝ Quote</button>
+          ${isDoubleLocked && dlRamCache ? '<button type="button" class="btn btn-ghost btn-sm col-reseal-btn" title="Re-seal this Double-Locked entry in RAM">⚿ Re-Seal</button>' : ''}
+          <button type="button" class="btn btn-ghost btn-sm col-quote-btn" title="Quote in margin comment" ${isTampered || isLockedEntry || isDoubleLockSealed ? 'disabled' : ''}>❝ Quote</button>
           <button type="button" class="btn btn-ghost btn-sm col-pin-btn ${isPinned ? 'is-pinned' : ''}" title="Pin column to left">
             ${isPinned ? 'Pinned' : 'Pin'}
           </button>
-          <button type="button" class="btn btn-ghost btn-sm col-edit-btn" ${isTampered ? 'disabled title="Cannot edit tampered ciphertext"' : ''}>Edit</button>
+          <button type="button" class="btn btn-ghost btn-sm col-edit-btn" ${isTampered || isDoubleLockSealed ? 'disabled title="Unseal entry first to edit"' : ''}>Edit</button>
           <button type="button" class="btn btn-ghost btn-sm col-delete-btn">Delete</button>
         </div>
       </header>
-      <div class="mono-meta year-col-date">${escapeHtml(resolvedDate)}${encBadge}</div>
-      ${!isLockedEntry && !isTampered && decryptedTitle ? `<h3 class="entry-title">${escapeHtml(decryptedTitle)}</h3>` : ''}
+      <div class="mono-meta year-col-date">${escapeHtml(resolvedDate)}${encBadge}${dlBadge}</div>
+      ${!isLockedEntry && !isTampered && !isDoubleLockSealed && decryptedTitle ? `<h3 class="entry-title">${escapeHtml(decryptedTitle)}</h3>` : ''}
       ${metaChipsHtml}
       <div class="entry-prose-wrap">
         ${mediaHtml}
         <div class="prose-body">${bodyHtml}</div>
       </div>
       <footer class="year-col-footer mono-meta">
-        <span>${isTampered ? 'Integrity Failed' : isLockedEntry ? 'Encrypted' : `${plainWords} words`}</span>
+        <span>${isTampered ? 'Integrity Failed' : isDoubleLockSealed ? 'Double-Locked' : isLockedEntry ? 'Encrypted' : `${plainWords} words`}</span>
         <span>${escapeHtml(loggedLabel)}</span>
       </footer>
     `;
+
+    const dlForm = col.querySelector('.dl-unlock-form');
+    if (dlForm) {
+      dlForm.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const passInput = dlForm.querySelector('.dl-pass-input');
+        const errEl = col.querySelector('.dl-error');
+        errEl.hidden = true;
+        try {
+          const secondPass = passInput.value;
+          const plainBody = await decryptDoubleLockedText(
+            bodyResult.text,
+            secondPass,
+            buildDoubleLockAad(expectedDate, yearKey, 'body')
+          );
+          const plainTitle =
+            titleResult.text && isDoubleLockedPayload(titleResult.text)
+              ? await decryptDoubleLockedText(
+                  titleResult.text,
+                  secondPass,
+                  buildDoubleLockAad(expectedDate, yearKey, 'title')
+                )
+              : titleResult.text || '';
+          this.state.doubleLockUnlocked.set(dlSlotKey, {
+            body: plainBody,
+            title: plainTitle,
+            passphrase: secondPass,
+          });
+          passInput.value = '';
+          this.showToast(`Unsealed Double-Locked entry (${resolvedDate}) in RAM.`, 'success');
+          await this.renderReader();
+        } catch (err) {
+          errEl.textContent = err.message || 'Incorrect Double-Lock passphrase.';
+          errEl.hidden = false;
+        }
+      });
+    }
+
+    const resealBtn = col.querySelector('.col-reseal-btn');
+    if (resealBtn) {
+      resealBtn.addEventListener('click', () => {
+        this.state.doubleLockUnlocked.delete(dlSlotKey);
+        this.showToast(`Re-sealed Double-Locked entry (${resolvedDate}).`, 'info');
+        this.renderReader();
+      });
+    }
 
     const unlockBtn = col.querySelector('.unlock-inline-btn');
     if (unlockBtn) {
@@ -1258,12 +1347,13 @@ class PerpetualDiaryApp {
     });
 
     col.querySelector('.col-edit-btn').addEventListener('click', () => {
-      if (isTampered) return;
+      if (isTampered || isDoubleLockSealed) return;
       this.openComposer({
         editEntry: {
           ...entry,
           body: decryptedBody ?? entry.body,
           title: decryptedTitle ?? entry.title,
+          _unlockedDoubleLockPassphrase: dlRamCache?.passphrase || '',
         },
         dayStr,
         yearKey,
@@ -1704,6 +1794,10 @@ class PerpetualDiaryApp {
     const photoEncryptCb = document.getElementById('entry-photo-encrypt-checkbox');
     const archiveOrigCb = document.getElementById('entry-archive-original-checkbox');
     const photoStatsEl = document.getElementById('entry-photo-stats');
+    const dlCb = document.getElementById('entry-doublelock-checkbox');
+    const dlFields = document.getElementById('entry-doublelock-fields');
+    const dlPassInput = document.getElementById('entry-doublelock-passphrase');
+    const dlHintInput = document.getElementById('entry-doublelock-hint');
     const deleteBtn = document.getElementById('entry-delete-btn');
 
     document.getElementById('entry-photo-url').value = '';
@@ -1715,6 +1809,10 @@ class PerpetualDiaryApp {
     }
     if (photoEncryptCb) photoEncryptCb.checked = this.hasActiveSessionKey();
     if (archiveOrigCb) archiveOrigCb.checked = false;
+    if (dlCb) dlCb.checked = false;
+    if (dlFields) dlFields.hidden = true;
+    if (dlPassInput) dlPassInput.value = '';
+    if (dlHintInput) dlHintInput.value = '';
     this.entryStudio.clear();
 
     if (editEntry) {
@@ -1743,6 +1841,13 @@ class PerpetualDiaryApp {
       tagsInput.value = Array.isArray(editEntry.tags) ? editEntry.tags.join(', ') : '';
       bodyInput.value = editEntry.body || '';
       encryptCb.checked = Boolean(editEntry.encrypted);
+      if (dlCb) {
+        const hasDl = Boolean(editEntry.doubleLocked);
+        dlCb.checked = hasDl;
+        if (dlFields) dlFields.hidden = !hasDl;
+        if (dlPassInput) dlPassInput.value = editEntry._unlockedDoubleLockPassphrase || '';
+        if (dlHintInput) dlHintInput.value = editEntry.doubleLockHint || '';
+      }
       deleteBtn.hidden = false;
 
       if (editEntry.image && editEntry.image.src) {
@@ -2118,10 +2223,47 @@ class PerpetualDiaryApp {
       .filter(Boolean);
     const rawBody = document.getElementById('entry-body-input').value;
     const encryptFlag = document.getElementById('entry-encrypt-checkbox').checked;
+    const doubleLockFlag = Boolean(document.getElementById('entry-doublelock-checkbox')?.checked);
+    const doubleLockPass = document.getElementById('entry-doublelock-passphrase')?.value || '';
+    const doubleLockHint = document.getElementById('entry-doublelock-hint')?.value.trim() || '';
 
     if (!rawBody.trim()) {
       this.showToast('Please write some diary prose before saving.', 'warn');
       return;
+    }
+
+    let title = rawTitle;
+    let body = rawBody;
+
+    if (doubleLockFlag) {
+      if (doubleLockPass.length < 4) {
+        this.showToast('Double-Lock passphrase must be at least 4 characters.', 'warn');
+        return;
+      }
+      body = await encryptDoubleLockedText(
+        rawBody,
+        doubleLockPass,
+        buildDoubleLockAad(diaryDate, newYearKey, 'body')
+      );
+      title = rawTitle
+        ? await encryptDoubleLockedText(
+            rawTitle,
+            doubleLockPass,
+            buildDoubleLockAad(diaryDate, newYearKey, 'title')
+          )
+        : '';
+    }
+
+    if (encryptFlag) {
+      if (!this.hasActiveSessionKey()) {
+        this.showToast('Unlock or configure the Vault password before encrypting entries.', 'warn');
+        return;
+      }
+      const keyCtx = this.state.keyring || this.state.cryptoKey;
+      const titleAad = buildEntryAad(diaryDate, newYearKey, 'title');
+      const bodyAad = buildEntryAad(diaryDate, newYearKey, 'body');
+      title = title ? await encryptText(title, keyCtx, titleAad) : '';
+      body = await encryptText(body, keyCtx, bodyAad);
     }
 
     let title = rawTitle;
@@ -2232,23 +2374,19 @@ class PerpetualDiaryApp {
       writtenAt,
       updatedAt: nowIso,
       encrypted: encryptFlag,
+      doubleLocked: doubleLockFlag,
+      doubleLockHint: doubleLockFlag ? doubleLockHint : '',
     };
 
-    try {
-      if (this.gh.hasToken()) {
-        const dayMutations = [];
-        let commitMsg = `diary: save entry ${diaryDate}`;
-
-        if (this.state.editingEntryKey) {
-          const { originalDayStr, originalYearKey } = this.state.editingEntryKey;
-          if (originalDayStr !== newDayStr || originalYearKey !== newYearKey) {
-            dayMutations.push({
-              dayStr: originalDayStr,
-              mode: 'entry-delete',
-              yearKey: originalYearKey,
-            });
-            commitMsg = `diary: move ${originalYearKey}-${originalDayStr} -> ${diaryDate}`;
-          }
+    if (doubleLockFlag) {
+      this.state.doubleLockUnlocked.set(`${newDayStr}:${newYearKey}`, {
+        body: rawBody,
+        title: rawTitle,
+        passphrase: doubleLockPass,
+      });
+    } else {
+      this.state.doubleLockUnlocked.delete(`${newDayStr}:${newYearKey}`);
+    }
         }
 
         const isSameSlotEdit = Boolean(
@@ -2782,14 +2920,16 @@ class PerpetualDiaryApp {
           const spec =
             s.type === 'recovery'
               ? '256-bit Raw Hex Recovery Slot'
-              : `${s.kdf || 'PBKDF2-SHA256'} (${Number(s.iterations || 250000).toLocaleString()} iter)`;
+              : s.type === 'passkey'
+                ? `WebAuthn PRF Passkey (${s.rpId || 'local'})`
+                : `${s.kdf || 'PBKDF2-SHA256'} (${Number(s.iterations || 250000).toLocaleString()} iter)`;
           return `
             <div class="vault-slot-card">
               <div>
                 <strong>${escapeHtml(s.label || 'Key Slot')}</strong>
                 <span class="mono-meta"> · ${escapeHtml(spec)}</span>
               </div>
-              <span class="mono-meta">${s.type === 'recovery' ? 'Issued' : 'Rotated'} ${escapeHtml(rotDate)}</span>
+              <span class="mono-meta">${s.type === 'recovery' ? 'Issued' : s.type === 'passkey' ? 'Enrolled' : 'Rotated'} ${escapeHtml(rotDate)}</span>
             </div>
           `;
         })
@@ -2848,6 +2988,70 @@ class PerpetualDiaryApp {
         document.getElementById('vault-generic-commits-checkbox').checked = genericOn;
         const cloakStatus = document.getElementById('vault-cloak-migrate-status');
         if (cloakStatus) cloakStatus.hidden = true;
+      }
+    }
+
+    // Phase 9: Biometric Passkey (WebAuthn PRF) & Decoy Vault Panels
+    // Hide both during a Decoy session to preserve strict plausible deniability.
+    const passkeyPanel = document.getElementById('vault-passkey-panel');
+    if (passkeyPanel) {
+      const canShowPasskeys = isV2 && !this.state.isDecoySession;
+      passkeyPanel.hidden = !canShowPasskeys;
+      if (canShowPasskeys) {
+        const pkSlots = (vm?.keySlots || []).filter((s) => s && s.type === 'passkey');
+        const pkStatus = document.getElementById('vault-passkey-status');
+        if (pkStatus) {
+          pkStatus.textContent = !isWebAuthnSupported()
+            ? 'Requires HTTPS / supported browser'
+            : pkSlots.length
+              ? `${pkSlots.length} passkey(s) active`
+              : 'Not enrolled';
+        }
+        const enrollBtn = document.getElementById('vault-register-passkey-btn');
+        if (enrollBtn) enrollBtn.disabled = !isWebAuthnSupported() || !this.state.keyring?.dek;
+
+        const pkList = document.getElementById('vault-passkey-list');
+        if (pkList) {
+          pkList.innerHTML = pkSlots
+            .map(
+              (s) => `
+              <div class="vault-slot-card">
+                <div>
+                  <strong>⚷ ${escapeHtml(s.label || 'Passkey')}</strong>
+                  <span class="mono-meta"> · Added ${escapeHtml(new Date(s.createdAt).toLocaleDateString())}</span>
+                </div>
+                <button type="button" class="btn btn-ghost btn-sm pk-revoke-btn" data-slot-id="${escapeHtml(s.id)}">
+                  Revoke
+                </button>
+              </div>
+            `
+            )
+            .join('');
+          pkList.querySelectorAll('.pk-revoke-btn').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+              const nextVault = removePasskeySlot(this.state.vaultMeta, btn.dataset.slotId);
+              await this.persistVaultMeta(nextVault, 'diary: revoke biometric passkey slot');
+              this.syncPasskeyLockButton();
+              this.showToast('Passkey slot revoked.', 'info');
+              this.openVaultModal();
+            });
+          });
+        }
+      }
+    }
+
+    const decoyPanel = document.getElementById('vault-decoy-panel');
+    if (decoyPanel) {
+      const canShowDecoy = isV2 && !this.state.isDecoySession;
+      decoyPanel.hidden = !canShowDecoy;
+      if (canShowDecoy) {
+        const hasDecoy = Boolean(vm?.altProfile?.slot);
+        document.getElementById('vault-decoy-status').textContent = hasDecoy
+          ? `Active (DEK ${vm.altProfile.dekFingerprint || 'isolated'})`
+          : 'Not configured';
+        document.getElementById('vault-remove-decoy-btn').hidden = !hasDecoy;
+        document.getElementById('vault-decoy-password').value = '';
+        document.getElementById('vault-decoy-confirm').value = '';
       }
     }
 
@@ -3352,83 +3556,11 @@ class PerpetualDiaryApp {
       this.scheduleDraftAutosave();
     });
 
-    document.getElementById('entry-date-input')?.addEventListener('change', (e) => {
-      this.checkDraftBanner(e.target.value);
-    });
-
-    document.getElementById('draft-restore-btn')?.addEventListener('click', () => {
-      const diaryDate = document.getElementById('entry-date-input').value;
-      const raw = this.storageGet(`perpetual_draft_${diaryDate}`);
-      if (raw) {
-        const draft = JSON.parse(raw);
-        document.getElementById('entry-title-input').value = draft.title || '';
-        document.getElementById('entry-mood-input').value = draft.mood || '';
-        document.getElementById('entry-tags-input').value = draft.tags || '';
-        document.getElementById('entry-body-input').value = draft.body || '';
-        this.updateEditorCounts();
-      }
-      document.getElementById('draft-recovery-banner').hidden = true;
-    });
-
-    document.getElementById('draft-discard-btn')?.addEventListener('click', () => {
-      const diaryDate = document.getElementById('entry-date-input').value;
-      this.storageRemove(`perpetual_draft_${diaryDate}`);
-      document.getElementById('draft-recovery-banner').hidden = true;
-    });
-
-    document.querySelectorAll('.md-btn').forEach((btn) => {
-      btn.addEventListener('click', () => this.applyMarkdownSnippet(btn.dataset.md));
-    });
-
-    document.querySelectorAll('#editor-mode-group .seg-btn').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        document
-          .querySelectorAll('#editor-mode-group .seg-btn')
-          .forEach((b) => b.classList.remove('is-active'));
-        btn.classList.add('is-active');
-        const mode = btn.dataset.editorMode;
-        this.state.editorMode = mode;
-        const ws = document.getElementById('editor-workspace');
-        const preview = document.getElementById('entry-preview-pane');
-        ws.className = `editor-workspace mode-${mode}`;
-        preview.hidden = mode === 'write';
-        this.updateEditorCounts();
-      });
-    });
-
-    document.getElementById('entry-photo-file')?.addEventListener('change', async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      try {
-        const preset = document.getElementById('entry-webp-preset')?.value || 'balanced';
-        const processed = await processImageFile(file, { preset });
-        const statsText =
-          processed.savedPercent > 0
-            ? `${processed.formatLabel} · ${formatBytesCompact(processed.originalBytes)} → ${formatBytesCompact(processed.compressedBytes)} (−${processed.savedPercent}%)`
-            : `${processed.formatLabel} · ${formatBytesCompact(processed.compressedBytes)}`;
-
-        this.state.entryDraftPhoto = {
-          src: processed.dataUrl,
-          caption: document.getElementById('entry-photo-caption').value.trim(),
-          align: 'full',
-          posX: 50,
-          posY: 50,
-          width: 100,
-          height: 240,
-          _pendingBuffer: processed.arrayBuffer,
-          _rawFile: file,
-          _ext: processed.ext,
-          _mime: processed.mime,
-        };
-        const statsEl = document.getElementById('entry-photo-stats');
-        if (statsEl) {
-          statsEl.textContent = statsText;
-          statsEl.hidden = false;
-        }
-        document.getElementById('entry-photo-remove-btn').hidden = false;
-        this.entryStudio.setMedia(processed.dataUrl, this.state.entryDraftPhoto, statsText);
-      } catch (err) {
-        this.showToast(err.message || 'Could not process image.', 'error');
+    document.getElementById('entry-doublelock-checkbox')?.addEventListener('change', (e) => {
+      const fields = document.getElementById('entry-doublelock-fields');
+      if (fields) fields.hidden = !e.target.checked;
+      if (e.target.checked) {
+        document.getElementById('entry-doublelock-passphrase')?.focus();
       }
     });
 
@@ -3789,6 +3921,105 @@ class PerpetualDiaryApp {
       }
     });
 
+    // Phase 9: Passkey (WebAuthn PRF) Enrollment & Decoy Vault Events
+    document.getElementById('vault-register-passkey-btn')?.addEventListener('click', async () => {
+      const errBox = document.getElementById('vault-error');
+      const btn = document.getElementById('vault-register-passkey-btn');
+      errBox.hidden = true;
+      btn.disabled = true;
+      try {
+        const label =
+          document.getElementById('vault-passkey-label-input')?.value.trim() ||
+          'Biometric Passkey';
+        const res = await registerPasskeySlot(this.state.vaultMeta, this.state.keyring, { label });
+        await this.persistVaultMeta(res.vaultMeta, 'diary: enroll biometric passkey slot');
+        document.getElementById('vault-passkey-label-input').value = '';
+        this.syncPasskeyLockButton();
+        this.showToast(`Passkey "${res.slot.label}" enrolled with WebAuthn PRF.`, 'success');
+        this.openVaultModal();
+      } catch (err) {
+        errBox.textContent = err.message || 'Passkey enrollment failed.';
+        errBox.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    document.getElementById('vault-save-decoy-btn')?.addEventListener('click', async () => {
+      const errBox = document.getElementById('vault-error');
+      errBox.hidden = true;
+      const decoyPass = document.getElementById('vault-decoy-password')?.value || '';
+      const decoyConfirm = document.getElementById('vault-decoy-confirm')?.value || '';
+      const includePlaintext = Boolean(
+        document.getElementById('vault-decoy-include-plain')?.checked
+      );
+      try {
+        if (!decoyPass) throw new Error('Enter a decoy password first.');
+        if (decoyPass !== decoyConfirm) {
+          throw new Error('Decoy password and confirmation do not match.');
+        }
+        const { vaultMeta } = await configureDecoyVault(this.state.vaultMeta, decoyPass, {
+          includePlaintext,
+        });
+        await this.persistVaultMeta(vaultMeta, 'diary: update vault profile');
+        this.showToast('Plausible Deniability Decoy Vault configured.', 'success');
+        this.openVaultModal();
+      } catch (err) {
+        errBox.textContent = err.message || 'Could not configure Decoy Vault.';
+        errBox.hidden = false;
+      }
+    });
+
+    document.getElementById('vault-remove-decoy-btn')?.addEventListener('click', async () => {
+      const ok = await this.openConfirm({
+        title: 'Remove Decoy Vault',
+        message: 'Remove the secondary decoy password slot from vault metadata?',
+        confirmLabel: 'Remove Decoy',
+      });
+      if (!ok) return;
+      const nextVault = removeDecoyVault(this.state.vaultMeta);
+      await this.persistVaultMeta(nextVault, 'diary: update vault profile');
+      this.showToast('Decoy Vault removed.', 'info');
+      this.openVaultModal();
+    });
+
+    document.getElementById('lock-passkey-btn')?.addEventListener('click', async () => {
+      const errEl = document.getElementById('lock-error');
+      const zfChecked = Boolean(document.getElementById('lock-zero-footprint-checkbox')?.checked);
+      errEl.hidden = true;
+      try {
+        this.setZeroFootprintMode(zfChecked, false);
+        const res = await unlockVaultWithPasskey(this.state.vaultMeta);
+        if (!res.ok) {
+          errEl.textContent = res.error || 'Passkey unlock failed.';
+          errEl.hidden = false;
+          return;
+        }
+        this.state.isDecoySession = false;
+        this.state.decoyPolicy = null;
+        this.setActiveKeyring(res.keyring);
+
+        if (res.pat && !this.gh.hasToken()) {
+          this.gh.updateConfig({ token: res.pat });
+          if (!this.state.zeroFootprint) {
+            GitHubClient.saveConfig(this.gh.config, window.localStorage);
+          }
+        }
+
+        this.state.unlocked = true;
+        const reasonBadge = document.getElementById('lock-reason-badge');
+        if (reasonBadge) reasonBadge.hidden = true;
+        document.getElementById('lock-screen').hidden = true;
+        this.updateModeBadge();
+        await this.loadManifestIndex();
+        await this.renderActiveView();
+        this.showToast('Unlocked with Biometric Passkey (WebAuthn PRF).', 'success');
+      } catch (err) {
+        errEl.textContent = err.message || 'Passkey unlock failed.';
+        errEl.hidden = false;
+      }
+    });
+
     document.getElementById('vault-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
       const errBox = document.getElementById('vault-error');
@@ -3916,13 +4147,15 @@ class PerpetualDiaryApp {
 
       try {
         this.setZeroFootprintMode(zfChecked, false);
-        const res = await unlockVault(passInput.value, this.state.vaultMeta);
+        const res = await unlockVaultOrDecoy(passInput.value, this.state.vaultMeta);
         if (!res.ok) {
           errEl.textContent = res.error || 'Incorrect password or recovery key';
           errEl.hidden = false;
           return;
         }
 
+        this.state.isDecoySession = Boolean(res.isDecoy);
+        this.state.decoyPolicy = res.decoyPolicy || null;
         this.setActiveKeyring(res.keyring);
 
         if (res.pat && !this.gh.hasToken()) {
