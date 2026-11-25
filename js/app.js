@@ -22,8 +22,17 @@ import {
   rotateVaultPassword,
   rotateVaultPasswordWithKeyring,
   upgradeLegacyVaultToEnvelope,
+  upgradePasswordSlotKdf,
   encryptPatToken,
 } from './crypto.js';
+import { ARGON2ID_PRESETS } from './kdf.js';
+import {
+  parseShareHash,
+  loadShareRecords,
+  createRevocableShareLink,
+  fetchAndDecryptShareLink,
+  revokeShareLink,
+} from './share.js';
 import {
   renderMarkdown,
   stripMarkdown,
@@ -281,6 +290,7 @@ class PerpetualDiaryApp {
       editingEntryKey: null,
       editingBaseEntry: null,
       entryDraftPhoto: null,
+      pendingShareEntry: null,
       activeConflict: null,
       editorMode: 'write',
       archiveSearch: '',
@@ -717,11 +727,68 @@ class PerpetualDiaryApp {
     }
 
     await this.loadVaultAndIndex();
+
+    // Phase 10: Intercept Zero-Knowledge Share Link route before showing Lock Screen
+    const shareParams = parseShareHash(window.location.hash);
+    if (shareParams) {
+      await this.openSharedEntryViewer(shareParams.shareId, shareParams.keyB64Url);
+      this.updateModeBadge();
+      return;
+    }
+
     this.applyHashRoute();
     if (this.state.unlocked) {
       await this.renderActiveView();
     }
     this.updateModeBadge();
+  }
+
+  async openSharedEntryViewer(shareId, keyB64Url) {
+    const overlay = document.getElementById('shared-viewer-overlay');
+    const titleEl = document.getElementById('shared-viewer-title');
+    const metaEl = document.getElementById('shared-viewer-meta');
+    const tagsEl = document.getElementById('shared-viewer-tags');
+    const bodyEl = document.getElementById('shared-viewer-body');
+    const errEl = document.getElementById('shared-viewer-error');
+    const lockScreen = document.getElementById('lock-screen');
+
+    if (lockScreen) lockScreen.hidden = true;
+    if (overlay) overlay.hidden = false;
+    errEl.hidden = true;
+    tagsEl.innerHTML = '';
+    bodyEl.innerHTML = '';
+    titleEl.textContent = 'Decrypting shared entry…';
+    metaEl.textContent = '';
+
+    try {
+      const entry = await fetchAndDecryptShareLink(shareId, keyB64Url, this.gh);
+      titleEl.textContent = entry.title || `${entry.diaryDate} · Shared Entry`;
+      const expNote = entry.expiresAt
+        ? ` · Expires ${new Date(entry.expiresAt).toLocaleDateString()}`
+        : '';
+      metaEl.textContent = `${entry.diaryDate}${entry.mood ? ` · mood: ${entry.mood}` : ''}${expNote}`;
+
+      if (Array.isArray(entry.tags) && entry.tags.length) {
+        tagsEl.innerHTML = entry.tags
+          .map((t) => `<span class="tag-chip">#${escapeHtml(t)}</span>`)
+          .join('');
+      }
+      bodyEl.innerHTML = renderMarkdown(entry.body || '');
+    } catch (err) {
+      titleEl.textContent = 'Shared Entry Unavailable';
+      errEl.textContent = err.message || 'Unable to decrypt shared entry.';
+      errEl.hidden = false;
+    }
+  }
+
+  openShareComposerModal(entrySnapshot) {
+    this.state.pendingShareEntry = entrySnapshot;
+    document.getElementById('share-entry-summary').textContent =
+      `Create a revocable, one-time encrypted link for "${entrySnapshot.title || entrySnapshot.diaryDate}" (${entrySnapshot.diaryDate}). Your master password is never shared.`;
+    document.getElementById('share-result-box').hidden = true;
+    document.getElementById('share-result-url').value = '';
+    document.getElementById('share-error').hidden = true;
+    document.getElementById('share-modal').hidden = false;
   }
 
   initTheme() {
@@ -1246,6 +1313,7 @@ class PerpetualDiaryApp {
         </div>
         <div class="year-col-actions">
           ${isDoubleLocked && dlRamCache ? '<button type="button" class="btn btn-ghost btn-sm col-reseal-btn" title="Re-seal this Double-Locked entry in RAM">⚿ Re-Seal</button>' : ''}
+          <button type="button" class="btn btn-ghost btn-sm col-share-btn" title="Create Zero-Knowledge Revocable Share Link" ${isTampered || isLockedEntry || isDoubleLockSealed ? 'disabled' : ''}>↗ Share</button>
           <button type="button" class="btn btn-ghost btn-sm col-quote-btn" title="Quote in margin comment" ${isTampered || isLockedEntry || isDoubleLockSealed ? 'disabled' : ''}>❝ Quote</button>
           <button type="button" class="btn btn-ghost btn-sm col-pin-btn ${isPinned ? 'is-pinned' : ''}" title="Pin column to left">
             ${isPinned ? 'Pinned' : 'Pin'}
@@ -1325,6 +1393,18 @@ class PerpetualDiaryApp {
       this.state.pinnedYear =
         Number(this.state.pinnedYear) === Number(entry.year) ? null : Number(entry.year);
       this.renderReader();
+    });
+
+    col.querySelector('.col-share-btn')?.addEventListener('click', () => {
+      if (isTampered || isLockedEntry || isDoubleLockSealed) return;
+      this.openShareComposerModal({
+        diaryDate: resolvedDate,
+        year: Number(entry.year),
+        title: decryptedTitle || '',
+        body: decryptedBody || '',
+        mood: entry.mood || '',
+        tags: Array.isArray(entry.tags) ? entry.tags : [],
+      });
     });
 
     col.querySelector('.col-quote-btn').addEventListener('click', () => {
@@ -2922,7 +3002,9 @@ class PerpetualDiaryApp {
               ? '256-bit Raw Hex Recovery Slot'
               : s.type === 'passkey'
                 ? `WebAuthn PRF Passkey (${s.rpId || 'local'})`
-                : `${s.kdf || 'PBKDF2-SHA256'} (${Number(s.iterations || 250000).toLocaleString()} iter)`;
+                : String(s.kdf || '').toLowerCase() === 'argon2id'
+                  ? `Argon2id (${Math.round((Number(s.memoryKiB) || 16384) / 1024)} MB · t=${s.timeCost || 2})`
+                  : `${s.kdf || 'PBKDF2-SHA256'} (${Number(s.iterations || 250000).toLocaleString()} iter)`;
           return `
             <div class="vault-slot-card">
               <div>
@@ -3052,6 +3134,71 @@ class PerpetualDiaryApp {
         document.getElementById('vault-remove-decoy-btn').hidden = !hasDecoy;
         document.getElementById('vault-decoy-password').value = '';
         document.getElementById('vault-decoy-confirm').value = '';
+      }
+    }
+
+    // Phase 10: Argon2id Memory-Hard KDF Upgrade Panel
+    const argonPanel = document.getElementById('vault-argon2-panel');
+    if (argonPanel) {
+      const canShowArgon = isV2 && !this.state.isDecoySession;
+      argonPanel.hidden = !canShowArgon;
+      if (canShowArgon) {
+        const pwSlot = (vm?.keySlots || []).find((s) => s && s.type === 'password');
+        const isArgon = String(pwSlot?.kdf || '').toLowerCase() === 'argon2id';
+        const pill = document.getElementById('vault-kdf-status-pill');
+        if (pill) {
+          pill.textContent = isArgon
+            ? `ARGON2ID · ${Math.round((Number(pwSlot.memoryKiB) || 16384) / 1024)} MB`
+            : 'PBKDF2-SHA256';
+        }
+        const statusEl = document.getElementById('vault-argon2-status');
+        if (statusEl) statusEl.hidden = true;
+      }
+    }
+
+    // Phase 10: Active Zero-Knowledge Share Links Manager
+    const sharesPanel = document.getElementById('vault-shares-panel');
+    if (sharesPanel) {
+      const shares = this.state.zeroFootprint ? [] : loadShareRecords(window.localStorage);
+      sharesPanel.hidden = this.state.isDecoySession || shares.length === 0;
+      const countEl = document.getElementById('vault-shares-count');
+      if (countEl) countEl.textContent = `${shares.length} active`;
+      const listEl = document.getElementById('vault-shares-list');
+      if (listEl) {
+        listEl.innerHTML = shares
+          .map((sh) => {
+            const expTxt = sh.expiresAt
+              ? `Exp ${new Date(sh.expiresAt).toLocaleDateString()}`
+              : 'No expiry';
+            return `
+              <div class="vault-slot-card">
+                <div>
+                  <strong>↗ ${escapeHtml(sh.titlePreview || sh.diaryDate)}</strong>
+                  <span class="mono-meta"> · ${escapeHtml(sh.diaryDate)} · ${escapeHtml(expTxt)}</span>
+                </div>
+                <button type="button" class="btn btn-danger btn-sm share-revoke-btn" data-share-id="${escapeHtml(sh.shareId)}" data-public-repo="${sh.usePublicAppRepo !== false ? '1' : '0'}">
+                  Revoke
+                </button>
+              </div>
+            `;
+          })
+          .join('');
+        listEl.querySelectorAll('.share-revoke-btn').forEach((btn) => {
+          btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            try {
+              await revokeShareLink(btn.dataset.shareId, this.gh, {
+                usePublicAppRepo: btn.dataset.publicRepo === '1',
+                zeroFootprint: this.state.zeroFootprint,
+              });
+              this.showToast('Share link permanently revoked.', 'success');
+              this.openVaultModal();
+            } catch (err) {
+              this.showToast(err.message || 'Could not revoke share link.', 'error');
+              btn.disabled = false;
+            }
+          });
+        });
       }
     }
 
@@ -3983,6 +4130,120 @@ class PerpetualDiaryApp {
       this.openVaultModal();
     });
 
+    // Phase 10: Argon2id Memory-Hard KDF Upgrade Handler
+    document.getElementById('vault-upgrade-argon2-btn')?.addEventListener('click', async () => {
+      const errBox = document.getElementById('vault-error');
+      const statusEl = document.getElementById('vault-argon2-status');
+      const btn = document.getElementById('vault-upgrade-argon2-btn');
+      errBox.hidden = true;
+
+      const currentPass = document.getElementById('vault-current-password')?.value || '';
+      if (!currentPass) {
+        errBox.textContent =
+          'Enter your Current Master Password below first so we can re-wrap your DEK with Argon2id.';
+        errBox.hidden = false;
+        document.getElementById('vault-current-password')?.focus();
+        return;
+      }
+
+      const presetKey = document.getElementById('vault-argon2-preset')?.value || 'balanced';
+      const preset = ARGON2ID_PRESETS[presetKey] || ARGON2ID_PRESETS.balanced;
+
+      btn.disabled = true;
+      statusEl.hidden = false;
+      statusEl.textContent = `Running RFC 9106 Argon2id (${Math.round(preset.memoryKiB / 1024)} MB · t=${preset.timeCost}) in Web Worker…`;
+
+      try {
+        const t0 = performance.now();
+        const rotated = await upgradePasswordSlotKdf(this.state.vaultMeta, currentPass, {
+          kdf: 'Argon2id',
+          memoryKiB: preset.memoryKiB,
+          timeCost: preset.timeCost,
+        });
+        const elapsedMs = Math.round(performance.now() - t0);
+        this.setActiveKeyring(rotated.keyring);
+        await this.persistVaultMeta(rotated.vaultMeta, 'diary: upgrade password slot to Argon2id');
+        statusEl.textContent = `Upgraded to Argon2id in ${elapsedMs} ms — DEK unchanged, 0 entries re-encrypted.`;
+        this.showToast(`Password slot upgraded to Argon2id (${elapsedMs} ms).`, 'success');
+        this.openVaultModal();
+      } catch (err) {
+        errBox.textContent = err.message || 'Argon2id upgrade failed.';
+        errBox.hidden = false;
+        statusEl.hidden = true;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    // Phase 10: Zero-Knowledge Revocable Share Link Modal & Viewer Events
+    document.getElementById('share-close-btn')?.addEventListener('click', () => {
+      document.getElementById('share-modal').hidden = true;
+    });
+    document.getElementById('share-cancel-btn')?.addEventListener('click', () => {
+      document.getElementById('share-modal').hidden = true;
+    });
+
+    document.getElementById('share-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errBox = document.getElementById('share-error');
+      const genBtn = document.getElementById('share-generate-btn');
+      errBox.hidden = true;
+
+      if (!this.state.pendingShareEntry) return;
+      genBtn.disabled = true;
+      try {
+        const expiresInHours = Number(document.getElementById('share-expiry-select')?.value || 168);
+        const usePublicAppRepo = Boolean(
+          document.getElementById('share-public-repo-checkbox')?.checked
+        );
+        const res = await createRevocableShareLink({
+          entrySnapshot: this.state.pendingShareEntry,
+          expiresInHours,
+          ghClient: this.gh,
+          zeroFootprint: this.state.zeroFootprint,
+          usePublicAppRepo,
+        });
+        document.getElementById('share-result-url').value = res.shareUrl;
+        document.getElementById('share-result-box').hidden = false;
+        this.showToast('Zero-Knowledge share link created.', 'success');
+      } catch (err) {
+        errBox.textContent = err.message || 'Could not create share link.';
+        errBox.hidden = false;
+      } finally {
+        genBtn.disabled = false;
+      }
+    });
+
+    document.getElementById('share-copy-url-btn')?.addEventListener('click', () => {
+      const urlVal = document.getElementById('share-result-url')?.value || '';
+      if (!urlVal) return;
+      navigator.clipboard?.writeText(urlVal).then(
+        () => this.showToast('Zero-Knowledge share link copied.', 'success'),
+        () => this.showToast('Select and copy the URL manually.', 'warn')
+      );
+    });
+
+    document.getElementById('share-open-preview-btn')?.addEventListener('click', async () => {
+      const urlVal = document.getElementById('share-result-url')?.value || '';
+      const hashPart = urlVal.includes('#') ? urlVal.slice(urlVal.indexOf('#')) : '';
+      const parsed = parseShareHash(hashPart);
+      if (parsed) {
+        document.getElementById('share-modal').hidden = true;
+        await this.openSharedEntryViewer(parsed.shareId, parsed.keyB64Url);
+      }
+    });
+
+    document.getElementById('shared-viewer-exit-btn')?.addEventListener('click', async () => {
+      document.getElementById('shared-viewer-overlay').hidden = true;
+      window.history.replaceState(null, '', `#${this.state.activeDay}`);
+      if (this.state.vaultMeta?.enabled && !this.hasActiveSessionKey()) {
+        document.getElementById('lock-screen').hidden = false;
+        this.syncPasskeyLockButton();
+      } else {
+        await this.renderActiveView();
+      }
+    });
+
     document.getElementById('lock-passkey-btn')?.addEventListener('click', async () => {
       const errEl = document.getElementById('lock-error');
       const zfChecked = Boolean(document.getElementById('lock-zero-footprint-checkbox')?.checked);
@@ -4249,6 +4510,7 @@ class PerpetualDiaryApp {
         document.getElementById('github-modal').hidden = true;
         document.getElementById('vault-modal').hidden = true;
         document.getElementById('conflict-modal').hidden = true;
+        document.getElementById('share-modal').hidden = true;
         this.closeConfirm(false);
       }
     });
