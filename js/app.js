@@ -34,6 +34,15 @@ import {
   revokeShareLink,
 } from './share.js';
 import {
+  recordSandboxRevision,
+  fetchDayCommitHistory,
+  fetchEntryAtRevision,
+  saveCloudDraft,
+  listCloudDrafts,
+  loadCloudDraft,
+  deleteCloudDraft,
+} from './history.js';
+import {
   renderMarkdown,
   stripMarkdown,
   countWords,
@@ -292,6 +301,9 @@ class PerpetualDiaryApp {
       entryDraftPhoto: null,
       pendingShareEntry: null,
       activeConflict: null,
+      activeHistory: null,
+      historyViewMode: 'diff',
+      activeCloudDraftDate: null,
       editorMode: 'write',
       archiveSearch: '',
       archiveYear: '',
@@ -579,6 +591,10 @@ class PerpetualDiaryApp {
       'vault-recovery-code-display',
       'conflict-local-diff',
       'conflict-remote-diff',
+      'history-timeline-list',
+      'history-diff-viewer',
+      'history-snapshot-viewer',
+      'drafts-list',
     ];
     for (const id of clearHtmlIds) {
       const el = document.getElementById(id);
@@ -617,6 +633,9 @@ class PerpetualDiaryApp {
       'github-modal',
       'vault-modal',
       'conflict-modal',
+      'history-modal',
+      'drafts-modal',
+      'share-modal',
       'confirm-modal',
     ];
     for (const id of modalIds) {
@@ -657,6 +676,8 @@ class PerpetualDiaryApp {
     this.setActiveKeyring(null);
     this.state.recentRecoveryCode = null;
     this.state.activeConflict = null;
+    this.state.activeHistory = null;
+    this.state.activeCloudDraftDate = null;
     this.state.isDecoySession = false;
     this.state.decoyPolicy = null;
     this.state.doubleLockUnlocked.clear();
@@ -739,6 +760,7 @@ class PerpetualDiaryApp {
     this.applyHashRoute();
     if (this.state.unlocked) {
       await this.renderActiveView();
+      this.refreshCloudDraftBadge().catch(() => {});
     }
     this.updateModeBadge();
   }
@@ -974,6 +996,7 @@ class PerpetualDiaryApp {
     }
 
     await this.persistSandboxDay(dayStr, normalized);
+    recordSandboxRevision(dayStr, normalized, commitMessage, this.state.zeroFootprint);
     return { doc: normalized, commitSha: '' };
   }
   }
@@ -1313,6 +1336,7 @@ class PerpetualDiaryApp {
         </div>
         <div class="year-col-actions">
           ${isDoubleLocked && dlRamCache ? '<button type="button" class="btn btn-ghost btn-sm col-reseal-btn" title="Re-seal this Double-Locked entry in RAM">⚿ Re-Seal</button>' : ''}
+          <button type="button" class="btn btn-ghost btn-sm col-history-btn" title="Git Revision Time Machine (View Edit History, Diffs & Restore)">⏱ History</button>
           <button type="button" class="btn btn-ghost btn-sm col-share-btn" title="Create Zero-Knowledge Revocable Share Link" ${isTampered || isLockedEntry || isDoubleLockSealed ? 'disabled' : ''}>↗ Share</button>
           <button type="button" class="btn btn-ghost btn-sm col-quote-btn" title="Quote in margin comment" ${isTampered || isLockedEntry || isDoubleLockSealed ? 'disabled' : ''}>❝ Quote</button>
           <button type="button" class="btn btn-ghost btn-sm col-pin-btn ${isPinned ? 'is-pinned' : ''}" title="Pin column to left">
@@ -1407,22 +1431,13 @@ class PerpetualDiaryApp {
       });
     });
 
-    col.querySelector('.col-quote-btn').addEventListener('click', () => {
-      if (isTampered || isLockedEntry) return;
-      const sel = window.getSelection()?.toString().trim();
-      const insideCol =
-        sel &&
-        window.getSelection()?.anchorNode &&
-        col.contains(window.getSelection().anchorNode);
-      const quoteText = insideCol ? sel : extractDefaultQuote(decryptedBody || '');
-      if (!quoteText) {
-        this.showToast('No text available to quote from this entry.', 'warn');
-        return;
-      }
-      this.attachQuoteToComment({
-        text: quoteText,
-        year: Number(entry.year),
+    col.querySelector('.col-history-btn')?.addEventListener('click', () => {
+      this.openHistoryModal(dayStr, yearKey, {
         diaryDate: resolvedDate,
+        title: decryptedTitle || '',
+        body: decryptedBody || '',
+        mood: entry.mood || '',
+        tags: Array.isArray(entry.tags) ? entry.tags : [],
       });
     });
 
@@ -1863,7 +1878,7 @@ class PerpetualDiaryApp {
   /* ========================================================================
      ENTRY COMPOSER, WEBP UPLOAD & ATOMIC SAVE / 3-WAY CONFLICT RESOLVER
      ======================================================================== */
-  openComposer({ presetDate = null, editEntry = null, dayStr = null, yearKey = null } = {}) {
+  openComposer({ presetDate = null, editEntry = null, dayStr = null, yearKey = null, fromCloudDraft = null } = {}) {
     const modal = document.getElementById('composer-modal');
     const dateInput = document.getElementById('entry-date-input');
     const titleInput = document.getElementById('entry-title-input');
@@ -1957,6 +1972,22 @@ class PerpetualDiaryApp {
       bodyInput.value = '';
       encryptCb.checked = this.hasActiveSessionKey();
       deleteBtn.hidden = true;
+    }
+
+    if (fromCloudDraft) {
+      this.state.activeCloudDraftDate = fromCloudDraft.diaryDate || dateInput.value;
+      dateInput.value = fromCloudDraft.diaryDate || dateInput.value;
+      titleInput.value = fromCloudDraft.title || '';
+      moodInput.value = fromCloudDraft.mood || '';
+      tagsInput.value = Array.isArray(fromCloudDraft.tags) ? fromCloudDraft.tags.join(', ') : '';
+      bodyInput.value = fromCloudDraft.body || '';
+      if (typeof fromCloudDraft.encryptOnPublish === 'boolean') {
+        encryptCb.checked = fromCloudDraft.encryptOnPublish && this.hasActiveSessionKey();
+      }
+      document.getElementById('composer-modal-title').textContent =
+        `Resume Cloud Draft · ${dateInput.value}`;
+    } else if (!editEntry) {
+      this.state.activeCloudDraftDate = null;
     }
 
     const statusEl = document.getElementById('entry-draft-status');
@@ -2502,6 +2533,13 @@ class PerpetualDiaryApp {
         this.state.indexData = res.index;
 
         this.storageRemove(`perpetual_draft_${diaryDate}`);
+        if (this.state.activeCloudDraftDate === diaryDate) {
+          await deleteCloudDraft(this.gh, diaryDate, {
+            zeroFootprint: this.state.zeroFootprint,
+          }).catch(() => {});
+          this.state.activeCloudDraftDate = null;
+          this.refreshCloudDraftBadge().catch(() => {});
+        }
         this.state.activeDay = newDayStr;
         this.closeComposer();
         const shortSha = res.commitSha ? ` (#${res.commitSha.slice(0, 7)})` : '';
@@ -2518,13 +2556,33 @@ class PerpetualDiaryApp {
             const nextOldEntries = { ...(oldDoc.entries || {}) };
             delete nextOldEntries[originalYearKey];
             await this.persistSandboxDay(originalDayStr, { ...oldDoc, entries: nextOldEntries });
+            recordSandboxRevision(
+              originalDayStr,
+              { ...oldDoc, entries: nextOldEntries },
+              `sandbox: move ${originalYearKey}-${originalDayStr} out`,
+              this.state.zeroFootprint
+            );
           }
         }
         const targetDoc = await this.getDayDocument(newDayStr, true);
         const nextEntries = { ...(targetDoc.entries || {}), [newYearKey]: entryRecord };
-        await this.persistSandboxDay(newDayStr, { ...targetDoc, entries: nextEntries });
+        const updatedSandboxDoc = { ...targetDoc, entries: nextEntries };
+        await this.persistSandboxDay(newDayStr, updatedSandboxDoc);
+        recordSandboxRevision(
+          newDayStr,
+          updatedSandboxDoc,
+          `sandbox: save entry ${diaryDate}`,
+          this.state.zeroFootprint
+        );
 
         this.storageRemove(`perpetual_draft_${diaryDate}`);
+        if (this.state.activeCloudDraftDate === diaryDate) {
+          await deleteCloudDraft(this.gh, diaryDate, {
+            zeroFootprint: this.state.zeroFootprint,
+          }).catch(() => {});
+          this.state.activeCloudDraftDate = null;
+          this.refreshCloudDraftBadge().catch(() => {});
+        }
         this.state.activeDay = newDayStr;
         this.closeComposer();
         this.showToast(
@@ -2612,255 +2670,314 @@ class PerpetualDiaryApp {
   }
 
   /* ========================================================================
-     366-DAY HEATMAP, ARCHIVE & EXPORTS
+     PHASE 11: GIT REVISION "TIME MACHINE" & CROSS-DEVICE `drafts` BRANCH
      ======================================================================== */
-  renderHeatmap() {
-    const grid = document.getElementById('heatmap-grid');
-    const readout = document.getElementById('heatmap-hover-readout');
-    if (!grid) return;
+  async openHistoryModal(dayStr, yearKey, currentPlainEntry) {
+    const modal = document.getElementById('history-modal');
+    const titleEl = document.getElementById('history-modal-title');
+    const statusBanner = document.getElementById('history-status-banner');
+    const listEl = document.getElementById('history-timeline-list');
+    const countLabel = document.getElementById('history-count-label');
+    const restoreBtn = document.getElementById('history-restore-btn');
 
-    const allDays = getAll366Days();
-    const daysMap = this.state.indexData?.days || {};
-    grid.innerHTML = '';
+    titleEl.textContent = `Time Machine · ${currentPlainEntry.diaryDate || `${yearKey}-${dayStr}`}`;
+    statusBanner.hidden = false;
+    statusBanner.className = 'status-callout';
+    statusBanner.textContent = 'Querying Git revision history…';
+    listEl.innerHTML = '';
+    countLabel.textContent = '…';
+    restoreBtn.disabled = true;
+    document.getElementById('history-selected-sha').textContent = 'LOADING REVISIONS…';
+    document.getElementById('history-selected-meta').textContent = '';
+    document.getElementById('history-entry-meta').hidden = true;
+    document.getElementById('history-diff-viewer').innerHTML = '';
+    document.getElementById('history-snapshot-viewer').innerHTML = '';
 
-    for (const dayStr of allDays) {
-      const info = daysMap[dayStr];
-      const count = info?.years?.length || 0;
-      const lvl = Math.min(4, count);
-      const cell = document.createElement('button');
-      cell.type = 'button';
-      cell.className = `hm-cell hm-lvl-${lvl}`;
-      cell.setAttribute('aria-label', `${formatReadableDay(dayStr)}: ${count} years`);
-
-      const summaryText =
-        count > 0
-          ? `${formatReadableDay(dayStr)} (${dayStr}) — ${count} year(s): ${info.years.join(', ')}`
-          : `${formatReadableDay(dayStr)} (${dayStr}) — No entries yet`;
-
-      cell.addEventListener('mouseenter', () => {
-        if (readout) readout.textContent = summaryText;
-      });
-      cell.addEventListener('focus', () => {
-        if (readout) readout.textContent = summaryText;
-      });
-      cell.addEventListener('click', () => {
-        this.state.activeDay = dayStr;
-        this.state.compare2Active = false;
-        this.switchView('reader');
-      });
-
-      grid.appendChild(cell);
-    }
-  }
-
-  async renderArchive() {
-    const yearSelect = document.getElementById('archive-year-select');
-    const tagCloud = document.getElementById('archive-tag-cloud');
-    const resultsEl = document.getElementById('archive-results');
-    const daysMap = this.state.indexData?.days || {};
-
-    const yearsSet = new Set();
-    const tagCounts = new Map();
-
-    for (const info of Object.values(daysMap)) {
-      for (const y of info.years || []) yearsSet.add(Number(y));
-      for (const t of info.tags || []) tagCounts.set(t, (tagCounts.get(t) || 0) + 1);
-    }
-
-    const prevYearVal = yearSelect.value;
-    yearSelect.innerHTML =
-      '<option value="">All Years</option>' +
-      Array.from(yearsSet)
-        .sort((a, b) => b - a)
-        .map((y) => `<option value="${y}">${y}</option>`)
-        .join('');
-    yearSelect.value = prevYearVal;
-
-    tagCloud.innerHTML = Array.from(tagCounts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([tag, cnt]) => {
-        const active = this.state.archiveTag === tag ? 'is-active' : '';
-        return `<button type="button" class="tag-pill ${active}" data-tag="${escapeHtml(tag)}">#${escapeHtml(tag)} <span class="mono-meta">${cnt}</span></button>`;
-      })
-      .join('');
-
-    tagCloud.querySelectorAll('.tag-pill').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const t = btn.dataset.tag;
-        this.state.archiveTag = this.state.archiveTag === t ? '' : t;
-        this.renderArchive();
-      });
-    });
-
-    const query = (this.state.archiveSearch || '').trim().toLowerCase();
-    const selectedYear = this.state.archiveYear;
-    const selectedTag = this.state.archiveTag;
-
-    const matches = [];
-    const sortedDayKeys = Object.keys(daysMap).sort();
-
-    for (const dayStr of sortedDayKeys) {
-      const info = daysMap[dayStr];
-      const dayYears = info.years || [];
-      if (selectedYear && !dayYears.includes(Number(selectedYear))) continue;
-      if (selectedTag && !(info.tags || []).includes(selectedTag)) continue;
-
-      if (!query) {
-        for (const yr of dayYears) {
-          matches.push({ dayStr, year: yr, diaryDate: `${yr}-${dayStr}`, tags: info.tags || [] });
-        }
-        continue;
-      }
-
-      const doc = this.state.dayCache[dayStr];
-      if (doc && doc.entries) {
-        for (const yr of dayYears) {
-          const e = doc.entries[String(yr)];
-          if (!e) continue;
-          const expectedDate = `${yr}-${dayStr}`;
-          const bodyText =
-            (await this.decryptFieldIfNeeded(
-              e.body,
-              Boolean(e.encrypted),
-              buildEntryAad(expectedDate, String(yr), 'body')
-            )) || '';
-          const titleText =
-            (await this.decryptFieldIfNeeded(
-              e.title,
-              Boolean(e.encrypted),
-              buildEntryAad(expectedDate, String(yr), 'title')
-            )) || '';
-          const hay =
-            `${titleText} ${bodyText} ${(e.tags || []).join(' ')} ${e.mood || ''}`.toLowerCase();
-          if (hay.includes(query)) {
-            matches.push({
-              dayStr,
-              year: yr,
-              diaryDate: e.diaryDate || expectedDate,
-              title: titleText,
-              tags: e.tags || [],
-            });
-          }
-        }
-      } else if (
-        dayStr.includes(query) ||
-        (info.tags || []).some((t) => t.toLowerCase().includes(query))
-      ) {
-        for (const yr of dayYears) {
-          matches.push({ dayStr, year: yr, diaryDate: `${yr}-${dayStr}`, tags: info.tags || [] });
-        }
-      }
-    }
-
-    resultsEl.innerHTML = matches.length
-      ? matches
-          .map(
-            (m) => `
-          <button type="button" class="archive-item" data-day="${escapeHtml(m.dayStr)}">
-            <div>
-              <span class="mono-meta">${escapeHtml(m.diaryDate)}</span>
-              <strong>${escapeHtml(m.title || `${formatReadableDay(m.dayStr)} · ${m.year}`)}</strong>
-            </div>
-            <div class="mono-meta">${(m.tags || []).map((t) => `#${escapeHtml(t)}`).join(' ')}</div>
-          </button>
-        `
-          )
-          .join('')
-      : '<div class="empty-comments mono-meta">No matching entries found. Click "Load All Indexed Days" for deep text search across all recorded dates.</div>';
-
-    resultsEl.querySelectorAll('.archive-item').forEach((item) => {
-      item.addEventListener('click', () => {
-        this.state.activeDay = item.dataset.day;
-        this.state.compare2Active = false;
-        this.switchView('reader');
-      });
-    });
-  }
-
-  async loadAllIndexedDaysForSearch() {
-    const keys = Object.keys(this.state.indexData?.days || {});
-    for (const dayStr of keys) {
-      await this.getDayDocument(dayStr, false);
-    }
-    this.showToast(`Loaded ${keys.length} indexed day(s) for search.`, 'success');
-    await this.renderArchive();
-  }
-
-  async exportArchiveJson() {
-    const keys = Object.keys(this.state.indexData?.days || {}).sort();
-    const days = {};
-    for (const k of keys) {
-      days[k] = await this.getDayDocument(k, false);
-    }
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      index: this.state.indexData,
-      days,
+    this.state.activeHistory = {
+      dayStr,
+      yearKey: String(yearKey),
+      currentPlainEntry,
+      revisions: [],
+      selectedRevision: null,
+      selectedSnapshot: null,
     };
-    this.downloadFile(
-      'perpetual-diary-archive.json',
-      JSON.stringify(payload, null, 2),
-      'application/json'
-    );
+
+    modal.hidden = false;
+
+    try {
+      const revisions = await fetchDayCommitHistory(this.gh, dayStr, {
+        cloakAdapter: this.buildCloakTxAdapter(),
+        limit: 25,
+      });
+      this.state.activeHistory.revisions = revisions;
+      countLabel.textContent = `${revisions.length}`;
+
+      if (revisions.length === 0) {
+        statusBanner.textContent = this.gh.hasToken()
+          ? 'No Git commit revisions found for this day file yet.'
+          : 'No local Sandbox revisions yet. Save edits to build a local revision timeline, or connect GitHub for full Git history.';
+        document.getElementById('history-selected-sha').textContent = 'NO REVISIONS';
+        return;
+      }
+
+      statusBanner.hidden = true;
+      listEl.innerHTML = revisions
+        .map((rev, idx) => {
+          const dt = new Date(rev.date).toLocaleString(undefined, {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+          return `
+            <button type="button" class="history-commit-item${idx === 0 ? ' is-active' : ''}" data-rev-idx="${idx}">
+              <div class="history-commit-top">
+                <span class="mono-label">#${escapeHtml(rev.shortSha)}</span>
+                <span class="mono-meta">${escapeHtml(dt)}</span>
+              </div>
+              <div class="history-commit-msg">${escapeHtml(rev.message)}</div>
+              <div class="mono-meta">${escapeHtml(rev.authorName)}</div>
+            </button>
+          `;
+        })
+        .join('');
+
+      listEl.querySelectorAll('.history-commit-item').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          listEl.querySelectorAll('.history-commit-item').forEach((b) => b.classList.remove('is-active'));
+          btn.classList.add('is-active');
+          this.inspectHistoryRevision(Number(btn.dataset.revIdx));
+        });
+      });
+
+      await this.inspectHistoryRevision(0);
+    } catch (err) {
+      statusBanner.hidden = false;
+      statusBanner.className = 'status-callout is-err';
+      statusBanner.textContent = err.message || 'Could not load Git commit history.';
+    }
   }
 
-  async exportArchiveMarkdown() {
-    const keys = Object.keys(this.state.indexData?.days || {}).sort();
-    const lines = [
-      '# Perpetual Side-by-Side Diary Export',
-      `Generated: ${new Date().toISOString()}`,
-      '',
-    ];
+  async inspectHistoryRevision(revIndex) {
+    const h = this.state.activeHistory;
+    if (!h || !h.revisions[revIndex]) return;
+    const rev = h.revisions[revIndex];
+    h.selectedRevision = rev;
+    h.selectedSnapshot = null;
 
-    for (const k of keys) {
-      const doc = await this.getDayDocument(k, false);
-      lines.push(`## ${formatReadableDay(k)} (${k})`, '');
-      const years = Object.keys(doc.entries || {}).sort();
-      for (const yr of years) {
-        const e = doc.entries[yr];
-        const expectedDate = `${yr}-${k}`;
-        const body =
-          (await this.decryptFieldIfNeeded(
-            e.body,
-            Boolean(e.encrypted),
-            buildEntryAad(expectedDate, yr, 'body')
-          )) || '[Encrypted / Tampered]';
-        const title =
-          (await this.decryptFieldIfNeeded(
-            e.title,
-            Boolean(e.encrypted),
-            buildEntryAad(expectedDate, yr, 'title')
-          )) || '';
-        lines.push(`### ${yr}${title ? ` — ${title}` : ''}`, '', body, '');
+    const shaEl = document.getElementById('history-selected-sha');
+    const metaEl = document.getElementById('history-selected-meta');
+    const entryMetaEl = document.getElementById('history-entry-meta');
+    const diffEl = document.getElementById('history-diff-viewer');
+    const snapEl = document.getElementById('history-snapshot-viewer');
+    const restoreBtn = document.getElementById('history-restore-btn');
+
+    shaEl.textContent = `COMMIT #${rev.shortSha}`;
+    metaEl.textContent = ` · ${new Date(rev.date).toLocaleString()}`;
+    diffEl.innerHTML = '<div class="diff-line diff-eq"><span class="diff-sign"> </span><span>Fetching &amp; decrypting snapshot…</span></div>';
+    snapEl.innerHTML = '';
+    restoreBtn.disabled = true;
+
+    try {
+      const snap = await fetchEntryAtRevision(this.gh, h.dayStr, h.yearKey, rev, {
+        keyring: this.state.keyring || this.state.cryptoKey,
+        cloakAdapter: this.buildCloakTxAdapter(),
+      });
+
+      if (!snap.found || !snap.entry) {
+        entryMetaEl.hidden = true;
+        diffEl.innerHTML = `<div class="diff-line diff-del"><span class="diff-sign">−</span><span>The ${escapeHtml(h.yearKey)} entry did not exist in commit #${escapeHtml(rev.shortSha)}.</span></div>`;
+        snapEl.innerHTML = '<p class="section-subtext">Entry not present in this revision.</p>';
+        return;
       }
-      if (Array.isArray(doc.comments) && doc.comments.length) {
-        lines.push('#### Margin Notes', '');
-        for (const c of doc.comments) {
-          const cBody =
-            (await this.decryptFieldIfNeeded(
-              c.body,
-              Boolean(c.encrypted),
-              buildCommentAad(k, c.id, 'body')
-            )) || '[Encrypted / Tampered]';
-          lines.push(`- **${c.author || 'Self'}**: ${cBody}`);
-        }
-        lines.push('');
+
+      h.selectedSnapshot = snap.entry;
+      const revWords = countWords(stripMarkdown(snap.entry.body || ''));
+      entryMetaEl.hidden = false;
+      entryMetaEl.textContent = `${snap.entry.title ? `Heading: "${snap.entry.title}" · ` : ''}${
+        snap.entry.mood ? `Mood: ${snap.entry.mood} · ` : ''
+      }${revWords} words${snap.decryptionError ? ` · ⚠ ${snap.decryptionError}` : ''}`;
+
+      diffEl.innerHTML = renderDiffHtml(
+        h.currentPlainEntry?.body || '',
+        snap.entry.body || ''
+      );
+      snapEl.innerHTML = `${
+        snap.entry.title ? `<h3>${escapeHtml(snap.entry.title)}</h3>` : ''
+      }${renderMarkdown(snap.entry.body || '')}`;
+
+      this.syncHistoryViewMode();
+      restoreBtn.disabled = Boolean(snap.locked || snap.decryptionError);
+    } catch (err) {
+      diffEl.innerHTML = `<div class="diff-line diff-del"><span class="diff-sign">!</span><span>${escapeHtml(err.message || 'Failed to load snapshot.')}</span></div>`;
+    }
+  }
+
+  syncHistoryViewMode() {
+    const isDiff = this.state.historyViewMode !== 'snapshot';
+    document.getElementById('history-diff-viewer').hidden = !isDiff;
+    document.getElementById('history-snapshot-viewer').hidden = isDiff;
+    document.querySelectorAll('#history-view-toggle .seg-btn').forEach((btn) => {
+      btn.classList.toggle('is-active', btn.dataset.historyMode === (isDiff ? 'diff' : 'snapshot'));
+    });
+  }
+
+  async refreshCloudDraftBadge() {
+    const countEl = document.getElementById('cloud-drafts-count');
+    if (!countEl) return;
+    try {
+      const list = await listCloudDrafts(this.gh, { zeroFootprint: this.state.zeroFootprint });
+      countEl.textContent = String(list.length);
+      countEl.hidden = list.length === 0;
+    } catch {
+      countEl.hidden = true;
+    }
+  }
+
+  async openDraftsModal() {
+    const modal = document.getElementById('drafts-modal');
+    const pill = document.getElementById('drafts-branch-pill');
+    const errEl = document.getElementById('drafts-error');
+    const listEl = document.getElementById('drafts-list');
+
+    errEl.hidden = true;
+    pill.textContent = this.gh.hasToken()
+      ? `BRANCH: drafts (${this.gh.getDataTarget().repo})`
+      : 'SANDBOX DRAFTS (LOCAL)';
+    listEl.innerHTML = '<div class="empty-comments mono-meta">Loading synced drafts…</div>';
+    modal.hidden = false;
+
+    try {
+      const drafts = await listCloudDrafts(this.gh, { zeroFootprint: this.state.zeroFootprint });
+      const countEl = document.getElementById('cloud-drafts-count');
+      if (countEl) {
+        countEl.textContent = String(drafts.length);
+        countEl.hidden = drafts.length === 0;
       }
+
+      if (drafts.length === 0) {
+        listEl.innerHTML =
+          '<div class="empty-comments mono-meta">No works-in-progress on the <code>drafts</code> branch yet. Open <strong>+ Write Entry</strong> and click <strong>Save to Drafts Branch</strong> to sync an unfinished reflection across devices.</div>';
+        return;
+      }
+
+      listEl.innerHTML = drafts
+        .map(
+          (d) => `
+          <div class="draft-row-card">
+            <div>
+              <strong>${escapeHtml(d.diaryDate)}</strong>
+              <span class="mono-meta"> · ${escapeHtml(d.filename)} · ${formatBytesCompact(d.size)}</span>
+            </div>
+            <div class="draft-row-actions">
+              <button type="button" class="btn btn-primary btn-sm draft-resume-btn" data-draft-date="${escapeHtml(d.diaryDate)}">
+                Resume
+              </button>
+              <button type="button" class="btn btn-danger btn-sm draft-delete-btn" data-draft-date="${escapeHtml(d.diaryDate)}">
+                Delete
+              </button>
+            </div>
+          </div>
+        `
+        )
+        .join('');
+
+      listEl.querySelectorAll('.draft-resume-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          try {
+            const draft = await loadCloudDraft(this.gh, btn.dataset.draftDate, {
+              keyring: this.state.keyring || this.state.cryptoKey,
+              zeroFootprint: this.state.zeroFootprint,
+            });
+            modal.hidden = true;
+            this.openComposer({ fromCloudDraft: draft });
+            this.showToast(`Loaded draft for ${draft.diaryDate} from drafts branch.`, 'success');
+          } catch (err) {
+            errEl.textContent = err.message || 'Could not load draft.';
+            errEl.hidden = false;
+            btn.disabled = false;
+          }
+        });
+      });
+
+      listEl.querySelectorAll('.draft-delete-btn').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const targetDate = btn.dataset.draftDate;
+          const ok = await this.openConfirm({
+            title: 'Delete Synced Draft',
+            message: `Delete the unfinished draft for ${targetDate} from the drafts branch?`,
+            confirmLabel: 'Delete Draft',
+          });
+          if (!ok) return;
+          btn.disabled = true;
+          try {
+            await deleteCloudDraft(this.gh, targetDate, {
+              zeroFootprint: this.state.zeroFootprint,
+            });
+            this.showToast(`Deleted draft for ${targetDate}.`, 'info');
+            await this.openDraftsModal();
+          } catch (err) {
+            errEl.textContent = err.message || 'Failed to delete draft.';
+            errEl.hidden = false;
+            btn.disabled = false;
+          }
+        });
+      });
+    } catch (err) {
+      errEl.textContent = err.message || 'Could not list drafts branch.';
+      errEl.hidden = false;
+      listEl.innerHTML = '';
+    }
+  }
+
+  async handleSaveCloudDraft() {
+    const diaryDate = document.getElementById('entry-date-input').value;
+    const title = document.getElementById('entry-title-input').value.trim();
+    const mood = document.getElementById('entry-mood-input').value.trim();
+    const tags = document
+      .getElementById('entry-tags-input')
+      .value.split(',')
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const body = document.getElementById('entry-body-input').value;
+    const encryptOnPublish = Boolean(document.getElementById('entry-encrypt-checkbox')?.checked);
+
+    if (!body.trim() && !title) {
+      this.showToast('Write a title or some prose before saving a draft.', 'warn');
+      return;
     }
 
-    this.downloadFile('perpetual-diary-book.md', lines.join('\n'), 'text/markdown');
-  }
+    const btn = document.getElementById('entry-save-cloud-draft-btn');
+    if (btn) btn.disabled = true;
 
-  downloadFile(filename, text, mime) {
-    const blob = new Blob([text], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    try {
+      const res = await saveCloudDraft(
+        this.gh,
+        { diaryDate, title, mood, tags, body, encryptOnPublish },
+        {
+          keyring: this.state.keyring || this.state.cryptoKey,
+          encrypt: this.hasActiveSessionKey(),
+          zeroFootprint: this.state.zeroFootprint,
+        }
+      );
+      this.state.activeCloudDraftDate = diaryDate;
+      this.storageRemove(`perpetual_draft_${diaryDate}`);
+      const statusEl = document.getElementById('entry-draft-status');
+      if (statusEl) {
+        statusEl.textContent = `Synced to "${res.branch}" branch${res.encrypted ? ' (AES-GCM AAD)' : ''}`;
+      }
+      this.showToast(
+        `Draft saved to "${res.branch}" branch (${diaryDate})${res.encrypted ? ' · Encrypted' : ''}.`,
+        'success'
+      );
+      await this.refreshCloudDraftBadge();
+    } catch (err) {
+      this.showToast(err.message || 'Failed to sync draft to drafts branch.', 'error');
+    } finally {
+      if (btn) btn.disabled = false;
+    }
   }
 
   /* ========================================================================
@@ -4244,41 +4361,56 @@ class PerpetualDiaryApp {
       }
     });
 
-    document.getElementById('lock-passkey-btn')?.addEventListener('click', async () => {
-      const errEl = document.getElementById('lock-error');
-      const zfChecked = Boolean(document.getElementById('lock-zero-footprint-checkbox')?.checked);
-      errEl.hidden = true;
-      try {
-        this.setZeroFootprintMode(zfChecked, false);
-        const res = await unlockVaultWithPasskey(this.state.vaultMeta);
-        if (!res.ok) {
-          errEl.textContent = res.error || 'Passkey unlock failed.';
-          errEl.hidden = false;
-          return;
-        }
-        this.state.isDecoySession = false;
-        this.state.decoyPolicy = null;
-        this.setActiveKeyring(res.keyring);
+    // Phase 11: Git Revision Time Machine & Cross-Device `drafts` Branch Events
+    document.getElementById('open-drafts-btn')?.addEventListener('click', () => {
+      this.openDraftsModal();
+    });
+    document.getElementById('drafts-close-btn')?.addEventListener('click', () => {
+      document.getElementById('drafts-modal').hidden = true;
+    });
+    document.getElementById('drafts-done-btn')?.addEventListener('click', () => {
+      document.getElementById('drafts-modal').hidden = true;
+    });
+    document.getElementById('drafts-refresh-btn')?.addEventListener('click', () => {
+      this.openDraftsModal();
+    });
+    document.getElementById('drafts-new-btn')?.addEventListener('click', () => {
+      document.getElementById('drafts-modal').hidden = true;
+      this.openComposer();
+    });
+    document.getElementById('entry-save-cloud-draft-btn')?.addEventListener('click', () => {
+      this.handleSaveCloudDraft();
+    });
 
-        if (res.pat && !this.gh.hasToken()) {
-          this.gh.updateConfig({ token: res.pat });
-          if (!this.state.zeroFootprint) {
-            GitHubClient.saveConfig(this.gh.config, window.localStorage);
-          }
-        }
-
-        this.state.unlocked = true;
-        const reasonBadge = document.getElementById('lock-reason-badge');
-        if (reasonBadge) reasonBadge.hidden = true;
-        document.getElementById('lock-screen').hidden = true;
-        this.updateModeBadge();
-        await this.loadManifestIndex();
-        await this.renderActiveView();
-        this.showToast('Unlocked with Biometric Passkey (WebAuthn PRF).', 'success');
-      } catch (err) {
-        errEl.textContent = err.message || 'Passkey unlock failed.';
-        errEl.hidden = false;
-      }
+    document.getElementById('history-close-btn')?.addEventListener('click', () => {
+      document.getElementById('history-modal').hidden = true;
+    });
+    document.getElementById('history-cancel-btn')?.addEventListener('click', () => {
+      document.getElementById('history-modal').hidden = true;
+    });
+    document.querySelectorAll('#history-view-toggle .seg-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.state.historyViewMode = btn.dataset.historyMode;
+        this.syncHistoryViewMode();
+      });
+    });
+    document.getElementById('history-restore-btn')?.addEventListener('click', () => {
+      const h = this.state.activeHistory;
+      if (!h || !h.selectedSnapshot) return;
+      document.getElementById('history-modal').hidden = true;
+      this.openComposer({
+        editEntry: {
+          ...h.selectedSnapshot,
+          year: Number(h.yearKey),
+          diaryDate: h.selectedSnapshot.diaryDate || `${h.yearKey}-${h.dayStr}`,
+        },
+        dayStr: h.dayStr,
+        yearKey: h.yearKey,
+      });
+      this.showToast(
+        `Loaded commit #${h.selectedRevision?.shortSha || ''} into Composer — review & click Save Atomically to restore.`,
+        'info'
+      );
     });
 
     document.getElementById('vault-form')?.addEventListener('submit', async (e) => {
@@ -4511,6 +4643,8 @@ class PerpetualDiaryApp {
         document.getElementById('vault-modal').hidden = true;
         document.getElementById('conflict-modal').hidden = true;
         document.getElementById('share-modal').hidden = true;
+        document.getElementById('history-modal').hidden = true;
+        document.getElementById('drafts-modal').hidden = true;
         this.closeConfirm(false);
       }
     });
