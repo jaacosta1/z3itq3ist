@@ -1,15 +1,28 @@
 /**
- * js/github.js — GitHub Contents & Git Trees API Client (Phase 5)
- * Features:
- * - Split-Repo Architecture (Public App Repo + Private Data Vault)
- * - Atomic Multi-File Commits via Git Data API (blobs -> tree -> commit -> ref)
- * - Optimistic Concurrency & SyncConflictError detection for 3-Way Conflict Resolution
- * - Repo Health, 1 GB Pages Quota & PAT Expiry Telemetry
- * - UTF-8 / Emoji-safe Base64 encoding and cache-busted static fallback reads
+ * js/github.js — Perpetual Side-by-Side Web Diary GitHub API Client (File 4 of 11 · Final Build)
+ *
+ * Capabilities:
+ * - Split-Repo Architecture (Public Pages/Neocities App Repo + Private Data Vault Repo)
+ * - Atomic Multi-File Commits via GitHub Git Data API (blobs -> tree -> commit -> ref)
+ * - Optimistic Concurrency & SyncConflictError for the Interactive 3-Way Conflict Resolver
+ * - Yearly / Era Media-Repo Sharding (`getMediaTarget`, `testMediaShard`, `uploadMediaToShard`)
+ * - Metadata Cloaking (`index.enc`, HMAC day shards, generic `sync: update` commit masking)
+ * - Repo Health, 1 GB Pages Storage Quota, Pages Build Status & PAT Expiry Radar
+ * - Offline Commit Queue detection & transaction serialization/replay hooks (Phase 20 PWA)
+ * - UTF-8 / Emoji-safe Base64 utilities & cache-busted static read fallbacks
  */
 
 import { resolveShardRepoName } from './media-sharding.js';
 
+/* ============================================================================
+   UTF-8 & BINARY BASE64 UTILITIES
+   ============================================================================ */
+
+/**
+ * Encodes a UTF-8 string (including emojis and non-Latin scripts) to Base64 safely.
+ * @param {string} str
+ * @returns {string}
+ */
 export function encodeBase64Utf8(str) {
   const bytes = new TextEncoder().encode(String(str ?? ''));
   let binary = '';
@@ -20,6 +33,11 @@ export function encodeBase64Utf8(str) {
   return btoa(binary);
 }
 
+/**
+ * Decodes a Base64 string back into a UTF-8 string cleanly.
+ * @param {string} base64
+ * @returns {string}
+ */
 export function decodeBase64Utf8(base64) {
   const clean = String(base64 ?? '').replace(/\s+/g, '');
   if (!clean) return '';
@@ -31,6 +49,11 @@ export function decodeBase64Utf8(base64) {
   return new TextDecoder().decode(bytes);
 }
 
+/**
+ * Encodes an ArrayBuffer or Uint8Array to Base64 without stack overflow on large files.
+ * @param {ArrayBuffer | Uint8Array} buffer
+ * @returns {string}
+ */
 export function arrayBufferToBase64(buffer) {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   let binary = '';
@@ -42,7 +65,27 @@ export function arrayBufferToBase64(buffer) {
 }
 
 /**
- * Thrown when another device committed changes to the same entry slot
+ * Decodes a Base64 string into a Uint8Array (used for Offline Commit Queue media replay).
+ * @param {string} base64
+ * @returns {Uint8Array}
+ */
+export function base64ToUint8Array(base64) {
+  const clean = String(base64 ?? '').replace(/\s+/g, '');
+  if (!clean) return new Uint8Array(0);
+  const binary = atob(clean);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/* ============================================================================
+   CUSTOM ERRORS & OFFLINE DETECTION
+   ============================================================================ */
+
+/**
+ * Thrown when another device committed changes to the same (MM-DD, YYYY) entry
  * since the local composer opened it.
  */
 export class SyncConflictError extends Error {
@@ -61,8 +104,57 @@ export class SyncConflictError extends Error {
   }
 }
 
+/**
+ * Detects whether an error indicates an offline device or unreachable network
+ * so mutations can be safely deferred into the Offline Commit Queue.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isNetworkOfflineError(err) {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return true;
+  }
+  if (!err) return false;
+  if (err.isNetworkError || err.code === 'NETWORK_OFFLINE') return true;
+  if (err.name === 'TypeError' && !err.status) return true;
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    msg.includes('failed to fetch') ||
+    msg.includes('networkerror') ||
+    msg.includes('load failed') ||
+    msg.includes('network request failed')
+  );
+}
+
+/* ============================================================================
+   DAY & INDEX MANIFEST HELPERS
+   ============================================================================ */
+
+/**
+ * Returns a clean empty calendar day document skeleton.
+ * @param {string} dayStr - Calendar day in "MM-DD" format.
+ */
+export function emptyDayData(dayStr) {
+  return {
+    day: String(dayStr || '').trim(),
+    entries: {},
+    comments: [],
+  };
+}
+
+/**
+ * Recomputes the lightweight manifest summary entry for a single calendar day (`MM-DD`).
+ * Preserves full backward compatibility while enriching index metadata with moods,
+ * custom check-in metrics, story arcs, and time-capsule seal dates for fast analytics.
+ *
+ * @param {Object | null} existingIndex
+ * @param {string} dayStr
+ * @param {Object} dayDoc
+ * @returns {Object}
+ */
 export function recalculateIndexForDay(existingIndex, dayStr, dayDoc) {
   const idx = {
+    version: Number(existingIndex?.version) || 1,
     updatedAt: new Date().toISOString(),
     days: { ...(existingIndex?.days || {}) },
   };
@@ -76,41 +168,76 @@ export function recalculateIndexForDay(existingIndex, dayStr, dayDoc) {
     .sort((a, b) => a - b);
 
   const tagSet = new Set();
+  const arcSet = new Set();
   const wordCounts = {};
+  const moods = {};
+  const metrics = {};
+  const sealed = {};
 
   for (const yr of years) {
-    const entry = entries[String(yr)];
+    const yrKey = String(yr);
+    const entry = entries[yrKey];
     if (!entry) continue;
+
     if (Array.isArray(entry.tags)) {
       for (const t of entry.tags) {
         const cleaned = String(t || '').trim();
-        if (cleaned) tagSet.add(cleaned);
+        if (!cleaned) continue;
+        tagSet.add(cleaned);
+        if (cleaned.toLowerCase().startsWith('arc:')) {
+          arcSet.add(cleaned.slice(4).trim());
+        }
       }
     }
-    const plain = entry.encrypted
-      ? ''
-      : String(entry.body || '')
-          .replace(/[#*_`>~-]+/g, ' ')
-          .trim();
-    const words = plain ? plain.split(/\s+/).filter(Boolean).length : 0;
-    wordCounts[String(yr)] = words;
+
+    if (typeof entry.wordCount === 'number' && Number.isFinite(entry.wordCount)) {
+      wordCounts[yrKey] = Math.max(0, Math.round(entry.wordCount));
+    } else {
+      const plain = entry.encrypted
+        ? ''
+        : String(entry.body || '')
+            .replace(/[#*_`>~-]+/g, ' ')
+            .trim();
+      wordCounts[yrKey] = plain ? plain.split(/\s+/).filter(Boolean).length : 0;
+    }
+
+    if (entry.mood && typeof entry.mood === 'string' && entry.mood.trim()) {
+      moods[yrKey] = entry.mood.trim();
+    }
+
+    if (entry.metrics && typeof entry.metrics === 'object' && Object.keys(entry.metrics).length > 0) {
+      metrics[yrKey] = { ...entry.metrics };
+    }
+
+    if (entry.sealedUntil && typeof entry.sealedUntil === 'string') {
+      sealed[yrKey] = entry.sealedUntil;
+    }
   }
 
   if (years.length === 0 && comments.length === 0) {
     delete idx.days[dayStr];
   } else {
-    idx.days[dayStr] = {
+    const summary = {
       years,
       tags: Array.from(tagSet),
       wordCounts,
       commentCount: comments.length,
     };
+    if (arcSet.size > 0) summary.arcs = Array.from(arcSet);
+    if (Object.keys(moods).length > 0) summary.moods = moods;
+    if (Object.keys(metrics).length > 0) summary.metrics = metrics;
+    if (Object.keys(sealed).length > 0) summary.sealed = sealed;
+    idx.days[dayStr] = summary;
   }
 
   return idx;
 }
 
-const DEFAULT_CONFIG = Object.freeze({
+/* ============================================================================
+   DEFAULT CONFIGURATION & GITHUB CLIENT
+   ============================================================================ */
+
+export const DEFAULT_CONFIG = Object.freeze({
   owner: '',
   repo: '',
   branch: 'main',
@@ -153,7 +280,11 @@ export class GitHubClient {
   static saveConfig(cfg, storageTarget = null) {
     const merged = { ...DEFAULT_CONFIG, ...(cfg || {}) };
     if (storageTarget) {
-      storageTarget.setItem(STORAGE_KEY, JSON.stringify(merged));
+      try {
+        storageTarget.setItem(STORAGE_KEY, JSON.stringify(merged));
+      } catch {
+        // ignore storage quota errors
+      }
     }
     return merged;
   }
@@ -175,8 +306,10 @@ export class GitHubClient {
   }
 
   isConfigured() {
+    const target = this.getDataTarget();
     return Boolean(
-      String(this.config.owner || '').trim() && String(this.config.repo || '').trim()
+      (String(this.config.owner || '').trim() && String(this.config.repo || '').trim()) ||
+        (target.owner && target.repo)
     );
   }
 
@@ -184,6 +317,14 @@ export class GitHubClient {
     return Boolean(String(this.config.token || '').trim());
   }
 
+  canWrite() {
+    return this.isConfigured() && this.hasToken();
+  }
+
+  /**
+   * Resolves the active repository target for diary data (`data/vault.json`, `index`, `days/shards`).
+   * Routes to the Private Vault repo when Split-Repo Mode is enabled.
+   */
   getDataTarget() {
     const useVault = Boolean(this.config.usePrivateVault);
     const owner = useVault
@@ -280,7 +421,7 @@ export class GitHubClient {
   }
 
   /**
-   * Uploads a binary photo (WebP or encrypted .enc) to the yearly/era media shard repo.
+   * Uploads a binary photo/audio asset (WebP, audio, or encrypted .enc) to its yearly/era shard repo.
    */
   async uploadMediaToShard(year, mediaSubpath, arrayBufferOrBytes, commitMessage) {
     if (!this.hasToken()) {
@@ -363,6 +504,10 @@ export class GitHubClient {
     return { deleted: true };
   }
 
+  /* ==========================================================================
+     CORE REST TRANSPORT
+     ========================================================================== */
+
   async _apiRequest(url, options = {}) {
     const headers = {
       Accept: 'application/vnd.github+json',
@@ -376,11 +521,23 @@ export class GitHubClient {
       headers.Authorization = `Bearer ${String(this.config.token).trim()}`;
     }
 
-    const res = await fetch(url, {
-      ...options,
-      headers,
-      cache: 'no-store',
-    });
+    let res;
+    try {
+      res = await fetch(url, {
+        ...options,
+        headers,
+        cache: 'no-store',
+      });
+    } catch (networkErr) {
+      const offlineErr = new Error(
+        typeof navigator !== 'undefined' && navigator.onLine === false
+          ? 'Device is offline. Changes can be queued and synced automatically when online.'
+          : `Network error contacting GitHub API: ${networkErr?.message || 'unreachable'}`
+      );
+      offlineErr.isNetworkError = true;
+      offlineErr.code = 'NETWORK_OFFLINE';
+      throw offlineErr;
+    }
 
     if (!res.ok) {
       let detail = res.statusText;
@@ -404,14 +561,20 @@ export class GitHubClient {
     return res.json();
   }
 
+  /* ==========================================================================
+     REPO HEALTH, PAGES STATUS & CONNECTION TEST
+     ========================================================================== */
+
   async getRepoHealth() {
     const target = this.getDataTarget();
     const appOwner = String(this.config.owner || '').trim();
     const appRepo = String(this.config.repo || '').trim();
+    const isOnline = typeof navigator === 'undefined' ? true : navigator.onLine !== false;
 
     if (!this.hasToken() && !appOwner) {
       return {
         mode: 'sandbox',
+        online: isOnline,
         vaultRepoName: target.repo || 'perpetual-diary-vault',
         vaultPrivate: true,
         vaultSizeKb: 0,
@@ -419,6 +582,7 @@ export class GitHubClient {
         totalSizeKb: 0,
         pagesLimitKb: 1024 * 1024,
         usagePercent: 0,
+        pagesStatus: '',
         lastCommitSha: this.lastCommitSha || '',
         tokenExpiry: this.config.tokenExpiresAt || '',
       };
@@ -426,6 +590,7 @@ export class GitHubClient {
 
     let vaultMeta = null;
     let appMeta = null;
+    let pagesStatus = '';
 
     if (target.owner && target.repo) {
       try {
@@ -435,9 +600,10 @@ export class GitHubClient {
           )}`
         );
       } catch (err) {
-        if (!this.hasToken()) {
+        if (!this.hasToken() || isNetworkOfflineError(err)) {
           return {
-            mode: 'static',
+            mode: isNetworkOfflineError(err) ? 'offline' : 'static',
+            online: isOnline,
             vaultRepoName: `${target.owner}/${target.repo}`,
             vaultPrivate: Boolean(this.config.usePrivateVault),
             vaultSizeKb: 0,
@@ -445,6 +611,7 @@ export class GitHubClient {
             totalSizeKb: 0,
             pagesLimitKb: 1024 * 1024,
             usagePercent: 0,
+            pagesStatus: '',
             lastCommitSha: this.lastCommitSha || '',
             error: err.message,
             tokenExpiry: this.config.tokenExpiresAt || '',
@@ -466,6 +633,20 @@ export class GitHubClient {
       }
     }
 
+    // Best-effort GitHub Pages build status check for the App Repo
+    if (appOwner && appRepo && this.hasToken()) {
+      try {
+        const pagesInfo = await this._apiRequest(
+          `https://api.github.com/repos/${encodeURIComponent(appOwner)}/${encodeURIComponent(
+            appRepo
+          )}/pages`
+        );
+        pagesStatus = pagesInfo?.status || (pagesInfo?.html_url ? 'built' : '');
+      } catch {
+        pagesStatus = '';
+      }
+    }
+
     let headSha = this.lastCommitSha || '';
     if (!headSha && this.hasToken() && target.owner && target.repo) {
       try {
@@ -483,11 +664,12 @@ export class GitHubClient {
     const vaultSizeKb = Number(vaultMeta?.size || 0);
     const appSizeKb = Number(appMeta?.size || 0);
     const combinedKb = target.isSplitVault ? vaultSizeKb : vaultSizeKb || appSizeKb;
-    const pagesLimitKb = 1024 * 1024;
+    const pagesLimitKb = 1024 * 1024; // 1 GB reference ceiling
     const usagePercent = Math.min(100, Number(((combinedKb / pagesLimitKb) * 100).toFixed(2)));
 
     return {
       mode: this.hasToken() ? 'live-api' : 'public-api',
+      online: isOnline,
       vaultRepoName: vaultMeta?.full_name || `${target.owner}/${target.repo}`,
       vaultPrivate: Boolean(vaultMeta?.private ?? this.config.usePrivateVault),
       defaultBranch: vaultMeta?.default_branch || target.branch,
@@ -496,6 +678,7 @@ export class GitHubClient {
       totalSizeKb: combinedKb,
       pagesLimitKb,
       usagePercent,
+      pagesStatus,
       lastCommitSha: headSha,
       tokenExpiry: this.config.tokenExpiresAt || '',
     };
@@ -520,6 +703,10 @@ export class GitHubClient {
       defaultBranch: repoData.default_branch || target.branch,
     };
   }
+
+  /* ==========================================================================
+     FILE READ / WRITE / DELETE (CONTENTS API + STATIC FALLBACK)
+     ========================================================================== */
 
   async getFileMeta(relativeSubpath, explicitTarget = null) {
     const target = explicitTarget || this.getDataTarget();
@@ -625,7 +812,10 @@ export class GitHubClient {
       }
 
       const payload = {
-        message: this.resolveCommitMessage(commitMessage || `diary: update ${repoPath}`),
+        message: this.resolveCommitMessage(
+          commitMessage || `diary: update ${repoPath}`,
+          Boolean(options.genericCommit)
+        ),
         content: base64Content,
         branch: target.branch,
       };
@@ -661,9 +851,10 @@ export class GitHubClient {
     });
   }
 
-  async uploadBinaryMedia(relativeMediaSubpath, arrayBufferOrBytes, commitMessage) {
+  async uploadBinaryMedia(relativeMediaSubpath, arrayBufferOrBytes, commitMessage, options = {}) {
     const base64 = arrayBufferToBase64(arrayBufferOrBytes);
     return this.putFile(relativeMediaSubpath, base64, commitMessage, {
+      ...options,
       isBase64: true,
     });
   }
@@ -698,7 +889,10 @@ export class GitHubClient {
     const out = await this._apiRequest(endpoint, {
       method: 'DELETE',
       body: JSON.stringify({
-        message: this.resolveCommitMessage(commitMessage || `diary: delete ${repoPath}`),
+        message: this.resolveCommitMessage(
+          commitMessage || `diary: delete ${repoPath}`,
+          Boolean(options.genericCommit)
+        ),
         sha,
         branch: target.branch,
       }),
@@ -708,10 +902,13 @@ export class GitHubClient {
     return { deleted: true, path: repoPath };
   }
 
+  /* ==========================================================================
+     ATOMIC MULTI-FILE COMMIT ENGINE (GIT DATA / TREES API)
+     ========================================================================== */
+
   /**
-   * Atomic Multi-File Commit via the GitHub Git Data API (Git Trees API).
-   * Bundles any combination of text files, binary media uploads, and deletions
-   * into ONE single Git commit and ONE single Pages rebuild.
+   * Bundles any combination of text files, binary media uploads, and file deletions
+   * into ONE single Git commit and ONE single Pages/Neocities rebuild.
    *
    * @param {Array<{
    *   subpath: string,
@@ -721,7 +918,7 @@ export class GitHubClient {
    *   delete?: boolean
    * }>} changes
    * @param {string} commitMessage
-   * @param {{ target?: Object }} [options]
+   * @param {{ target?: Object, genericCommit?: boolean }} [options]
    * @returns {Promise<{ commitSha: string, treeSha: string, fileShas: Record<string, string> }>}
    */
   async commitBatch(changes, commitMessage, options = {}) {
@@ -741,7 +938,12 @@ export class GitHubClient {
       target.owner
     )}/${encodeURIComponent(target.repo)}`;
 
-    // Step 1: Fetch branch HEAD ref (handle brand-new empty repo gracefully via sequential bootstrap)
+    const finalMessage = this.resolveCommitMessage(
+      commitMessage || 'diary: atomic sync',
+      Boolean(options.genericCommit)
+    );
+
+    // Step 1: Fetch branch HEAD ref (handle brand-new empty repo via bootstrap fallback)
     let headCommitSha = null;
     try {
       const refData = await this._apiRequest(
@@ -751,10 +953,10 @@ export class GitHubClient {
     } catch (err) {
       if (err.status === 404 || err.status === 409) {
         headCommitSha = null;
-    const finalMessage = this.resolveCommitMessage(
-      commitMessage || 'diary: atomic sync',
-      Boolean(options.genericCommit)
-    );
+      } else {
+        throw err;
+      }
+    }
 
     // Empty repository bootstrap fallback (Git Data API requires at least one initial commit)
     if (!headCommitSha) {
@@ -767,6 +969,7 @@ export class GitHubClient {
         const putRes = await this.putFile(ch.subpath, payload, finalMessage, {
           target,
           isBase64: isB64,
+          genericCommit: Boolean(options.genericCommit),
         });
         if (putRes?.content?.sha) fileShas[ch.subpath] = putRes.content.sha;
         if (putRes?.commit?.sha) lastSha = putRes.commit.sha;
@@ -846,7 +1049,7 @@ export class GitHubClient {
       }),
     });
 
-    // Step 6: Fast-forward branch ref (force: false guarantees we never silently clobber concurrent commits)
+    // Step 6: Fast-forward branch ref (`force: false` prevents silently overwriting concurrent commits)
     await this._apiRequest(
       `${repoApiBase}/git/refs/heads/${encodeURIComponent(target.branch)}`,
       {
@@ -868,27 +1071,12 @@ export class GitHubClient {
 
   /**
    * High-level conflict-safe atomic transaction for day entries, date moves,
-   * comments, media uploads/deletions, and index.json updates in ONE Git commit.
+   * comments, media uploads/deletions, and index manifest updates in ONE Git commit.
    *
    * - Detects concurrent edits to the same (MM-DD, YYYY) entry and throws SyncConflictError
    *   so the UI can launch the Interactive 3-Way Conflict Resolver.
    * - Automatically merges non-overlapping edits (different years or comments on the same day)
-   *   and retries once if the branch HEAD moved mid-flight (HTTP 422).
-   *
-   * @param {{
-   *   dayMutations: Array<{
-   *     dayStr: string,
-   *     mode: 'entry-save' | 'entry-delete' | 'comment',
-   *     yearKey?: string,
-   *     entryRecord?: Object,
-   *     expectedSha?: string | null,
-   *     expectedUpdatedAt?: string | null,
-   *     commentMutation?: { op: 'add' | 'edit' | 'delete', comment?: Object, id?: string }
-   *   }>,
-   *   mediaUploads?: Array<{ subpath: string, buffer: ArrayBuffer | Uint8Array }>,
-   *   mediaDeletes?: string[],
-   *   commitMessage: string
-   * }} tx
+   *   and retries once if the branch HEAD moved mid-flight (HTTP 422/409).
    */
   async commitAtomicDayMutations(tx, _attempt = 1) {
     const dayMutations = Array.isArray(tx.dayMutations) ? tx.dayMutations : [];
@@ -896,20 +1084,16 @@ export class GitHubClient {
     const mediaDeletes = Array.isArray(tx.mediaDeletes) ? tx.mediaDeletes : [];
     const cloak = tx.cloak && tx.cloak.enabled ? tx.cloak : null;
 
-    // Collect unique calendar days touched by this transaction
     const uniqueDays = Array.from(new Set(dayMutations.map((m) => m.dayStr).filter(Boolean)));
 
-    // Fetch fresh remote state + SHA for each touched day and for index manifest
+    // Fetch fresh remote state + SHA for each touched calendar day
     const remoteDayMap = {};
     for (const dayStr of uniqueDays) {
-      const targetSubpath = cloak
-        ? await cloak.getDaySubpath(dayStr)
-        : `days/${dayStr}.json`;
+      const targetSubpath = cloak ? await cloak.getDaySubpath(dayStr) : `days/${dayStr}.json`;
 
       let meta = await this.getFileMeta(targetSubpath);
       let loadedLegacyFallback = false;
 
-      // Backward-compatible read fallback if migrating gradually from days/MM-DD.json
       if (!meta.exists && cloak) {
         const legacyMeta = await this.getFileMeta(`days/${dayStr}.json`);
         if (legacyMeta.exists) {
@@ -939,7 +1123,7 @@ export class GitHubClient {
                   : {},
               comments: Array.isArray(parsedDoc.comments) ? [...parsedDoc.comments] : [],
             }
-          : { day: dayStr, entries: {}, comments: [] };
+          : emptyDayData(dayStr);
 
       remoteDayMap[dayStr] = {
         subpath: targetSubpath,
@@ -950,6 +1134,7 @@ export class GitHubClient {
       };
     }
 
+    // Fetch fresh index manifest (index.enc when cloaked, else index.json)
     const indexSubpath = cloak ? cloak.indexSubpath || 'index.enc' : 'index.json';
     let indexMeta = await this.getFileMeta(indexSubpath);
     let loadedLegacyIndex = false;
@@ -977,7 +1162,7 @@ export class GitHubClient {
         ? parsedIdx
         : { version: 1, updatedAt: new Date().toISOString(), days: {} };
 
-    // Apply each mutation with strict entry-level conflict detection
+    // Apply each mutation with strict entry-level optimistic concurrency checking
     for (const mut of dayMutations) {
       const remoteSlot = remoteDayMap[mut.dayStr];
       const doc = remoteSlot.doc;
@@ -986,8 +1171,9 @@ export class GitHubClient {
         const yKey = String(mut.yearKey);
         const existingRemoteEntry = doc.entries[yKey] || null;
 
-        // Detect concurrent modification to the SAME year entry by another device
-        const shaChanged = Boolean(mut.expectedSha && remoteSlot.sha && remoteSlot.sha !== mut.expectedSha);
+        const shaChanged = Boolean(
+          mut.expectedSha && remoteSlot.sha && remoteSlot.sha !== mut.expectedSha
+        );
         const timestampDiverged = Boolean(
           existingRemoteEntry &&
             mut.expectedUpdatedAt &&
@@ -1029,7 +1215,7 @@ export class GitHubClient {
       }
     }
 
-    // Build atomic commit file list
+    // Assemble atomic commit changeset
     const changes = [];
     const outDocs = {};
 
@@ -1050,10 +1236,7 @@ export class GitHubClient {
       });
 
       if (slot.deleteLegacyPath) {
-        changes.push({
-          subpath: slot.deleteLegacyPath,
-          delete: true,
-        });
+        changes.push({ subpath: slot.deleteLegacyPath, delete: true });
       }
     }
 
@@ -1072,18 +1255,23 @@ export class GitHubClient {
     }
 
     for (const upload of mediaUploads) {
-      changes.push({
-        subpath: upload.subpath,
-        content: upload.buffer,
-        isBinary: true,
-      });
+      if (upload.base64) {
+        changes.push({
+          subpath: upload.subpath,
+          content: upload.base64,
+          isBase64: true,
+        });
+      } else {
+        changes.push({
+          subpath: upload.subpath,
+          content: upload.buffer,
+          isBinary: true,
+        });
+      }
     }
 
     for (const delSubpath of mediaDeletes) {
-      changes.push({
-        subpath: delSubpath,
-        delete: true,
-      });
+      changes.push({ subpath: delSubpath, delete: true });
     }
 
     try {
@@ -1103,7 +1291,7 @@ export class GitHubClient {
         index: workingIndex,
       };
     } catch (err) {
-      // Branch HEAD moved during commit (HTTP 422 / 409) -> re-fetch & re-check once
+      // Branch HEAD moved during commit (HTTP 422 / 409) -> re-fetch & retry once cleanly
       if ((err.status === 422 || err.status === 409) && _attempt < 2) {
         return this.commitAtomicDayMutations(tx, _attempt + 1);
       }
@@ -1159,5 +1347,63 @@ export class GitHubClient {
       daySha: res.fileShas[daySubpath] || null,
       index: nextIndex,
     };
+  }
+
+  /* ==========================================================================
+     OFFLINE COMMIT QUEUE SERIALIZATION & REPLAY HOOKS (PHASE 20 PWA)
+     ========================================================================== */
+
+  /**
+   * Converts an atomic day transaction (including any binary media buffers)
+   * into a JSON-serializable object suitable for storing in the Offline Commit Queue.
+   * @param {Object} tx
+   * @returns {Object}
+   */
+  static serializeTransactionForQueue(tx) {
+    const mediaUploads = (Array.isArray(tx.mediaUploads) ? tx.mediaUploads : []).map((u) => ({
+      subpath: u.subpath,
+      base64: u.base64 ? u.base64 : arrayBufferToBase64(u.buffer),
+    }));
+
+    // Drop stale optimistic SHA expectations when queueing offline so replay merges cleanly
+    const dayMutations = (Array.isArray(tx.dayMutations) ? tx.dayMutations : []).map((m) => ({
+      ...m,
+      expectedSha: null,
+      expectedUpdatedAt: null,
+    }));
+
+    return {
+      id: `qtx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      queuedAt: new Date().toISOString(),
+      dayMutations,
+      mediaUploads,
+      mediaDeletes: Array.isArray(tx.mediaDeletes) ? [...tx.mediaDeletes] : [],
+      commitMessage: tx.commitMessage || 'diary: offline queued sync',
+      useCloak: Boolean(tx.cloak && tx.cloak.enabled),
+    };
+  }
+
+  /**
+   * Replays a previously queued offline transaction atomically once connectivity returns.
+   * @param {Object} queuedTx
+   * @param {Object | null} cloakAdapter
+   */
+  async replayQueuedTransaction(queuedTx, cloakAdapter = null) {
+    if (!queuedTx) return null;
+    const mediaUploads = (Array.isArray(queuedTx.mediaUploads) ? queuedTx.mediaUploads : []).map(
+      (u) => ({
+        subpath: u.subpath,
+        base64: u.base64,
+        buffer: u.base64 ? base64ToUint8Array(u.base64) : u.buffer,
+      })
+    );
+
+    return this.commitAtomicDayMutations({
+      dayMutations: queuedTx.dayMutations || [],
+      mediaUploads,
+      mediaDeletes: queuedTx.mediaDeletes || [],
+      commitMessage: queuedTx.commitMessage || 'diary: sync offline queued changes',
+      cloak: queuedTx.useCloak ? cloakAdapter : null,
+    });
   }
 }
