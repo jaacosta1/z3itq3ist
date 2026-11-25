@@ -1,5 +1,5 @@
-// js/crypto.js — Client-Side Envelope Cryptography (DEK/KEK + v3 AES-GCM AAD Tamper Binding)
-// Supports v3 (DEK + AAD), v2 (DEK), and v1 (Legacy direct PBKDF2) decryption seamlessly.
+// js/crypto.js — Client-Side Envelope Cryptography (DEK/KEK + v3 AAD + Paper Recovery Key Slots)
+// Supports v3 (DEK + AAD), v2 (DEK), v1 (Legacy PBKDF2), and 256-bit Paper Recovery Key slots.
 
 export const VAULT_CANARY_PLAINTEXT = 'PERPETUAL_VAULT_OK';
 export const DEFAULT_PBKDF2_ITERATIONS = 250000;
@@ -34,10 +34,45 @@ export function bytesToHex(bytes) {
   return Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+export function hexToBytes(hex) {
+  const clean = String(hex ?? '')
+    .replace(/[^0-9a-fA-F]/g, '')
+    .toLowerCase();
+  if (clean.length % 2 !== 0 || clean.length === 0) {
+    throw new Error('Invalid hexadecimal key format.');
+  }
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
 export function randomBytes(length) {
   const buf = new Uint8Array(length);
   window.crypto.getRandomValues(buf);
   return buf;
+}
+
+export function normalizeRecoveryCode(code) {
+  return String(code ?? '')
+    .replace(/[^0-9a-fA-F]/g, '')
+    .toUpperCase();
+}
+
+export function isRecoveryCodeFormat(input) {
+  return /^[0-9A-F]{64}$/.test(normalizeRecoveryCode(input));
+}
+
+export function formatRecoveryCode(rawHex) {
+  const clean = normalizeRecoveryCode(rawHex);
+  const groups = clean.match(/.{1,4}/g) || [];
+  return groups.join('-');
+}
+
+export function generateRecoveryCode() {
+  const rawHex = bytesToHex(randomBytes(32)).toUpperCase();
+  return formatRecoveryCode(rawHex);
 }
 
 export function isEncryptedPayload(value) {
@@ -103,6 +138,21 @@ export async function deriveKey(
     { name: 'AES-GCM', length: 256 },
     Boolean(extractable),
     ['encrypt', 'decrypt', 'wrapKey', 'unwrapKey']
+  );
+}
+
+export async function importRecoveryKek(recoveryCode) {
+  const cleanHex = normalizeRecoveryCode(recoveryCode);
+  if (!/^[0-9A-F]{64}$/.test(cleanHex)) {
+    throw new Error('Recovery key must contain 64 hexadecimal characters.');
+  }
+  const keyBytes = hexToBytes(cleanHex);
+  return window.crypto.subtle.importKey(
+    'raw',
+    keyBytes,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['wrapKey', 'unwrapKey']
   );
 }
 
@@ -294,6 +344,46 @@ export async function createPasswordSlot(password, dek, options = {}) {
   };
 }
 
+export async function createRecoverySlot(recoveryCode, dek, options = {}) {
+  const kek = await importRecoveryKek(recoveryCode);
+  const { iv, wrappedKey } = await wrapKeyWithKEK(dek, kek);
+  const nowIso = new Date().toISOString();
+
+  return {
+    id: options.id || 'slot-recovery-paper',
+    type: 'recovery',
+    label: options.label || 'Paper Recovery Key',
+    format: 'raw-hex-256',
+    iv,
+    wrappedDek: wrappedKey,
+    createdAt: nowIso,
+    rotatedAt: nowIso,
+  };
+}
+
+export async function attachPaperRecoverySlot(vaultMeta, keyring) {
+  if (!vaultMeta || Number(vaultMeta.version) !== 2 || !keyring?.dek) {
+    throw new Error('Unlock a v2 Envelope Vault first before generating a Paper Recovery Key.');
+  }
+  const recoveryCode = generateRecoveryCode();
+  const recoverySlot = await createRecoverySlot(recoveryCode, keyring.dek);
+  const nonRecoverySlots = (Array.isArray(vaultMeta.keySlots) ? vaultMeta.keySlots : []).filter(
+    (s) => s && s.type !== 'recovery'
+  );
+
+  const nextVault = {
+    ...vaultMeta,
+    keySlots: [...nonRecoverySlots, recoverySlot],
+    updatedAt: new Date().toISOString(),
+  };
+
+  return {
+    recoveryCode,
+    recoverySlot,
+    vaultMeta: nextVault,
+  };
+}
+
 export async function createEnvelopeVault(password, options = {}) {
   const dek = options.existingDek || (await generateDEK());
   const dekFingerprint = await computeKeyFingerprint(dek);
@@ -320,8 +410,9 @@ export async function createEnvelopeVault(password, options = {}) {
     enabled: options.enabled !== undefined ? Boolean(options.enabled) : true,
     architecture: 'envelope-dek-kek',
     aadSupported: true,
-    autoLockMinutes:
-      Number.isFinite(Number(options.autoLockMinutes)) ? Number(options.autoLockMinutes) : 15,
+    autoLockMinutes: Number.isFinite(Number(options.autoLockMinutes))
+      ? Number(options.autoLockMinutes)
+      : 15,
     dekFingerprint,
     canary,
     keySlots: [primarySlot],
@@ -339,68 +430,90 @@ export async function createEnvelopeVault(password, options = {}) {
       legacyKey: options.legacyKey || null,
       dekFingerprint,
       matchedSlotId: primarySlot.id,
+      unlockedVia: 'password',
     },
   };
 }
 
-export async function unlockVault(password, vaultMeta) {
+async function finishEnvelopeUnlock(vaultMeta, dek, slot, unlockedVia) {
+  const check = await decryptText(vaultMeta.canary, dek);
+  if (check !== VAULT_CANARY_PLAINTEXT) return null;
+
+  let legacyKey = null;
+  if (vaultMeta.wrappedLegacyKey?.wrappedKey && vaultMeta.wrappedLegacyKey?.iv) {
+    try {
+      legacyKey = await unwrapKeyWithKEK(
+        vaultMeta.wrappedLegacyKey.wrappedKey,
+        vaultMeta.wrappedLegacyKey.iv,
+        dek,
+        true
+      );
+    } catch {
+      legacyKey = null;
+    }
+  }
+
+  const dekFingerprint = vaultMeta.dekFingerprint || (await computeKeyFingerprint(dek));
+  const keyring = {
+    version: 2,
+    dek,
+    legacyKey,
+    dekFingerprint,
+    matchedSlotId: slot.id,
+    unlockedVia,
+  };
+
+  let pat = null;
+  if (vaultMeta.encryptedPat) {
+    try {
+      pat = await decryptPatToken(vaultMeta.encryptedPat, keyring);
+    } catch {
+      pat = null;
+    }
+  }
+
+  return { ok: true, version: 2, keyring, pat, unlockedVia };
+}
+
+export async function unlockVault(secretInput, vaultMeta) {
   if (!vaultMeta || typeof vaultMeta !== 'object') {
     return { ok: false, error: 'Vault metadata not found.' };
   }
 
-  // v2 Envelope Vault
+  // v2 Envelope Vault (tries Password slots, then Recovery Key slots if 64-hex)
   if (Number(vaultMeta.version) === 2 && Array.isArray(vaultMeta.keySlots)) {
     const pwSlots = vaultMeta.keySlots.filter((s) => s && s.type === 'password');
     for (const slot of pwSlots) {
       try {
         const kek = await deriveKey(
-          password,
+          secretInput,
           slot.salt,
           slot.iterations || DEFAULT_PBKDF2_ITERATIONS,
           false
         );
         const dek = await unwrapKeyWithKEK(slot.wrappedDek, slot.iv, kek, true);
-        const check = await decryptText(vaultMeta.canary, dek);
-        if (check !== VAULT_CANARY_PLAINTEXT) continue;
-
-        let legacyKey = null;
-        if (vaultMeta.wrappedLegacyKey?.wrappedKey && vaultMeta.wrappedLegacyKey?.iv) {
-          try {
-            legacyKey = await unwrapKeyWithKEK(
-              vaultMeta.wrappedLegacyKey.wrappedKey,
-              vaultMeta.wrappedLegacyKey.iv,
-              dek,
-              true
-            );
-          } catch {
-            legacyKey = null;
-          }
-        }
-
-        const dekFingerprint = vaultMeta.dekFingerprint || (await computeKeyFingerprint(dek));
-        const keyring = {
-          version: 2,
-          dek,
-          legacyKey,
-          dekFingerprint,
-          matchedSlotId: slot.id,
-        };
-
-        let pat = null;
-        if (vaultMeta.encryptedPat) {
-          try {
-            pat = await decryptPatToken(vaultMeta.encryptedPat, keyring);
-          } catch {
-            pat = null;
-          }
-        }
-
-        return { ok: true, version: 2, keyring, pat };
+        const done = await finishEnvelopeUnlock(vaultMeta, dek, slot, 'password');
+        if (done) return done;
       } catch {
         // try next slot
       }
     }
-    return { ok: false, error: 'Incorrect password.' };
+
+    if (isRecoveryCodeFormat(secretInput)) {
+      const recSlots = vaultMeta.keySlots.filter((s) => s && s.type === 'recovery');
+      for (const slot of recSlots) {
+        try {
+          const kek = await importRecoveryKek(secretInput);
+          const dek = await unwrapKeyWithKEK(slot.wrappedDek, slot.iv, kek, true);
+          const done = await finishEnvelopeUnlock(vaultMeta, dek, slot, 'recovery');
+          if (done) return done;
+        } catch {
+          // try next slot
+        }
+      }
+    }
+
+    return { ok: false, error: 'Incorrect password or recovery key.' };
   }
 
   // Legacy v1 Vault fallback
@@ -411,12 +524,12 @@ export async function unlockVault(password, vaultMeta) {
 
   try {
     const legacyKey = await deriveKey(
-      password,
+      secretInput,
       vaultMeta.salt,
       vaultMeta.iterations || DEFAULT_PBKDF2_ITERATIONS,
       true
     );
-    const decrypted = await decryptText(canaryCipher, { legacyKey, password });
+    const decrypted = await decryptText(canaryCipher, { legacyKey, password: secretInput });
     if (decrypted !== VAULT_CANARY_PLAINTEXT) {
       return { ok: false, error: 'Incorrect password.' };
     }
@@ -428,6 +541,7 @@ export async function unlockVault(password, vaultMeta) {
       legacyKey,
       dekFingerprint,
       matchedSlotId: 'legacy-v1',
+      unlockedVia: 'password',
     };
 
     let pat = null;
@@ -439,38 +553,24 @@ export async function unlockVault(password, vaultMeta) {
       }
     }
 
-    return { ok: true, version: 1, keyring, pat };
+    return { ok: true, version: 1, keyring, pat, unlockedVia: 'password' };
   } catch {
     return { ok: false, error: 'Incorrect password.' };
   }
 }
 
-export async function rotateVaultPassword(
-  vaultMeta,
-  currentPassword,
-  newPassword,
-  options = {}
-) {
+export async function rotateVaultPasswordWithKeyring(vaultMeta, keyring, newPassword, options = {}) {
   if (!newPassword || String(newPassword).length < 4) {
     throw new Error('New master password must be at least 4 characters.');
   }
-
-  const unlocked = await unlockVault(currentPassword, vaultMeta);
-  if (!unlocked.ok) {
-    throw new Error('Current master password is incorrect.');
+  if (!keyring?.dek) {
+    throw new Error('Active v2 Envelope DEK is required to reset the master password.');
   }
 
-  if (unlocked.version === 1) {
-    return upgradeLegacyVaultToEnvelope(vaultMeta, currentPassword, {
-      ...options,
-      newPassword,
-    });
-  }
-
-  const { dek, legacyKey, dekFingerprint, matchedSlotId } = unlocked.keyring;
+  const { dek, legacyKey, dekFingerprint } = keyring;
   const existingSlots = Array.isArray(vaultMeta.keySlots) ? [...vaultMeta.keySlots] : [];
-  const targetIdx = existingSlots.findIndex((s) => s.id === matchedSlotId);
-  const originalSlot = targetIdx >= 0 ? existingSlots[targetIdx] : null;
+  const pwIdx = existingSlots.findIndex((s) => s && s.type === 'password');
+  const originalSlot = pwIdx >= 0 ? existingSlots[pwIdx] : null;
 
   const rotatedSlot = await createPasswordSlot(newPassword, dek, {
     id: originalSlot?.id || 'slot-primary-password',
@@ -479,8 +579,8 @@ export async function rotateVaultPassword(
     iterations: options.iterations || DEFAULT_PBKDF2_ITERATIONS,
   });
 
-  if (targetIdx >= 0) {
-    existingSlots[targetIdx] = rotatedSlot;
+  if (pwIdx >= 0) {
+    existingSlots[pwIdx] = rotatedSlot;
   } else {
     existingSlots.unshift(rotatedSlot);
   }
@@ -514,9 +614,35 @@ export async function rotateVaultPassword(
       legacyKey,
       dekFingerprint,
       matchedSlotId: rotatedSlot.id,
+      unlockedVia: 'password',
     },
     rotatedInstantly: true,
   };
+}
+
+export async function rotateVaultPassword(
+  vaultMeta,
+  currentPassword,
+  newPassword,
+  options = {}
+) {
+  if (!newPassword || String(newPassword).length < 4) {
+    throw new Error('New master password must be at least 4 characters.');
+  }
+
+  const unlocked = await unlockVault(currentPassword, vaultMeta);
+  if (!unlocked.ok) {
+    throw new Error('Current master password or recovery key is incorrect.');
+  }
+
+  if (unlocked.version === 1) {
+    return upgradeLegacyVaultToEnvelope(vaultMeta, currentPassword, {
+      ...options,
+      newPassword,
+    });
+  }
+
+  return rotateVaultPasswordWithKeyring(vaultMeta, unlocked.keyring, newPassword, options);
 }
 
 export async function upgradeLegacyVaultToEnvelope(vaultMeta, currentPassword, options = {}) {
@@ -535,9 +661,7 @@ export async function upgradeLegacyVaultToEnvelope(vaultMeta, currentPassword, o
 
   const targetPassword = options.newPassword || currentPassword;
   const patToSave =
-    options.encryptPat === false
-      ? null
-      : options.patToken || unlocked.pat || null;
+    options.encryptPat === false ? null : options.patToken || unlocked.pat || null;
 
   const created = await createEnvelopeVault(targetPassword, {
     enabled: options.enabled !== undefined ? Boolean(options.enabled) : Boolean(vaultMeta.enabled),
