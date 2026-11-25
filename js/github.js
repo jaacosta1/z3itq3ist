@@ -94,58 +94,45 @@ export class SyncConflictError extends Error {
       message ||
         `Sync conflict on ${yearKey}-${dayStr}: another device updated this entry on GitHub.`
     );
-    this.name = 'SyncConflictError';
-    this.code = 'SYNC_CONFLICT';
-    this.dayStr = dayStr;
-    this.yearKey = String(yearKey);
-    this.remoteEntry = remoteEntry || null;
-    this.remoteSha = remoteSha || null;
-    this.remoteDoc = remoteDoc || null;
-  }
-}
-
-/**
- * Detects whether an error indicates an offline device or unreachable network
- * so mutations can be safely deferred into the Offline Commit Queue.
- * @param {unknown} err
- * @returns {boolean}
- */
-export function isNetworkOfflineError(err) {
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-    return true;
-  }
-  if (!err) return false;
-  if (err.isNetworkError || err.code === 'NETWORK_OFFLINE') return true;
-  if (err.name === 'TypeError' && !err.status) return true;
-  const msg = String(err.message || '').toLowerCase();
-  return (
-    msg.includes('failed to fetch') ||
-    msg.includes('networkerror') ||
-    msg.includes('load failed') ||
-    msg.includes('network request failed')
-  );
-}
-
-/* ============================================================================
-   DAY & INDEX MANIFEST HELPERS
-   ============================================================================ */
-
-/**
- * Returns a clean empty calendar day document skeleton.
- * @param {string} dayStr - Calendar day in "MM-DD" format.
- */
-export function emptyDayData(dayStr) {
+export function emptyDayData(mmdd) {
   return {
-    day: String(dayStr || '').trim(),
+    day: String(mmdd || '').trim(),
     entries: {},
     comments: [],
   };
 }
 
 /**
+ * Backward-compatible normalizer: returns a clean array of entries for a single year.
+ * Accepts legacy single-entry objects (`entries["2026"] = { ... }`) OR multi-entry arrays
+ * (`entries["2026"] = [ { id: "...", ... }, ... ]`).
+ *
+ * @param {Object | Array | null} rawYearSlot
+ * @param {string | number} [fallbackYear]
+ * @param {string} [fallbackDayStr]
+ * @returns {Array<Object>}
+ */
+export function getYearEntriesList(rawYearSlot, fallbackYear = '', fallbackDayStr = '') {
+  if (!rawYearSlot) return [];
+  const items = Array.isArray(rawYearSlot) ? rawYearSlot : [rawYearSlot];
+  return items
+    .filter((item) => item && typeof item === 'object')
+    .map((item, idx) => {
+      const yr = Number(item.year || fallbackYear) || new Date().getFullYear();
+      const diaryDate =
+        item.diaryDate || (fallbackDayStr ? `${yr}-${fallbackDayStr}` : `${yr}-01-01`);
+      return {
+        ...item,
+        id: item.id || `ent-${yr}-${idx + 1}`,
+        year: yr,
+        diaryDate,
+      };
+    });
+}
+
+/**
  * Recomputes the lightweight manifest summary entry for a single calendar day (`MM-DD`).
- * Preserves full backward compatibility while enriching index metadata with moods,
- * custom check-in metrics, story arcs, and time-capsule seal dates for fast analytics.
+ * Supports both legacy single-entry objects and multi-entry arrays per year.
  *
  * @param {Object | null} existingIndex
  * @param {string} dayStr
@@ -164,54 +151,66 @@ export function recalculateIndexForDay(existingIndex, dayStr, dayDoc) {
 
   const years = Object.keys(entries)
     .map((y) => Number(y))
-    .filter((n) => Number.isFinite(n))
+    .filter((n) => Number.isFinite(n) && getYearEntriesList(entries[String(n)], n, dayStr).length > 0)
     .sort((a, b) => a - b);
 
   const tagSet = new Set();
   const arcSet = new Set();
   const wordCounts = {};
+  const entryCounts = {};
   const moods = {};
   const metrics = {};
   const sealed = {};
 
   for (const yr of years) {
     const yrKey = String(yr);
-    const entry = entries[yrKey];
-    if (!entry) continue;
+    const list = getYearEntriesList(entries[yrKey], yr, dayStr);
+    if (list.length === 0) continue;
 
-    if (Array.isArray(entry.tags)) {
-      for (const t of entry.tags) {
-        const cleaned = String(t || '').trim();
-        if (!cleaned) continue;
-        tagSet.add(cleaned);
-        if (cleaned.toLowerCase().startsWith('arc:')) {
-          arcSet.add(cleaned.slice(4).trim());
+    entryCounts[yrKey] = list.length;
+    let totalYearWords = 0;
+
+    for (const entry of list) {
+      if (Array.isArray(entry.tags)) {
+        for (const t of entry.tags) {
+          const cleaned = String(t || '').trim();
+          if (!cleaned) continue;
+          tagSet.add(cleaned);
+          if (cleaned.toLowerCase().startsWith('arc:')) {
+            arcSet.add(cleaned.slice(4).trim());
+          }
         }
+      }
+
+      if (typeof entry.wordCount === 'number' && Number.isFinite(entry.wordCount)) {
+        totalYearWords += Math.max(0, Math.round(entry.wordCount));
+      } else {
+        const plain = entry.encrypted
+          ? ''
+          : String(entry.body || '')
+              .replace(/[#*_`>~-]+/g, ' ')
+              .trim();
+        totalYearWords += plain ? plain.split(/\s+/).filter(Boolean).length : 0;
+      }
+
+      if (entry.mood && typeof entry.mood === 'string' && entry.mood.trim()) {
+        moods[yrKey] = entry.mood.trim();
+      }
+
+      if (
+        entry.metrics &&
+        typeof entry.metrics === 'object' &&
+        Object.keys(entry.metrics).length > 0
+      ) {
+        metrics[yrKey] = { ...entry.metrics };
+      }
+
+      if (entry.sealedUntil && typeof entry.sealedUntil === 'string') {
+        sealed[yrKey] = entry.sealedUntil;
       }
     }
 
-    if (typeof entry.wordCount === 'number' && Number.isFinite(entry.wordCount)) {
-      wordCounts[yrKey] = Math.max(0, Math.round(entry.wordCount));
-    } else {
-      const plain = entry.encrypted
-        ? ''
-        : String(entry.body || '')
-            .replace(/[#*_`>~-]+/g, ' ')
-            .trim();
-      wordCounts[yrKey] = plain ? plain.split(/\s+/).filter(Boolean).length : 0;
-    }
-
-    if (entry.mood && typeof entry.mood === 'string' && entry.mood.trim()) {
-      moods[yrKey] = entry.mood.trim();
-    }
-
-    if (entry.metrics && typeof entry.metrics === 'object' && Object.keys(entry.metrics).length > 0) {
-      metrics[yrKey] = { ...entry.metrics };
-    }
-
-    if (entry.sealedUntil && typeof entry.sealedUntil === 'string') {
-      sealed[yrKey] = entry.sealedUntil;
-    }
+    wordCounts[yrKey] = totalYearWords;
   }
 
   if (years.length === 0 && comments.length === 0) {
@@ -221,6 +220,7 @@ export function recalculateIndexForDay(existingIndex, dayStr, dayDoc) {
       years,
       tags: Array.from(tagSet),
       wordCounts,
+      entryCounts,
       commentCount: comments.length,
     };
     if (arcSet.size > 0) summary.arcs = Array.from(arcSet);
@@ -1169,7 +1169,10 @@ export class GitHubClient {
 
       if (mut.mode === 'entry-save') {
         const yKey = String(mut.yearKey);
-        const existingRemoteEntry = doc.entries[yKey] || null;
+        const list = getYearEntriesList(doc.entries[yKey], yKey, mut.dayStr);
+        const targetId = mut.entryId || mut.entryRecord?.id || null;
+        const existingIdx = targetId ? list.findIndex((item) => item.id === targetId) : -1;
+        const existingRemoteEntry = existingIdx >= 0 ? list[existingIdx] : null;
 
         const shaChanged = Boolean(
           mut.expectedSha && remoteSlot.sha && remoteSlot.sha !== mut.expectedSha
@@ -1180,11 +1183,11 @@ export class GitHubClient {
             existingRemoteEntry.updatedAt &&
             existingRemoteEntry.updatedAt !== mut.expectedUpdatedAt
         );
-        const concurrentNewCreate = Boolean(
+        const concurrentSameIdCreate = Boolean(
           !mut.expectedUpdatedAt && shaChanged && existingRemoteEntry
         );
 
-        if ((shaChanged && timestampDiverged) || concurrentNewCreate) {
+        if ((shaChanged && timestampDiverged) || concurrentSameIdCreate) {
           throw new SyncConflictError({
             dayStr: mut.dayStr,
             yearKey: yKey,
@@ -1194,10 +1197,31 @@ export class GitHubClient {
           });
         }
 
-        doc.entries[yKey] = mut.entryRecord;
+        const recordToSave = {
+          ...mut.entryRecord,
+          id: targetId || `ent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        };
+
+        if (existingIdx >= 0) {
+          list[existingIdx] = recordToSave;
+        } else {
+          list.push(recordToSave);
+        }
+
+        // Preserve single-object storage if count === 1 for clean backward compatibility,
+        // and store as an array whenever 2+ entries exist on the same date/year.
+        doc.entries[yKey] = list.length === 1 ? list[0] : list;
       } else if (mut.mode === 'entry-delete') {
         const yKey = String(mut.yearKey);
-        delete doc.entries[yKey];
+        const list = getYearEntriesList(doc.entries[yKey], yKey, mut.dayStr);
+        const remaining = mut.entryId
+          ? list.filter((item) => item.id !== mut.entryId)
+          : [];
+        if (remaining.length === 0) {
+          delete doc.entries[yKey];
+        } else {
+          doc.entries[yKey] = remaining.length === 1 ? remaining[0] : remaining;
+        }
       } else if (mut.mode === 'comment' && mut.commentMutation) {
         const cm = mut.commentMutation;
         if (cm.op === 'add' && cm.comment) {
