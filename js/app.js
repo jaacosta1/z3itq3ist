@@ -1,10 +1,13 @@
-// js/app.js — Perpetual Side-by-Side Diary Main Application Controller (Phase 2: Envelope Encryption)
+// js/app.js — Perpetual Side-by-Side Diary Main Application Controller
+// Phase 3: AES-GCM AAD Tamper Binding, Auto-Lock Inactivity Timer & Panic Hotkey (Ctrl+Shift+L)
 
 import {
   encryptText,
   decryptText,
   isEncryptedPayload,
   getPayloadVersion,
+  buildEntryAad,
+  buildCommentAad,
   createEnvelopeVault,
   unlockVault,
   rotateVaultPassword,
@@ -43,6 +46,7 @@ const MONTHS = [
 ];
 
 const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+const AUTOLOCK_STORAGE_KEY = 'perpetual_diary_autolock_min_v1';
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -73,6 +77,13 @@ function getTodayIsoDate() {
 
 function getTodayDayKey() {
   return getTodayIsoDate().slice(5);
+}
+
+function formatCountdown(ms) {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  return `${pad2(mins)}:${pad2(secs)}`;
 }
 
 function diffCalendarDays(diaryDateStr, writtenAtIso) {
@@ -190,6 +201,8 @@ class PerpetualDiaryApp {
     const savedCfg = GitHubClient.loadConfig(window.localStorage);
     this.gh = new GitHubClient(savedCfg);
 
+    const savedAutoLock = Number(window.localStorage.getItem(AUTOLOCK_STORAGE_KEY));
+
     this.state = {
       activeDay: '11-24',
       sortOrder: 'asc',
@@ -206,6 +219,7 @@ class PerpetualDiaryApp {
       keyring: null,
       cryptoKey: null,
       unlocked: true,
+      autoLockMinutes: Number.isFinite(savedAutoLock) && savedAutoLock >= 0 ? savedAutoLock : 15,
       pendingQuote: null,
       editingCommentId: null,
       commentDraftPhoto: null,
@@ -222,15 +236,188 @@ class PerpetualDiaryApp {
     this.entryStudio = null;
     this.commentStudio = null;
     this.draftSaveTimer = null;
+    this.autoLockInterval = null;
+    this.lastActivityAt = Date.now();
+    this.lastThrottledPing = 0;
+    this.autoLockWarned = false;
   }
 
   hasActiveSessionKey() {
     return Boolean(this.state.keyring?.dek || this.state.keyring?.legacyKey || this.state.cryptoKey);
   }
 
+  hasConfiguredVault() {
+    return Boolean(this.state.vaultMeta && (this.state.vaultMeta.canary || this.state.vaultMeta.canaryCipher));
+  }
+
   setActiveKeyring(keyring) {
     this.state.keyring = keyring || null;
     this.state.cryptoKey = keyring ? keyring.dek || keyring.legacyKey || null : null;
+    if (this.hasActiveSessionKey()) {
+      this.lastActivityAt = Date.now();
+      this.autoLockWarned = false;
+      this.startAutoLockMonitor();
+    } else {
+      this.stopAutoLockMonitor();
+    }
+  }
+
+  getEffectiveAutoLockMinutes() {
+    if (Number.isFinite(Number(this.state.vaultMeta?.autoLockMinutes))) {
+      return Math.max(0, Number(this.state.vaultMeta.autoLockMinutes));
+    }
+    return Math.max(0, Number(this.state.autoLockMinutes) || 0);
+  }
+
+  recordUserActivity(throttled = false) {
+    const now = Date.now();
+    if (throttled && now - this.lastThrottledPing < 1000) return;
+    this.lastThrottledPing = now;
+    this.lastActivityAt = now;
+    this.autoLockWarned = false;
+  }
+
+  startAutoLockMonitor() {
+    this.stopAutoLockMonitor();
+    const pill = document.getElementById('autolock-pill');
+    const minutes = this.getEffectiveAutoLockMinutes();
+
+    if (!this.hasActiveSessionKey() || minutes <= 0) {
+      if (pill) pill.hidden = true;
+      return;
+    }
+
+    const tick = () => {
+      if (!this.hasActiveSessionKey()) {
+        this.stopAutoLockMonitor();
+        return;
+      }
+      const limitMs = minutes * 60000;
+      const elapsed = Date.now() - this.lastActivityAt;
+      const remaining = limitMs - elapsed;
+
+      if (remaining <= 0) {
+        this.lockDiaryNow('inactivity');
+        return;
+      }
+
+      if (pill) {
+        pill.hidden = false;
+        pill.textContent = formatCountdown(remaining);
+        pill.classList.toggle('is-expiring', remaining <= 60000);
+      }
+
+      if (remaining <= 60000 && !this.autoLockWarned) {
+        this.autoLockWarned = true;
+        this.showToast('Vault will auto-lock in under 1 minute due to inactivity.', 'warn');
+      }
+    };
+
+    tick();
+    this.autoLockInterval = window.setInterval(tick, 1000);
+  }
+
+  stopAutoLockMonitor() {
+    if (this.autoLockInterval) {
+      window.clearInterval(this.autoLockInterval);
+      this.autoLockInterval = null;
+    }
+    const pill = document.getElementById('autolock-pill');
+    if (pill) {
+      pill.hidden = true;
+      pill.classList.remove('is-expiring');
+    }
+  }
+
+  scrubSensitiveDom() {
+    const clearHtmlIds = ['columns-stage', 'comments-list', 'archive-results', 'entry-preview-pane'];
+    for (const id of clearHtmlIds) {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = '';
+    }
+
+    const clearValueIds = [
+      'entry-title-input',
+      'entry-mood-input',
+      'entry-tags-input',
+      'entry-body-input',
+      'comment-body-input',
+      'vault-current-password',
+      'vault-new-password',
+      'vault-confirm-password',
+    ];
+    for (const id of clearValueIds) {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    }
+
+    const modalIds = ['composer-modal', 'github-modal', 'vault-modal', 'confirm-modal'];
+    for (const id of modalIds) {
+      const el = document.getElementById(id);
+      if (el) el.hidden = true;
+    }
+
+    const quotePill = document.getElementById('selection-quote-pill');
+    if (quotePill) quotePill.hidden = true;
+    this.closeConfirm(false);
+  }
+
+  lockDiaryNow(reason = 'manual') {
+    if (!this.hasConfiguredVault() && !this.hasActiveSessionKey()) {
+      this.showToast('Configure a Vault password first to lock the diary.', 'warn');
+      return;
+    }
+
+    // Flush unsaved composer draft to localStorage before scrubbing if user was mid-sentence
+    const composerOpen = !document.getElementById('composer-modal')?.hidden;
+    if (composerOpen) {
+      const diaryDate = document.getElementById('entry-date-input')?.value;
+      const bodyVal = document.getElementById('entry-body-input')?.value || '';
+      if (diaryDate && bodyVal.trim() && !this.state.editingEntryKey) {
+        window.localStorage.setItem(
+          `perpetual_draft_${diaryDate}`,
+          JSON.stringify({
+            diaryDate,
+            title: document.getElementById('entry-title-input')?.value || '',
+            mood: document.getElementById('entry-mood-input')?.value || '',
+            tags: document.getElementById('entry-tags-input')?.value || '',
+            body: bodyVal,
+            savedAt: new Date().toISOString(),
+          })
+        );
+      }
+    }
+
+    this.setActiveKeyring(null);
+    this.state.unlocked = false;
+    this.state.dayCache = {};
+    this.scrubSensitiveDom();
+
+    const reasonBadge = document.getElementById('lock-reason-badge');
+    if (reasonBadge) {
+      if (reason === 'panic') {
+        reasonBadge.textContent = 'PANIC LOCK ACTIVATED (CTRL+SHIFT+L) · MEMORY WIPED';
+        reasonBadge.hidden = false;
+      } else if (reason === 'inactivity') {
+        const mins = this.getEffectiveAutoLockMinutes();
+        reasonBadge.textContent = `AUTO-LOCKED AFTER ${mins}M OF INACTIVITY`;
+        reasonBadge.hidden = false;
+      } else if (reason === 'manual') {
+        reasonBadge.textContent = 'LOCKED · SESSION KEY WIPED';
+        reasonBadge.hidden = false;
+      } else {
+        reasonBadge.hidden = true;
+      }
+    }
+
+    const lockScreen = document.getElementById('lock-screen');
+    if (lockScreen) lockScreen.hidden = false;
+    const passInput = document.getElementById('lock-password-input');
+    if (passInput) {
+      passInput.value = '';
+      passInput.focus();
+    }
+    this.updateModeBadge();
   }
 
   async init() {
@@ -247,7 +434,9 @@ class PerpetualDiaryApp {
 
     await this.loadVaultAndIndex();
     this.applyHashRoute();
-    await this.renderActiveView();
+    if (this.state.unlocked) {
+      await this.renderActiveView();
+    }
     this.updateModeBadge();
   }
 
@@ -282,7 +471,7 @@ class PerpetualDiaryApp {
     }
 
     if (lockNowBtn) {
-      lockNowBtn.hidden = !this.hasActiveSessionKey() && !this.state.vaultMeta?.enabled;
+      lockNowBtn.hidden = !this.hasActiveSessionKey() && !this.hasConfiguredVault();
     }
   }
 
@@ -383,6 +572,10 @@ class PerpetualDiaryApp {
     }
 
     this.state.vaultMeta = vaultMeta;
+    if (Number.isFinite(Number(vaultMeta?.autoLockMinutes))) {
+      this.state.autoLockMinutes = Number(vaultMeta.autoLockMinutes);
+      window.localStorage.setItem(AUTOLOCK_STORAGE_KEY, String(this.state.autoLockMinutes));
+    }
 
     if (vaultMeta && vaultMeta.enabled && !this.hasActiveSessionKey()) {
       this.state.unlocked = false;
@@ -499,24 +692,38 @@ class PerpetualDiaryApp {
 
   async persistVaultMeta(vaultMeta, commitMessage = 'diary: update envelope vault') {
     this.state.vaultMeta = vaultMeta;
+    if (Number.isFinite(Number(vaultMeta?.autoLockMinutes))) {
+      this.state.autoLockMinutes = Number(vaultMeta.autoLockMinutes);
+      window.localStorage.setItem(AUTOLOCK_STORAGE_KEY, String(this.state.autoLockMinutes));
+    }
     window.localStorage.setItem('perpetual_diary_vault_local_v1', JSON.stringify(vaultMeta));
     if (this.gh.hasToken()) {
       await this.gh.putJson('vault.json', vaultMeta, commitMessage);
     }
   }
 
-  async decryptFieldIfNeeded(value, isEncrypted) {
+  async decryptFieldDetailed(value, isEncrypted, aad = '') {
     if (!isEncrypted && !isEncryptedPayload(value)) {
-      return String(value ?? '');
+      return { status: 'plain', text: String(value ?? ''), version: 0 };
     }
+    const version = getPayloadVersion(value);
     if (!this.hasActiveSessionKey()) {
-      return null;
+      return { status: 'locked', text: null, version };
     }
     try {
-      return await decryptText(value, this.state.keyring || this.state.cryptoKey);
-    } catch {
-      return null;
+      const text = await decryptText(value, this.state.keyring || this.state.cryptoKey, aad);
+      return { status: 'ok', text, version };
+    } catch (err) {
+      if (err?.code === 'AAD_TAMPER_ERROR' || version === 3) {
+        return { status: 'tampered', text: null, version, error: err.message };
+      }
+      return { status: 'locked', text: null, version, error: err.message };
     }
+  }
+
+  async decryptFieldIfNeeded(value, isEncrypted, aad = '') {
+    const res = await this.decryptFieldDetailed(value, isEncrypted, aad);
+    return res.status === 'plain' || res.status === 'ok' ? res.text : null;
   }
 
   applyHashRoute() {
@@ -573,6 +780,7 @@ class PerpetualDiaryApp {
   }
 
   async renderActiveView() {
+    if (!this.state.unlocked) return;
     const activeTab = document.querySelector('.nav-tab.is-active')?.dataset.view || 'reader';
     if (activeTab === 'heatmap') {
       this.renderHeatmap();
@@ -584,6 +792,7 @@ class PerpetualDiaryApp {
   }
 
   async renderReader() {
+    if (!this.state.unlocked) return;
     const { month, day } = parseDayKey(this.state.activeDay);
     const monthSel = document.getElementById('month-select');
     if (monthSel) monthSel.value = pad2(month);
@@ -731,8 +940,10 @@ class PerpetualDiaryApp {
     const col = document.createElement('article');
     const isPinned = Number(this.state.pinnedYear) === Number(entry.year);
     col.className = `year-column${isPinned ? ' is-pinned' : ''}`;
+    const expectedDate = `${yearKey}-${dayStr}`;
+    const resolvedDate = entry.diaryDate || expectedDate;
     col.dataset.year = String(entry.year);
-    col.dataset.diaryDate = entry.diaryDate || `${entry.year}-${dayStr}`;
+    col.dataset.diaryDate = resolvedDate;
 
     const backdatedDays = diffCalendarDays(entry.diaryDate, entry.writtenAt);
     const backdateBadge =
@@ -740,17 +951,35 @@ class PerpetualDiaryApp {
         ? `<span class="badge-backdated">BACKDATED +${backdatedDays}d</span>`
         : '';
 
-    const decryptedBody = await this.decryptFieldIfNeeded(entry.body, Boolean(entry.encrypted));
-    const decryptedTitle = await this.decryptFieldIfNeeded(
+    const bodyAad = buildEntryAad(expectedDate, yearKey, 'body');
+    const titleAad = buildEntryAad(expectedDate, yearKey, 'title');
+
+    const bodyResult = await this.decryptFieldDetailed(entry.body, Boolean(entry.encrypted), bodyAad);
+    const titleResult = await this.decryptFieldDetailed(
       entry.title || '',
-      Boolean(entry.encrypted)
+      Boolean(entry.encrypted),
+      titleAad
     );
-    const isLockedEntry = decryptedBody === null;
+
+    const isTampered = bodyResult.status === 'tampered' || titleResult.status === 'tampered';
+    const isLockedEntry = !isTampered && bodyResult.status === 'locked';
+    const decryptedBody = bodyResult.text;
+    const decryptedTitle = titleResult.text;
 
     let bodyHtml = '';
     let plainWords = 0;
 
-    if (isLockedEntry) {
+    if (isTampered) {
+      bodyHtml = `
+        <div class="tamper-alert-card" role="alert">
+          <div class="mono-label">⚠ CRYPTOGRAPHIC INTEGRITY ALERT · AAD MISMATCH</div>
+          <p>
+            Decryption rejected this entry because its AES-GCM Additional Authenticated Data (AAD) does not match
+            <code>${escapeHtml(expectedDate)}</code>. The file may have been corrupted, edited externally, or transplanted from another date.
+          </p>
+        </div>
+      `;
+    } else if (isLockedEntry) {
       bodyHtml = `
         <div class="encrypted-card">
           <div class="mono-label">ENCRYPTED ENTRY · AES-256-GCM</div>
@@ -764,7 +993,7 @@ class PerpetualDiaryApp {
     }
 
     let mediaHtml = '';
-    if (!isLockedEntry && entry.image && entry.image.src) {
+    if (!isLockedEntry && !isTampered && entry.image && entry.image.src) {
       const resolvedSrc = await resolveMediaSrc(entry.image.src, this.gh, this.mediaStore);
       if (resolvedSrc) {
         const align = entry.image.align || 'full';
@@ -816,7 +1045,12 @@ class PerpetualDiaryApp {
       : '';
 
     const payloadVer = entry.encrypted ? getPayloadVersion(entry.body) : 0;
-    const encBadge = payloadVer ? ` · v${payloadVer}` : '';
+    const encBadge =
+      payloadVer === 3
+        ? ' · <span class="aad-verified-tag">v3 AAD</span>'
+        : payloadVer
+          ? ` · v${payloadVer}`
+          : '';
 
     col.innerHTML = `
       <header class="year-col-header">
@@ -825,23 +1059,23 @@ class PerpetualDiaryApp {
           ${backdateBadge}
         </div>
         <div class="year-col-actions">
-          <button type="button" class="btn btn-ghost btn-sm col-quote-btn" title="Quote in margin comment">❝ Quote</button>
+          <button type="button" class="btn btn-ghost btn-sm col-quote-btn" title="Quote in margin comment" ${isTampered || isLockedEntry ? 'disabled' : ''}>❝ Quote</button>
           <button type="button" class="btn btn-ghost btn-sm col-pin-btn ${isPinned ? 'is-pinned' : ''}" title="Pin column to left">
             ${isPinned ? 'Pinned' : 'Pin'}
           </button>
-          <button type="button" class="btn btn-ghost btn-sm col-edit-btn">Edit</button>
+          <button type="button" class="btn btn-ghost btn-sm col-edit-btn" ${isTampered ? 'disabled title="Cannot edit tampered ciphertext"' : ''}>Edit</button>
           <button type="button" class="btn btn-ghost btn-sm col-delete-btn">Delete</button>
         </div>
       </header>
-      <div class="mono-meta year-col-date">${escapeHtml(entry.diaryDate || `${entry.year}-${dayStr}`)}${encBadge}</div>
-      ${!isLockedEntry && decryptedTitle ? `<h3 class="entry-title">${escapeHtml(decryptedTitle)}</h3>` : ''}
+      <div class="mono-meta year-col-date">${escapeHtml(resolvedDate)}${encBadge}</div>
+      ${!isLockedEntry && !isTampered && decryptedTitle ? `<h3 class="entry-title">${escapeHtml(decryptedTitle)}</h3>` : ''}
       ${metaChipsHtml}
       <div class="entry-prose-wrap">
         ${mediaHtml}
         <div class="prose-body">${bodyHtml}</div>
       </div>
       <footer class="year-col-footer mono-meta">
-        <span>${isLockedEntry ? 'Encrypted' : `${plainWords} words`}</span>
+        <span>${isTampered ? 'Integrity Failed' : isLockedEntry ? 'Encrypted' : `${plainWords} words`}</span>
         <span>${escapeHtml(loggedLabel)}</span>
       </footer>
     `;
@@ -861,6 +1095,7 @@ class PerpetualDiaryApp {
     });
 
     col.querySelector('.col-quote-btn').addEventListener('click', () => {
+      if (isTampered || isLockedEntry) return;
       const sel = window.getSelection()?.toString().trim();
       const insideCol =
         sel &&
@@ -874,11 +1109,12 @@ class PerpetualDiaryApp {
       this.attachQuoteToComment({
         text: quoteText,
         year: Number(entry.year),
-        diaryDate: entry.diaryDate || `${entry.year}-${dayStr}`,
+        diaryDate: resolvedDate,
       });
     });
 
     col.querySelector('.col-edit-btn').addEventListener('click', () => {
+      if (isTampered) return;
       this.openComposer({
         editEntry: {
           ...entry,
@@ -917,7 +1153,7 @@ class PerpetualDiaryApp {
               await this.persistDayDocument(
                 dayStr,
                 latestDoc,
-                `diary: realign photo ${entry.diaryDate || yearKey}`
+                `diary: realign photo ${resolvedDate}`
               );
               this.showToast('Photo alignment saved.', 'success');
               await this.renderReader();
@@ -966,8 +1202,11 @@ class PerpetualDiaryApp {
     for (const cmt of comments) {
       const card = document.createElement('article');
       card.className = 'comment-card';
-      const plainBody = await this.decryptFieldIfNeeded(cmt.body, Boolean(cmt.encrypted));
-      const isLocked = plainBody === null;
+      const cmtAad = buildCommentAad(dayStr, cmt.id, 'body');
+      const res = await this.decryptFieldDetailed(cmt.body, Boolean(cmt.encrypted), cmtAad);
+      const isTampered = res.status === 'tampered';
+      const isLocked = res.status === 'locked';
+      const plainBody = res.text;
 
       let quoteCardHtml = '';
       if (cmt.quote && cmt.quote.text) {
@@ -985,7 +1224,7 @@ class PerpetualDiaryApp {
       }
 
       let photoHtml = '';
-      if (!isLocked && cmt.image && cmt.image.src) {
+      if (!isLocked && !isTampered && cmt.image && cmt.image.src) {
         const resolved = await resolveMediaSrc(cmt.image.src, this.gh, this.mediaStore);
         if (resolved) {
           photoHtml = `
@@ -1011,21 +1250,25 @@ class PerpetualDiaryApp {
           })
         : '';
 
+      const bodyMarkup = isTampered
+        ? `<div class="tamper-alert-card" role="alert"><div class="mono-label">⚠ AAD INTEGRITY MISMATCH</div><p>This margin note failed cryptographic AAD verification for ${escapeHtml(dayStr)}.</p></div>`
+        : isLocked
+          ? '<em>Encrypted note — unlock Vault to view.</em>'
+          : renderMarkdown(plainBody);
+
       card.innerHTML = `
         <div class="comment-card-top">
           <div class="comment-author-meta">
             <span class="comment-author">${escapeHtml(cmt.author || 'Self')}</span>
-            <span class="mono-meta">${escapeHtml(timestamp)}</span>
+            <span class="mono-meta">${escapeHtml(timestamp)}${res.version === 3 ? ' · v3 AAD' : ''}</span>
           </div>
           <div class="comment-actions">
-            <button type="button" class="btn btn-ghost btn-sm cmt-edit-btn">Edit</button>
+            <button type="button" class="btn btn-ghost btn-sm cmt-edit-btn" ${isTampered ? 'disabled' : ''}>Edit</button>
             <button type="button" class="btn btn-ghost btn-sm cmt-delete-btn">Delete</button>
           </div>
         </div>
         ${quoteCardHtml}
-        <div class="prose-body comment-body">
-          ${isLocked ? '<em>Encrypted note — unlock Vault to view.</em>' : renderMarkdown(plainBody)}
-        </div>
+        <div class="prose-body comment-body">${bodyMarkup}</div>
         ${photoHtml}
       `;
 
@@ -1044,6 +1287,7 @@ class PerpetualDiaryApp {
       }
 
       card.querySelector('.cmt-edit-btn').addEventListener('click', () => {
+        if (isTampered) return;
         this.startEditingComment(cmt, plainBody ?? cmt.body);
       });
 
@@ -1114,13 +1358,15 @@ class PerpetualDiaryApp {
     let body = document.getElementById('comment-body-input').value.trim();
     if (!body) return;
 
+    const targetCommentId = this.state.editingCommentId || `cmt-${Date.now()}`;
     const shouldEncrypt = document.getElementById('comment-encrypt-checkbox').checked;
     if (shouldEncrypt) {
       if (!this.hasActiveSessionKey()) {
         this.showToast('Unlock the Vault first to encrypt margin notes.', 'warn');
         return;
       }
-      body = await encryptText(body, this.state.keyring || this.state.cryptoKey);
+      const cmtAad = buildCommentAad(dayStr, targetCommentId, 'body');
+      body = await encryptText(body, this.state.keyring || this.state.cryptoKey, cmtAad);
     }
 
     const caption = document.getElementById('comment-photo-caption').value.trim();
@@ -1184,7 +1430,7 @@ class PerpetualDiaryApp {
       this.showToast('Margin note updated.', 'success');
     } else {
       comments.push({
-        id: `cmt-${Date.now()}`,
+        id: targetCommentId,
         author,
         body,
         createdAt: nowIso,
@@ -1401,8 +1647,10 @@ class PerpetualDiaryApp {
         return;
       }
       const keyCtx = this.state.keyring || this.state.cryptoKey;
-      title = title ? await encryptText(title, keyCtx) : '';
-      body = await encryptText(body, keyCtx);
+      const titleAad = buildEntryAad(diaryDate, newYearKey, 'title');
+      const bodyAad = buildEntryAad(diaryDate, newYearKey, 'body');
+      title = title ? await encryptText(title, keyCtx, titleAad) : '';
+      body = await encryptText(body, keyCtx, bodyAad);
     }
 
     const caption = document.getElementById('entry-photo-caption').value.trim();
@@ -1482,7 +1730,7 @@ class PerpetualDiaryApp {
       window.localStorage.removeItem(`perpetual_draft_${diaryDate}`);
       this.state.activeDay = newDayStr;
       this.closeComposer();
-      this.showToast(`Saved entry for ${diaryDate}.`, 'success');
+      this.showToast(`Saved entry for ${diaryDate}${encryptFlag ? ' (v3 AAD verified)' : ''}.`, 'success');
       await this.renderReader();
     } catch (err) {
       this.showToast(err.message || 'Failed to save entry.', 'error');
@@ -1623,15 +1871,26 @@ class PerpetualDiaryApp {
         for (const yr of dayYears) {
           const e = doc.entries[String(yr)];
           if (!e) continue;
-          const bodyText = (await this.decryptFieldIfNeeded(e.body, Boolean(e.encrypted))) || '';
-          const titleText = (await this.decryptFieldIfNeeded(e.title, Boolean(e.encrypted))) || '';
+          const expectedDate = `${yr}-${dayStr}`;
+          const bodyText =
+            (await this.decryptFieldIfNeeded(
+              e.body,
+              Boolean(e.encrypted),
+              buildEntryAad(expectedDate, String(yr), 'body')
+            )) || '';
+          const titleText =
+            (await this.decryptFieldIfNeeded(
+              e.title,
+              Boolean(e.encrypted),
+              buildEntryAad(expectedDate, String(yr), 'title')
+            )) || '';
           const hay =
             `${titleText} ${bodyText} ${(e.tags || []).join(' ')} ${e.mood || ''}`.toLowerCase();
           if (hay.includes(query)) {
             matches.push({
               dayStr,
               year: yr,
-              diaryDate: e.diaryDate || `${yr}-${dayStr}`,
+              diaryDate: e.diaryDate || expectedDate,
               title: titleText,
               tags: e.tags || [],
             });
@@ -1713,16 +1972,30 @@ class PerpetualDiaryApp {
       const years = Object.keys(doc.entries || {}).sort();
       for (const yr of years) {
         const e = doc.entries[yr];
+        const expectedDate = `${yr}-${k}`;
         const body =
-          (await this.decryptFieldIfNeeded(e.body, Boolean(e.encrypted))) || '[Encrypted]';
-        const title = (await this.decryptFieldIfNeeded(e.title, Boolean(e.encrypted))) || '';
+          (await this.decryptFieldIfNeeded(
+            e.body,
+            Boolean(e.encrypted),
+            buildEntryAad(expectedDate, yr, 'body')
+          )) || '[Encrypted / Tampered]';
+        const title =
+          (await this.decryptFieldIfNeeded(
+            e.title,
+            Boolean(e.encrypted),
+            buildEntryAad(expectedDate, yr, 'title')
+          )) || '';
         lines.push(`### ${yr}${title ? ` — ${title}` : ''}`, '', body, '');
       }
       if (Array.isArray(doc.comments) && doc.comments.length) {
         lines.push('#### Margin Notes', '');
         for (const c of doc.comments) {
           const cBody =
-            (await this.decryptFieldIfNeeded(c.body, Boolean(c.encrypted))) || '[Encrypted]';
+            (await this.decryptFieldIfNeeded(
+              c.body,
+              Boolean(c.encrypted),
+              buildCommentAad(k, c.id, 'body')
+            )) || '[Encrypted / Tampered]';
           lines.push(`- **${c.author || 'Self'}**: ${cBody}`);
         }
         lines.push('');
@@ -1820,7 +2093,7 @@ class PerpetualDiaryApp {
 
   openVaultModal() {
     const vm = this.state.vaultMeta;
-    const hasConfiguredVault = Boolean(vm && (vm.canary || vm.canaryCipher));
+    const hasConfiguredVault = this.hasConfiguredVault();
     const isV2 = Number(vm?.version) === 2;
     const isLegacyV1 = hasConfiguredVault && !isV2;
     const enabled = Boolean(vm?.enabled);
@@ -1828,16 +2101,16 @@ class PerpetualDiaryApp {
     const statusBanner = document.getElementById('vault-status-banner');
     statusBanner.className = `status-callout ${enabled ? 'is-ok' : ''}`;
     statusBanner.textContent = enabled
-      ? `Vault Lock is ACTIVE (${this.hasActiveSessionKey() ? 'Unlocked in session' : 'Locked'}) · ${isV2 ? 'v2 Envelope DEK/KEK' : 'v1 Legacy'}`
+      ? `Vault Lock is ACTIVE (${this.hasActiveSessionKey() ? 'Unlocked in session' : 'Locked'}) · ${isV2 ? 'v2 Envelope + v3 AAD' : 'v1 Legacy'}`
       : hasConfiguredVault
-        ? `Vault configured (${isV2 ? 'v2 Envelope' : 'v1 Legacy'}) — Full Lock Screen currently OFF.`
-        : 'No Vault password configured yet. Set a master password to initialize v2 Envelope Encryption.';
+        ? `Vault configured (${isV2 ? 'v2 Envelope + v3 AAD' : 'v1 Legacy'}) — Full Lock Screen currently OFF.`
+        : 'No Vault password configured yet. Set a master password to initialize v2 Envelope Encryption + AAD.';
 
     const archPanel = document.getElementById('vault-arch-panel');
     const slotsList = document.getElementById('vault-slots-list');
     if (isV2) {
       archPanel.hidden = false;
-      document.getElementById('vault-version-pill').textContent = 'V2 ENVELOPE · DEK/KEK';
+      document.getElementById('vault-version-pill').textContent = 'V2 ENVELOPE · V3 AAD';
       document.getElementById('vault-fingerprint-label').textContent =
         `DEK: ${vm.dekFingerprint || this.state.keyring?.dekFingerprint || 'ACTIVE'}`;
 
@@ -1868,15 +2141,13 @@ class PerpetualDiaryApp {
     }
 
     document.getElementById('vault-upgrade-banner').hidden = !isLegacyV1;
-    document.getElementById('vault-migrate-banner').hidden = !(
-      isV2 &&
-      vm?.wrappedLegacyKey &&
-      this.state.keyring?.dek &&
-      this.state.keyring?.legacyKey
-    );
+    document.getElementById('vault-migrate-banner').hidden = !(isV2 && this.state.keyring?.dek);
     document.getElementById('vault-migrate-status').hidden = true;
 
     document.getElementById('vault-lock-enabled-checkbox').checked = enabled;
+    document.getElementById('vault-autolock-select').value = String(
+      this.getEffectiveAutoLockMinutes()
+    );
     document.getElementById('vault-current-pass-group').hidden = !hasConfiguredVault;
     document.getElementById('vault-new-pass-label').textContent = hasConfiguredVault
       ? 'Rotate Master Password (Instant — re-wraps DEK only)'
@@ -1893,9 +2164,9 @@ class PerpetualDiaryApp {
     document.getElementById('vault-modal').hidden = false;
   }
 
-  async handleMigrateLegacyEntriesToV2() {
-    if (!this.state.keyring?.dek || !this.state.keyring?.legacyKey) {
-      this.showToast('Unlock your upgraded v2 vault first to migrate legacy entries.', 'warn');
+  async handleMigrateLegacyEntriesToV3Aad() {
+    if (!this.state.keyring?.dek) {
+      this.showToast('Unlock your v2 Envelope vault first to upgrade entries to v3 AAD.', 'warn');
       return;
     }
 
@@ -1916,16 +2187,27 @@ class PerpetualDiaryApp {
         let dirty = false;
 
         for (const [yrKey, entry] of Object.entries(doc.entries || {})) {
-          if (!entry) continue;
-          if (getPayloadVersion(entry.body) === 1 || getPayloadVersion(entry.title) === 1) {
+          if (!entry || !entry.encrypted) continue;
+          const bodyVer = getPayloadVersion(entry.body);
+          const titleVer = entry.title ? getPayloadVersion(entry.title) : 3;
+          if (bodyVer === 1 || bodyVer === 2 || (entry.title && (titleVer === 1 || titleVer === 2))) {
+            const expectedDate = `${yrKey}-${dayStr}`;
             const plainBody = await decryptText(entry.body, this.state.keyring);
-            const plainTitle = entry.title
-              ? await decryptText(entry.title, this.state.keyring)
-              : '';
+            const plainTitle = entry.title ? await decryptText(entry.title, this.state.keyring) : '';
             doc.entries[yrKey] = {
               ...entry,
-              body: await encryptText(plainBody, this.state.keyring.dek),
-              title: plainTitle ? await encryptText(plainTitle, this.state.keyring.dek) : '',
+              body: await encryptText(
+                plainBody,
+                this.state.keyring.dek,
+                buildEntryAad(expectedDate, yrKey, 'body')
+              ),
+              title: plainTitle
+                ? await encryptText(
+                    plainTitle,
+                    this.state.keyring.dek,
+                    buildEntryAad(expectedDate, yrKey, 'title')
+                  )
+                : '',
               encrypted: true,
               updatedAt: new Date().toISOString(),
             };
@@ -1937,11 +2219,17 @@ class PerpetualDiaryApp {
         if (Array.isArray(doc.comments)) {
           for (let cIdx = 0; cIdx < doc.comments.length; cIdx += 1) {
             const cmt = doc.comments[cIdx];
-            if (cmt && getPayloadVersion(cmt.body) === 1) {
+            if (!cmt || !cmt.encrypted) continue;
+            const cVer = getPayloadVersion(cmt.body);
+            if (cVer === 1 || cVer === 2) {
               const plainCmt = await decryptText(cmt.body, this.state.keyring);
               doc.comments[cIdx] = {
                 ...cmt,
-                body: await encryptText(plainCmt, this.state.keyring.dek),
+                body: await encryptText(
+                  plainCmt,
+                  this.state.keyring.dek,
+                  buildCommentAad(dayStr, cmt.id, 'body')
+                ),
                 encrypted: true,
                 updatedAt: new Date().toISOString(),
               };
@@ -1952,36 +2240,61 @@ class PerpetualDiaryApp {
         }
 
         if (dirty) {
-          await this.persistDayDocument(dayStr, doc, `diary: migrate ${dayStr} to v2 DEK`);
+          await this.persistDayDocument(dayStr, doc, `diary: upgrade ${dayStr} to v3 AAD`);
           migratedDays += 1;
         }
       }
 
-      // Retire the legacy key bridge from vault.json once migration completes
-      const cleanedVault = {
-        ...this.state.vaultMeta,
-        wrappedLegacyKey: null,
-        updatedAt: new Date().toISOString(),
-      };
-      await this.persistVaultMeta(cleanedVault, 'diary: retire v1 legacy key bridge');
-      this.setActiveKeyring({
-        ...this.state.keyring,
-        legacyKey: null,
-      });
+      if (this.state.vaultMeta?.wrappedLegacyKey) {
+        const cleanedVault = {
+          ...this.state.vaultMeta,
+          wrappedLegacyKey: null,
+          aadSupported: true,
+          updatedAt: new Date().toISOString(),
+        };
+        await this.persistVaultMeta(cleanedVault, 'diary: retire v1 legacy key bridge');
+        this.setActiveKeyring({
+          ...this.state.keyring,
+          legacyKey: null,
+        });
+      }
 
-      statusEl.textContent = `Migrated ${migratedItems} item(s) across ${migratedDays} day(s). Legacy bridge retired.`;
-      this.showToast(`Migrated ${migratedItems} legacy item(s) to v2 DEK.`, 'success');
-      this.openVaultModal();
+      statusEl.textContent =
+        migratedItems > 0
+          ? `Upgraded ${migratedItems} item(s) across ${migratedDays} day(s) to v3 AAD tamper protection.`
+          : 'All encrypted entries are already protected with v3 AAD.';
+      this.showToast(statusEl.textContent, 'success');
       await this.renderActiveView();
     } catch (err) {
-      statusEl.textContent = `Migration interrupted: ${err.message}`;
-      this.showToast(err.message || 'Migration failed.', 'error');
+      statusEl.textContent = `Upgrade interrupted: ${err.message}`;
+      this.showToast(err.message || 'Batch upgrade failed.', 'error');
     } finally {
       btn.disabled = false;
     }
   }
 
   bindEvents() {
+    // Activity tracking for Auto-Lock Inactivity Timer
+    document.addEventListener('pointerdown', () => this.recordUserActivity(false), { passive: true });
+    document.addEventListener('keydown', () => this.recordUserActivity(false), { passive: true });
+    document.addEventListener('touchstart', () => this.recordUserActivity(false), { passive: true });
+    document.addEventListener('mousemove', () => this.recordUserActivity(true), { passive: true });
+    document.addEventListener('scroll', () => this.recordUserActivity(true), { passive: true });
+
+    const checkSleepWakeLock = () => {
+      if (!this.hasActiveSessionKey()) return;
+      const mins = this.getEffectiveAutoLockMinutes();
+      if (mins <= 0) return;
+      if (Date.now() - this.lastActivityAt >= mins * 60000) {
+        this.lockDiaryNow('inactivity');
+      }
+    };
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') checkSleepWakeLock();
+    });
+    window.addEventListener('focus', checkSleepWakeLock);
+
     document.getElementById('theme-toggle-btn')?.addEventListener('click', () => {
       const current = document.documentElement.getAttribute('data-theme');
       this.setTheme(current === 'dark' ? 'light' : 'dark');
@@ -2373,7 +2686,7 @@ class PerpetualDiaryApp {
       this.showToast('GitHub & Split-Repo settings saved.', 'success');
     });
 
-    // Envelope Vault, Instant Rotation & Legacy Migration Events
+    // Envelope Vault, AAD Migration & Auto-Lock Events
     document.getElementById('vault-btn')?.addEventListener('click', () => this.openVaultModal());
     document.getElementById('vault-close-btn')?.addEventListener('click', () => {
       document.getElementById('vault-modal').hidden = true;
@@ -2393,17 +2706,16 @@ class PerpetualDiaryApp {
       }
       try {
         const encryptPat = Boolean(document.getElementById('vault-encrypt-pat-checkbox').checked);
+        const autoLockMinutes = Number(document.getElementById('vault-autolock-select').value) || 0;
         const res = await upgradeLegacyVaultToEnvelope(this.state.vaultMeta, currentPass, {
           enabled: Boolean(document.getElementById('vault-lock-enabled-checkbox').checked),
+          autoLockMinutes,
           encryptPat,
           patToken: this.gh.hasToken() ? this.gh.config.token : null,
         });
         this.setActiveKeyring(res.keyring);
         await this.persistVaultMeta(res.vaultMeta, 'diary: upgrade vault to v2 envelope');
-        this.showToast(
-          'Upgraded to v2 Envelope Encryption. Password rotations are now instant.',
-          'success'
-        );
+        this.showToast('Upgraded to v2 Envelope Encryption with v3 AAD support.', 'success');
         this.openVaultModal();
       } catch (err) {
         errBox.textContent = err.message;
@@ -2412,7 +2724,7 @@ class PerpetualDiaryApp {
     });
 
     document.getElementById('vault-migrate-entries-btn')?.addEventListener('click', async () => {
-      await this.handleMigrateLegacyEntriesToV2();
+      await this.handleMigrateLegacyEntriesToV3Aad();
     });
 
     document.getElementById('vault-form')?.addEventListener('submit', async (e) => {
@@ -2421,14 +2733,13 @@ class PerpetualDiaryApp {
       errBox.hidden = true;
 
       const lockEnabled = Boolean(document.getElementById('vault-lock-enabled-checkbox').checked);
+      const autoLockMinutes = Number(document.getElementById('vault-autolock-select').value) || 0;
       const currentPass = document.getElementById('vault-current-password').value;
       const newPass = document.getElementById('vault-new-password').value;
       const confirmPass = document.getElementById('vault-confirm-password').value;
       const encryptPat = Boolean(document.getElementById('vault-encrypt-pat-checkbox').checked);
 
-      const hasExistingVault = Boolean(
-        this.state.vaultMeta && (this.state.vaultMeta.canary || this.state.vaultMeta.canaryCipher)
-      );
+      const hasExistingVault = this.hasConfiguredVault();
 
       try {
         if (!hasExistingVault) {
@@ -2440,11 +2751,12 @@ class PerpetualDiaryApp {
           }
           const created = await createEnvelopeVault(newPass, {
             enabled: lockEnabled,
+            autoLockMinutes,
             patToken: encryptPat && this.gh.hasToken() ? this.gh.config.token : null,
           });
           this.setActiveKeyring(created.keyring);
           await this.persistVaultMeta(created.vaultMeta, 'diary: initialize v2 envelope vault');
-          this.showToast('v2 Envelope Vault initialized.', 'success');
+          this.showToast('v2 Envelope Vault initialized with v3 AAD protection.', 'success');
         } else if (newPass) {
           if (!currentPass) {
             throw new Error('Enter your Current Master Password to rotate to a new password.');
@@ -2454,6 +2766,7 @@ class PerpetualDiaryApp {
           }
           const rotated = await rotateVaultPassword(this.state.vaultMeta, currentPass, newPass, {
             enabled: lockEnabled,
+            autoLockMinutes,
             encryptPat,
             patToken: encryptPat && this.gh.hasToken() ? this.gh.config.token : null,
           });
@@ -2464,10 +2777,11 @@ class PerpetualDiaryApp {
             'success'
           );
         } else {
-          // Only toggling Lock Screen or Encrypted PAT without changing password
           const nextVault = {
             ...this.state.vaultMeta,
             enabled: lockEnabled,
+            autoLockMinutes,
+            aadSupported: true,
             updatedAt: new Date().toISOString(),
           };
           if (encryptPat && this.gh.hasToken()) {
@@ -2481,8 +2795,9 @@ class PerpetualDiaryApp {
           } else if (!encryptPat) {
             nextVault.encryptedPat = null;
           }
-          await this.persistVaultMeta(nextVault, 'diary: update vault preferences');
-          this.showToast('Vault preferences updated.', 'success');
+          await this.persistVaultMeta(nextVault, 'diary: update vault & auto-lock preferences');
+          this.startAutoLockMonitor();
+          this.showToast('Vault & auto-lock settings saved.', 'success');
         }
 
         this.state.unlocked = true;
@@ -2535,6 +2850,8 @@ class PerpetualDiaryApp {
 
         passInput.value = '';
         this.state.unlocked = true;
+        const reasonBadge = document.getElementById('lock-reason-badge');
+        if (reasonBadge) reasonBadge.hidden = true;
         document.getElementById('lock-screen').hidden = true;
         this.updateModeBadge();
         await this.renderActiveView();
@@ -2549,11 +2866,7 @@ class PerpetualDiaryApp {
     });
 
     document.getElementById('lock-now-btn')?.addEventListener('click', () => {
-      this.setActiveKeyring(null);
-      this.state.unlocked = false;
-      document.getElementById('lock-screen').hidden = false;
-      document.getElementById('lock-password-input')?.focus();
-      this.updateModeBadge();
+      this.lockDiaryNow('manual');
     });
 
     // Archive & Export Events
@@ -2590,9 +2903,15 @@ class PerpetualDiaryApp {
       .getElementById('confirm-ok-btn')
       ?.addEventListener('click', () => this.closeConfirm(true));
 
-    // Global Hotkeys
+    // Global Hotkeys (GitHub Settings: Ctrl+Shift+G, Panic Lock: Ctrl+Shift+L / Cmd+Shift+L, Escape)
     document.addEventListener('keydown', (e) => {
-      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'g') {
+      const mod = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
+
+      if (mod && e.shiftKey && key === 'l') {
+        e.preventDefault();
+        this.lockDiaryNow('panic');
+      } else if (mod && e.shiftKey && key === 'g') {
         e.preventDefault();
         this.openGitHubModal();
       } else if (e.key === 'Escape') {
