@@ -1,15 +1,15 @@
 /**
- * js/github.js — Perpetual Side-by-Side Web Diary GitHub API Client (File 4 of 11 · Final Build)
+ * js/github.js — Perpetual Side-by-Side Web Diary GitHub API Client (File 1 of 5 · Clean Build)
  *
  * Capabilities:
  * - Split-Repo Architecture (Public Pages/Neocities App Repo + Private Data Vault Repo)
+ * - Multi-Entry-Per-Year support (`getYearEntriesList` backward-compatible with legacy single entries)
  * - Atomic Multi-File Commits via GitHub Git Data API (blobs -> tree -> commit -> ref)
  * - Optimistic Concurrency & SyncConflictError for the Interactive 3-Way Conflict Resolver
  * - Yearly / Era Media-Repo Sharding (`getMediaTarget`, `testMediaShard`, `uploadMediaToShard`)
  * - Metadata Cloaking (`index.enc`, HMAC day shards, generic `sync: update` commit masking)
  * - Repo Health, 1 GB Pages Storage Quota, Pages Build Status & PAT Expiry Radar
- * - Offline Commit Queue detection & transaction serialization/replay hooks (Phase 20 PWA)
- * - UTF-8 / Emoji-safe Base64 utilities & cache-busted static read fallbacks
+ * - Offline Commit Queue detection & transaction serialization/replay hooks
  */
 
 import { resolveShardRepoName } from './media-sharding.js';
@@ -85,7 +85,7 @@ export function base64ToUint8Array(base64) {
    ============================================================================ */
 
 /**
- * Thrown when another device committed changes to the same (MM-DD, YYYY) entry
+ * Thrown when another device committed changes to the same (MM-DD, YYYY, entryId)
  * since the local composer opened it.
  */
 export class SyncConflictError extends Error {
@@ -94,6 +94,38 @@ export class SyncConflictError extends Error {
       message ||
         `Sync conflict on ${yearKey}-${dayStr}: another device updated this entry on GitHub.`
     );
+    this.name = 'SyncConflictError';
+    this.code = 'SYNC_CONFLICT';
+    this.dayStr = dayStr;
+    this.yearKey = String(yearKey);
+    this.remoteEntry = remoteEntry || null;
+    this.remoteSha = remoteSha || null;
+    this.remoteDoc = remoteDoc || null;
+  }
+}
+
+/**
+ * Checks whether an error was caused by the browser being offline or unreachable.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function isNetworkOfflineError(err) {
+  if (!err) return false;
+  if (err.isNetworkError || err.code === 'NETWORK_OFFLINE') return true;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+  const msg = String(err.message || '').toLowerCase();
+  return (
+    msg.includes('failed to fetch') ||
+    msg.includes('networkerror') ||
+    msg.includes('network error') ||
+    msg.includes('load failed')
+  );
+}
+
+/* ============================================================================
+   DAY DOCUMENT & INDEX MANIFEST HELPERS (MULTI-ENTRY SUPPORT)
+   ============================================================================ */
+
 export function emptyDayData(mmdd) {
   return {
     day: String(mmdd || '').trim(),
@@ -321,10 +353,6 @@ export class GitHubClient {
     return this.isConfigured() && this.hasToken();
   }
 
-  /**
-   * Resolves the active repository target for diary data (`data/vault.json`, `index`, `days/shards`).
-   * Routes to the Private Vault repo when Split-Repo Mode is enabled.
-   */
   getDataTarget() {
     const useVault = Boolean(this.config.usePrivateVault);
     const owner = useVault
@@ -357,10 +385,6 @@ export class GitHubClient {
     return basePath ? `${basePath}/${cleanSub}` : cleanSub;
   }
 
-  /**
-   * Returns a generic non-profiling commit message ("sync: update") when
-   * generic commit cloaking is enabled in config or on the active transaction.
-   */
   resolveCommitMessage(rawMessage, forceGeneric = false) {
     if (forceGeneric || this.config.genericCommitMessages) {
       return 'sync: update';
@@ -368,10 +392,6 @@ export class GitHubClient {
     return String(rawMessage || 'diary: update');
   }
 
-  /**
-   * Resolves the target repository for binary media uploads for a given calendar year.
-   * When Media Sharding is disabled, falls back to the active data target.
-   */
   getMediaTarget(year = new Date().getFullYear()) {
     const dataTarget = this.getDataTarget();
     if (!this.config.useMediaSharding) {
@@ -398,9 +418,6 @@ export class GitHubClient {
     };
   }
 
-  /**
-   * Verifies that the sibling media shard repository exists and is writable by the active PAT.
-   */
   async testMediaShard(year = new Date().getFullYear()) {
     const target = this.getMediaTarget(year);
     if (!target.owner || !target.repo) {
@@ -420,9 +437,6 @@ export class GitHubClient {
     };
   }
 
-  /**
-   * Uploads a binary photo/audio asset (WebP, audio, or encrypted .enc) to its yearly/era shard repo.
-   */
   async uploadMediaToShard(year, mediaSubpath, arrayBufferOrBytes, commitMessage) {
     if (!this.hasToken()) {
       throw new Error('GitHub Personal Access Token is required to upload sharded media.');
@@ -468,9 +482,6 @@ export class GitHubClient {
     };
   }
 
-  /**
-   * Deletes an orphaned media file from its sibling shard repository.
-   */
   async deleteShardedMedia(owner, repo, branch, subpath, commitMessage) {
     if (!this.hasToken()) return { deleted: false };
     const cleanSub = String(subpath || '').replace(/^\/+/, '');
@@ -633,7 +644,6 @@ export class GitHubClient {
       }
     }
 
-    // Best-effort GitHub Pages build status check for the App Repo
     if (appOwner && appRepo && this.hasToken()) {
       try {
         const pagesInfo = await this._apiRequest(
@@ -664,7 +674,7 @@ export class GitHubClient {
     const vaultSizeKb = Number(vaultMeta?.size || 0);
     const appSizeKb = Number(appMeta?.size || 0);
     const combinedKb = target.isSplitVault ? vaultSizeKb : vaultSizeKb || appSizeKb;
-    const pagesLimitKb = 1024 * 1024; // 1 GB reference ceiling
+    const pagesLimitKb = 1024 * 1024;
     const usagePercent = Math.min(100, Number(((combinedKb / pagesLimitKb) * 100).toFixed(2)));
 
     return {
@@ -906,21 +916,6 @@ export class GitHubClient {
      ATOMIC MULTI-FILE COMMIT ENGINE (GIT DATA / TREES API)
      ========================================================================== */
 
-  /**
-   * Bundles any combination of text files, binary media uploads, and file deletions
-   * into ONE single Git commit and ONE single Pages/Neocities rebuild.
-   *
-   * @param {Array<{
-   *   subpath: string,
-   *   content?: string | ArrayBuffer | Uint8Array,
-   *   isBase64?: boolean,
-   *   isBinary?: boolean,
-   *   delete?: boolean
-   * }>} changes
-   * @param {string} commitMessage
-   * @param {{ target?: Object, genericCommit?: boolean }} [options]
-   * @returns {Promise<{ commitSha: string, treeSha: string, fileShas: Record<string, string> }>}
-   */
   async commitBatch(changes, commitMessage, options = {}) {
     if (!this.hasToken()) {
       throw new Error('GitHub Personal Access Token is required for atomic commits.');
@@ -943,7 +938,6 @@ export class GitHubClient {
       Boolean(options.genericCommit)
     );
 
-    // Step 1: Fetch branch HEAD ref (handle brand-new empty repo via bootstrap fallback)
     let headCommitSha = null;
     try {
       const refData = await this._apiRequest(
@@ -958,7 +952,6 @@ export class GitHubClient {
       }
     }
 
-    // Empty repository bootstrap fallback (Git Data API requires at least one initial commit)
     if (!headCommitSha) {
       const fileShas = {};
       let lastSha = '';
@@ -978,7 +971,6 @@ export class GitHubClient {
       return { commitSha: lastSha, treeSha: '', fileShas };
     }
 
-    // Step 2: Fetch base tree SHA of HEAD commit
     const headCommit = await this._apiRequest(
       `${repoApiBase}/git/commits/${encodeURIComponent(headCommitSha)}`
     );
@@ -987,7 +979,6 @@ export class GitHubClient {
       throw new Error('Could not resolve base tree SHA for atomic Git commit.');
     }
 
-    // Step 3: Create blobs for all added/updated files in parallel
     const fileShas = {};
     const treeItems = await Promise.all(
       changes.map(async (ch) => {
@@ -1030,7 +1021,6 @@ export class GitHubClient {
       })
     );
 
-    // Step 4: Create new Git tree anchored to base_tree
     const newTree = await this._apiRequest(`${repoApiBase}/git/trees`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1039,7 +1029,6 @@ export class GitHubClient {
       }),
     });
 
-    // Step 5: Create single commit referencing new tree and HEAD parent
     const newCommit = await this._apiRequest(`${repoApiBase}/git/commits`, {
       method: 'POST',
       body: JSON.stringify({
@@ -1049,7 +1038,6 @@ export class GitHubClient {
       }),
     });
 
-    // Step 6: Fast-forward branch ref (`force: false` prevents silently overwriting concurrent commits)
     await this._apiRequest(
       `${repoApiBase}/git/refs/heads/${encodeURIComponent(target.branch)}`,
       {
@@ -1070,13 +1058,8 @@ export class GitHubClient {
   }
 
   /**
-   * High-level conflict-safe atomic transaction for day entries, date moves,
-   * comments, media uploads/deletions, and index manifest updates in ONE Git commit.
-   *
-   * - Detects concurrent edits to the same (MM-DD, YYYY) entry and throws SyncConflictError
-   *   so the UI can launch the Interactive 3-Way Conflict Resolver.
-   * - Automatically merges non-overlapping edits (different years or comments on the same day)
-   *   and retries once if the branch HEAD moved mid-flight (HTTP 422/409).
+   * High-level conflict-safe atomic transaction for day entries (multi-entry per year),
+   * date moves, comments, media uploads/deletions, and index manifest updates in ONE Git commit.
    */
   async commitAtomicDayMutations(tx, _attempt = 1) {
     const dayMutations = Array.isArray(tx.dayMutations) ? tx.dayMutations : [];
@@ -1086,7 +1069,6 @@ export class GitHubClient {
 
     const uniqueDays = Array.from(new Set(dayMutations.map((m) => m.dayStr).filter(Boolean)));
 
-    // Fetch fresh remote state + SHA for each touched calendar day
     const remoteDayMap = {};
     for (const dayStr of uniqueDays) {
       const targetSubpath = cloak ? await cloak.getDaySubpath(dayStr) : `days/${dayStr}.json`;
@@ -1134,7 +1116,6 @@ export class GitHubClient {
       };
     }
 
-    // Fetch fresh index manifest (index.enc when cloaked, else index.json)
     const indexSubpath = cloak ? cloak.indexSubpath || 'index.enc' : 'index.json';
     let indexMeta = await this.getFileMeta(indexSubpath);
     let loadedLegacyIndex = false;
@@ -1162,7 +1143,6 @@ export class GitHubClient {
         ? parsedIdx
         : { version: 1, updatedAt: new Date().toISOString(), days: {} };
 
-    // Apply each mutation with strict entry-level optimistic concurrency checking
     for (const mut of dayMutations) {
       const remoteSlot = remoteDayMap[mut.dayStr];
       const doc = remoteSlot.doc;
@@ -1239,7 +1219,6 @@ export class GitHubClient {
       }
     }
 
-    // Assemble atomic commit changeset
     const changes = [];
     const outDocs = {};
 
@@ -1315,7 +1294,6 @@ export class GitHubClient {
         index: workingIndex,
       };
     } catch (err) {
-      // Branch HEAD moved during commit (HTTP 422 / 409) -> re-fetch & retry once cleanly
       if ((err.status === 422 || err.status === 409) && _attempt < 2) {
         return this.commitAtomicDayMutations(tx, _attempt + 1);
       }
@@ -1323,9 +1301,6 @@ export class GitHubClient {
     }
   }
 
-  /**
-   * Atomically updates one calendar day file and index manifest in a single Git commit.
-   */
   async updateDayAndIndex(dayStr, dayDoc, commitMessage, cloak = null) {
     const activeCloak = cloak && cloak.enabled ? cloak : null;
     const indexSubpath = activeCloak ? activeCloak.indexSubpath || 'index.enc' : 'index.json';
@@ -1374,22 +1349,15 @@ export class GitHubClient {
   }
 
   /* ==========================================================================
-     OFFLINE COMMIT QUEUE SERIALIZATION & REPLAY HOOKS (PHASE 20 PWA)
+     OFFLINE COMMIT QUEUE SERIALIZATION & REPLAY HOOKS
      ========================================================================== */
 
-  /**
-   * Converts an atomic day transaction (including any binary media buffers)
-   * into a JSON-serializable object suitable for storing in the Offline Commit Queue.
-   * @param {Object} tx
-   * @returns {Object}
-   */
   static serializeTransactionForQueue(tx) {
     const mediaUploads = (Array.isArray(tx.mediaUploads) ? tx.mediaUploads : []).map((u) => ({
       subpath: u.subpath,
       base64: u.base64 ? u.base64 : arrayBufferToBase64(u.buffer),
     }));
 
-    // Drop stale optimistic SHA expectations when queueing offline so replay merges cleanly
     const dayMutations = (Array.isArray(tx.dayMutations) ? tx.dayMutations : []).map((m) => ({
       ...m,
       expectedSha: null,
@@ -1407,11 +1375,6 @@ export class GitHubClient {
     };
   }
 
-  /**
-   * Replays a previously queued offline transaction atomically once connectivity returns.
-   * @param {Object} queuedTx
-   * @param {Object | null} cloakAdapter
-   */
   async replayQueuedTransaction(queuedTx, cloakAdapter = null) {
     if (!queuedTx) return null;
     const mediaUploads = (Array.isArray(queuedTx.mediaUploads) ? queuedTx.mediaUploads : []).map(
