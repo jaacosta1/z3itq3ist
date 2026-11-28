@@ -4357,4 +4357,18 @@ body.vp-day-mode.vp-clean-read .vp-focused-col .meta-pill {
     grid-template-columns: 1fr;
   }
 }
+/* Keep plugin buttons visible & wrapping cleanly on narrow screens */
+.plug-dock-inline {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  flex-shrink: 0;
+}
 
+#vp-print-trigger {
+  display: inline-flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
