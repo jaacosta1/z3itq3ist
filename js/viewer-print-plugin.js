@@ -1,18 +1,16 @@
 
 
 /**
- * Perpetual Web Diary — Integrated Main-Page Day View & Print Studio (js/viewer-print-plugin.js)
+ * Perpetual Web Diary — Integrated Day View & Fixed Print Studio (js/viewer-print-plugin.js)
  *
- *   1) Native Integrated Day View (Directly on the Main Page — Zero Separate Reader Modal)
- *      - Toggles the main page between Side-by-Side and focused single-column Day View
- *      - Uses the live decrypted DOM rendered by app.js, so entries NEVER go missing and
- *        Edit, Delete, Quote, Share, History, stacked entries & highlights all work natively
- *      - Inline toolbar right above the entry: Year switcher pills (auto-deduping pinned columns),
- *        Aa reading controls (Font, Size, Dark/Sepia/Paper surface, Clean/Full metadata pills),
- *        + Pin Day, Print Day, and Side-by-Side toggle
- *   2) Print Studio (Print Specific Range of Days + Print Indices)
- *      - Book-ready printing & direct .html download via iOS-safe hidden iframe
- *      - Printable Master Index (Pinned Dates, Highlights w/ Titles & Descriptions, Entries, #Tags)
+ *   Fixes over previous version:
+ *   - Eliminates entry overwriting: strict DOM-confirmed date matching (never assigns hash date
+ *     to stale DOM), non-destructive fingerprint-based entry store, and print-safe CSS (removed
+ *     break-inside: avoid-page on multi-paragraph entries & flex print headers that caused overlaps)
+ *   - Detects all available entries: deep recursive localStorage/sessionStorage + read-only
+ *     IndexedDB scanner + live Reader & Archive DOM harvester + 1-click "Collect from Archive"
+ *     + optional window.__PD_BRIDGE__ hook
+ *   - Keeps native Integrated Main-Page Day View (zero separate reader modal, zero missing entries)
  *
  * Self-contained ES module. Requires zero edits to app.js, github.js, features.js, or bipolar-index-plugin.js.
  */
@@ -29,7 +27,10 @@ const VP_SKIP_KEYS = new Set([
   VP_PREFS_KEY,
 ]);
 
-const vpSessionCache = new Map();
+// Non-destructive store: isoDate -> Map(fingerprint -> entry)
+const vpEntryStore = new Map();
+let vpIdbEntriesCache = [];
+let vpIdbScanned = false;
 let vpScanCancelled = false;
 let vpSyncingLayout = false;
 
@@ -46,7 +47,7 @@ function savePrefs(partial) {
   try {
     localStorage.setItem(VP_PREFS_KEY, JSON.stringify(Object.assign(loadPrefs(), partial)));
   } catch {
-    // ignore storage errors
+    // ignore storage quota errors
   }
 }
 
@@ -59,7 +60,7 @@ const vpState = {
   dayFont: savedPrefs.dayFont || 'serif', // 'serif' | 'sans' | 'mono'
   daySize: savedPrefs.daySize || 'md', // 'sm' | 'md' | 'lg'
   dayTheme: savedPrefs.dayTheme || 'auto', // 'auto' | 'sepia' | 'paper'
-  cleanRead: Boolean(savedPrefs.cleanRead), // optionally hides metadata pills for distraction-free reading
+  cleanRead: Boolean(savedPrefs.cleanRead),
   aaOpen: false,
   pinOpen: false,
 
@@ -96,7 +97,7 @@ const vpState = {
 };
 
 /* ==========================================================================
-   1. UTILITIES & SAFE HTML
+   1. UTILITIES, FULL-CONTENT FINGERPRINTING & SAFE HTML
    ========================================================================== */
 
 function esc(str) {
@@ -144,11 +145,22 @@ function countWords(text) {
   return clean ? clean.split(/\s+/).length : 0;
 }
 
-function normalizeForDedupe(text) {
-  return String(text || '')
+// Full-content dual FNV-1a fingerprint so distinct entries with similar openings NEVER overwrite each other
+function contentFingerprint(text) {
+  const norm = String(text || '')
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '')
-    .slice(0, 90);
+    .replace(/[^a-z0-9]+/g, '');
+  if (!norm) return '';
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < norm.length; i++) {
+    const ch = norm.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 ^= ch + (i & 255);
+    h2 = Math.imul(h2, 0x85ebca6b);
+  }
+  return `${norm.length}:${(h1 >>> 0).toString(36)}:${(h2 >>> 0).toString(36)}`;
 }
 
 function extractTags(text, existingTags = []) {
@@ -215,7 +227,7 @@ function showToast(msg) {
   clearTimeout(el._timer);
   el._timer = setTimeout(() => {
     el.style.opacity = '0';
-  }, 2600);
+  }, 2800);
 }
 
 /* ==========================================================================
@@ -254,11 +266,68 @@ function loadEntryMetaMap() {
 }
 
 /* ==========================================================================
-   3. LIVE MAIN-PAGE COLUMN DISCOVERY & CLEAN ENTRY EXTRACTION
+   3. NON-DESTRUCTIVE ENTRY STORE & MULTI-SOURCE HARVESTER
    ========================================================================== */
 
+function upsertEntryIntoStore(entry) {
+  if (!entry || !/^\d{4}-\d{2}-\d{2}$/.test(entry.isoDate || '')) return;
+  const text = String(entry.text || '').trim();
+  const title = String(entry.title || '').trim();
+  if (!text && !title) return;
+
+  const fp = contentFingerprint(text || title);
+  if (!fp) return;
+
+  if (!vpEntryStore.has(entry.isoDate)) {
+    vpEntryStore.set(entry.isoDate, new Map());
+  }
+  const dayMap = vpEntryStore.get(entry.isoDate);
+
+  // If a longer/full version already exists for this day whose prefix matches an excerpt, keep the full version
+  if (entry.isExcerptOnly) {
+    const needle = text.replace(/…$/, '').toLowerCase().replace(/\s+/g, ' ').trim();
+    for (const existing of dayMap.values()) {
+      if (
+        !existing.isExcerptOnly &&
+        needle.length >= 20 &&
+        existing.text.toLowerCase().replace(/\s+/g, ' ').includes(needle.slice(0, 60))
+      ) {
+        return;
+      }
+    }
+  } else {
+    // Full text arrived: remove any shorter excerpt-only stub that matches its start
+    const fullNorm = text.toLowerCase().replace(/\s+/g, ' ');
+    for (const [k, existing] of dayMap.entries()) {
+      if (existing.isExcerptOnly) {
+        const stub = existing.text.replace(/…$/, '').toLowerCase().replace(/\s+/g, ' ').trim();
+        if (stub.length >= 16 && fullNorm.includes(stub.slice(0, 60))) {
+          dayMap.delete(k);
+        }
+      }
+    }
+  }
+
+  const prev = dayMap.get(fp);
+  if (prev && !prev.isExcerptOnly && entry.isExcerptOnly) return;
+
+  dayMap.set(fp, {
+    isoDate: entry.isoDate,
+    year: entry.isoDate.slice(0, 4),
+    mmdd: entry.isoDate.slice(5),
+    orderHint: typeof entry.orderHint === 'number' ? entry.orderHint : prev?.orderHint ?? dayMap.size,
+    title: title || prev?.title || '',
+    text: text.length >= (prev?.text?.length || 0) ? text : prev.text,
+    words: countWords(text.length >= (prev?.text?.length || 0) ? text : prev.text),
+    tags: Array.from(new Set([...(prev?.tags || []), ...(entry.tags || [])])),
+    pills: Array.from(new Set([...(prev?.pills || []), ...(entry.pills || [])])),
+    timeStamp: entry.timeStamp || prev?.timeStamp || '',
+    source: entry.source || prev?.source || 'dom',
+    isExcerptOnly: Boolean(entry.isExcerptOnly),
+  });
+}
+
 function findAllMainColumns() {
-  // Prefer direct .year-col cards; fallback to top-level [data-year] elements outside modals
   let cols = Array.from(document.querySelectorAll('.year-col')).filter(
     (el) => !el.closest('.plug-backdrop') && !el.closest('#vp-inline-day-bar')
   );
@@ -277,23 +346,53 @@ function getColumnYear(col) {
   if (!col) return null;
   const attr = col.getAttribute('data-year');
   if (attr && /^\d{4}$/.test(attr)) return attr;
-  const header = col.querySelector('.year-header, .year-title, h2, h3');
+  const header = col.querySelector('.year-header, .year-title, .year-col-header, h2, h3');
   const m = (header?.textContent || '').match(/\b(19|20)\d{2}\b/);
   return m ? m[0] : null;
 }
 
 function extractExplicitIsoFromNode(node) {
   if (!node) return null;
-  const attrDate = node.getAttribute?.('data-date') || node.getAttribute?.('data-iso') || '';
-  if (/^\d{4}-\d{2}-\d{2}$/.test(attrDate)) return attrDate;
-  const dateEl = node.querySelector?.('.entry-date, .stacked-entry-date, .year-col-date, .entry-subheader, time');
-  const txt = dateEl ? dateEl.textContent : (node.textContent || '').slice(0, 140);
-  const m = (txt || '').match(/\b((?:19|20)\d{2}-\d{2}-\d{2})\b/);
-  return m ? m[1] : null;
+  for (const attr of ['data-date', 'data-iso', 'data-entry-date', 'data-archive-date']) {
+    const val = node.getAttribute?.(attr) || '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+  }
+  const dateEl = node.querySelector?.(
+    '.entry-date, .stacked-entry-date, .year-col-date, .entry-subheader, .archive-date, time'
+  );
+  if (dateEl) {
+    const dtAttr = dateEl.getAttribute?.('datetime') || '';
+    const mAttr = dtAttr.match(/((?:19|20)\d{2}-\d{2}-\d{2})/);
+    if (mAttr) return mAttr[1];
+    const mTxt = (dateEl.textContent || '').match(/\b((?:19|20)\d{2}-\d{2}-\d{2})\b/);
+    if (mTxt) return mTxt[1];
+  }
+  // Check only the leading header/meta text (never deep inside prose where user might mention another date)
+  const clone = node.cloneNode(true);
+  clone
+    .querySelectorAll('.entry-body, .entry-body-content, .year-entry-body, .entry-text, .prose, .markdown-body')
+    .forEach((el) => el.remove());
+  const headText = (clone.textContent || '').slice(0, 180);
+  const mIso = headText.match(/\b((?:19|20)\d{2}-\d{2}-\d{2})\b/);
+  if (mIso) return mIso[1];
+
+  // Also parse "Nov 20, 2026" or "November 20, 2026" in headers
+  const mWord = headText.match(
+    /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2}),?\s+((?:19|20)\d{2})\b/i
+  );
+  if (mWord) {
+    const mNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+    const mIdx = mNames.indexOf(mWord[1].slice(0, 3).toLowerCase());
+    if (mIdx !== -1) {
+      return `${mWord[3]}-${String(mIdx + 1).padStart(2, '0')}-${String(Number(mWord[2])).padStart(2, '0')}`;
+    }
+  }
+  return null;
 }
 
-function detectCurrentDiaryMMDD() {
-  // 1) Explicit YYYY-MM-DD inside any rendered column
+// Strict UI-only MM-DD detector (NEVER reads location.hash so failed navigation can never overwrite dates)
+function detectDisplayedUIMMDD() {
+  // 1) Explicit YYYY-MM-DD inside any currently rendered column
   for (const col of findAllMainColumns()) {
     const iso = extractExplicitIsoFromNode(col);
     if (iso) return iso.slice(5);
@@ -303,32 +402,35 @@ function detectCurrentDiaryMMDD() {
   if (dateInput && !dateInput.closest('.plug-backdrop') && /^\d{4}-\d{2}-\d{2}$/.test(dateInput.value)) {
     return dateInput.value.slice(5);
   }
-  // 3) Month / Day selects
+  // 3) Month / Day dropdowns
   const monthSel = document.querySelector('#month-select, [data-role="month-select"]');
   const daySel = document.querySelector('#day-select, [data-role="day-select"]');
   if (monthSel && daySel && monthSel.value && daySel.value) {
     return `${String(Number(monthSel.value)).padStart(2, '0')}-${String(Number(daySel.value)).padStart(2, '0')}`;
   }
-  // 4) Hash
-  const hashMatch = (location.hash || '').match(/(\d{2}-\d{2})/);
-  if (hashMatch) return hashMatch[1];
-  // 5) Visible header text ("November 20")
-  const headerText =
-    document.querySelector('#current-date-title, #date-heading, .date-display, .current-date, h1, h2')
-      ?.textContent || '';
-  const months = [
-    'january', 'february', 'march', 'april', 'may', 'june',
-    'july', 'august', 'september', 'october', 'november', 'december',
-  ];
-  const hit = headerText.match(new RegExp(`\\b(${months.join('|')})\\s+(\\d{1,2})\\b`, 'i'));
-  if (hit) {
-    const mNum = months.indexOf(hit[1].toLowerCase()) + 1;
-    const dNum = Number(hit[2]);
-    if (mNum >= 1 && dNum >= 1 && dNum <= 31) {
-      return `${String(mNum).padStart(2, '0')}-${String(dNum).padStart(2, '0')}`;
+  // 4) Visible date heading ("November 28" / "Nov 28")
+  const headerNodes = document.querySelectorAll(
+    '#current-date-title, #date-heading, .date-display, .current-date, .reader-date, header h1, header h2, main h1, main h2'
+  );
+  const mNames = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+  for (const node of headerNodes) {
+    if (node.closest('.plug-backdrop, #vp-inline-day-bar')) continue;
+    const hit = (node.textContent || '').match(
+      /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2})\b/i
+    );
+    if (hit) {
+      const mIdx = mNames.indexOf(hit[1].slice(0, 3).toLowerCase());
+      const dNum = Number(hit[2]);
+      if (mIdx !== -1 && dNum >= 1 && dNum <= 31) {
+        return `${String(mIdx + 1).padStart(2, '0')}-${String(dNum).padStart(2, '0')}`;
+      }
     }
   }
-  return todayISO().slice(5);
+  return null;
+}
+
+function detectCurrentDiaryMMDD() {
+  return detectDisplayedUIMMDD() || (location.hash.match(/(\d{2}-\d{2})/) || [])[1] || todayISO().slice(5);
 }
 
 function extractCleanCardData(card) {
@@ -347,12 +449,12 @@ function extractCleanCardData(card) {
 
   const explicitIso = extractExplicitIsoFromNode(card);
   const bodyNode = card.querySelector(
-    '.entry-body-content, .entry-body, .entry-content, .stacked-entry-body, .year-entry-body, .year-entry-content, .entry-text, .entry-prose, .prose, .markdown-body'
+    '.entry-body-content, .entry-body, .entry-content, .stacked-entry-body, .year-entry-body, .year-entry-content, .entry-text, .entry-prose, .prose, .markdown-body, .archive-excerpt, .archive-body, .card-body'
   );
   const clone = (bodyNode || card).cloneNode(true);
   clone
     .querySelectorAll(
-      'button, nav, input, textarea, select, script, style, .entry-actions, .entry-toolbar, .entry-meta, .entry-header, .entry-subheader, .entry-date, .stacked-entry-date, .entry-pills, .entry-badges, .meta-pills, .pills, .badges, .tags-row, .tag-list, .entry-tags, .pill, .badge, .chip, .year-header, .year-col-header, .year-col-actions, .year-col-add-entry-bar, .stacked-entry-header, .stacked-entry-index, .margin-notes, .comments-section'
+      'button, nav, input, textarea, select, script, style, .entry-actions, .entry-toolbar, .entry-meta, .entry-header, .entry-subheader, .entry-date, .stacked-entry-date, .archive-date, .entry-pills, .entry-badges, .meta-pills, .pills, .badges, .tags-row, .tag-list, .entry-tags, .pill, .badge, .chip, .year-header, .year-col-header, .year-col-actions, .year-col-add-entry-bar, .stacked-entry-header, .stacked-entry-index, .margin-notes, .comments-section'
     )
     .forEach((el) => el.remove());
 
@@ -368,15 +470,17 @@ function extractCleanCardData(card) {
     .trim();
 
   if (!bodyNode) {
-    rawText = rawText.replace(/^(?:19|20)\d{2}(?:-\d{2}-\d{2})?\s*\n+/g, '').trim();
+    rawText = rawText
+      .replace(/^(?:19|20)\d{2}(?:-\d{2}-\d{2})?\s*\n+/g, '')
+      .replace(/^(?:History|Pin|Share|Quote|Edit|Delete)(\s+(?:History|Pin|Share|Quote|Edit|Delete))*\s*\n+/gi, '')
+      .trim();
   }
 
-  // Ignore empty-state placeholder prompts inside empty year columns
-  if (/^(no entry|nothing written|write an entry|add entry|click to write)/i.test(rawText) && rawText.length < 70) {
+  if (/^(no entry|nothing written|write an entry|add entry|click to write|no entries)/i.test(rawText) && rawText.length < 75) {
     rawText = '';
   }
 
-  const title = (card.querySelector('.entry-title, .stacked-entry-title, h4')?.textContent || '').trim();
+  const title = (card.querySelector('.entry-title, .stacked-entry-title, .archive-title, h4')?.textContent || '').trim();
   const timeStamp = (card.querySelector('.entry-time, .stacked-entry-time')?.textContent || '').trim();
 
   return {
@@ -394,33 +498,49 @@ function extractEntriesFromColumn(col, fallbackMmdd) {
   if (!yr) return [];
   const colIso = extractExplicitIsoFromNode(col);
 
-  let cards = Array.from(col.querySelectorAll('.stacked-entry-item'));
-  if (!cards.length) cards = Array.from(col.querySelectorAll('.entry-card, .year-entry'));
+  // Detect stacked multi-entries first, then single-entry containers, then direct prose fallback
+  let cards = Array.from(
+    col.querySelectorAll('.stacked-entry-item, .stacked-entry, .entry-card, .entry-item, .year-entry, .diary-entry')
+  ).filter((c) => !c.parentElement?.closest('.stacked-entry-item, .stacked-entry, .entry-card, .entry-item, .year-entry, .diary-entry'));
+
   if (!cards.length) {
-    const single = col.querySelector(
-      '.entry-body-content, .entry-body, .entry-content, .year-entry-body, .entry-text, .prose'
-    );
-    if (single) cards = [single];
+    const bodies = Array.from(
+      col.querySelectorAll(
+        '.entry-body-content, .entry-body, .entry-content, .year-entry-body, .entry-text, .prose, .markdown-body'
+      )
+    ).filter((b) => !b.parentElement?.closest('.entry-body, .entry-content, .year-entry-body, .prose'));
+    if (bodies.length) cards = bodies;
+  }
+
+  if (!cards.length) {
+    // Generic fallback for custom card markup inside .year-col
+    cards = [col];
   }
 
   const out = [];
-  const seen = new Set();
-  cards.forEach((card) => {
+  const seenFp = new Set();
+  cards.forEach((card, idx) => {
     const parsed = extractCleanCardData(card);
-    const norm = normalizeForDedupe(parsed.body);
-    if (!parsed.body || !norm || seen.has(norm)) return;
-    seen.add(norm);
-    const isoDate = parsed.explicitIso || colIso || `${yr}-${fallbackMmdd}`;
+    const fp = contentFingerprint(parsed.body);
+    if (!parsed.body || !fp || seenFp.has(fp)) return;
+    seenFp.add(fp);
+
+    const isoDate = parsed.explicitIso || colIso || (fallbackMmdd ? `${yr}-${fallbackMmdd}` : null);
+    if (!isoDate) return;
+
     out.push({
       isoDate,
       year: isoDate.slice(0, 4),
       mmdd: isoDate.slice(5),
+      orderHint: idx,
       title: parsed.title,
       text: parsed.body,
       words: countWords(parsed.body),
       tags: parsed.tags,
       pills: parsed.pills,
       timeStamp: parsed.timeStamp,
+      source: 'reader-dom',
+      isExcerptOnly: false,
     });
   });
 
@@ -432,146 +552,300 @@ function extractEntriesFromColumn(col, fallbackMmdd) {
 }
 
 function columnHasRealEntry(col) {
-  const mmdd = detectCurrentDiaryMMDD();
+  const mmdd = detectDisplayedUIMMDD();
   return extractEntriesFromColumn(col, mmdd).length > 0;
 }
 
-function captureVisibleDOM() {
-  const fallbackMmdd = detectCurrentDiaryMMDD();
-  if (!fallbackMmdd) return;
+// Harvest any visible Archive / Timeline / Search rows (captures ALL unlocked entries at once when Archive is open)
+function captureVisibleArchiveDOM() {
+  const archiveSelectors = [
+    '.archive-entry',
+    '.archive-item',
+    '.archive-card',
+    '.archive-row',
+    '.timeline-item',
+    '.timeline-entry',
+    '.search-result',
+    '[data-archive-date]',
+    '[data-entry-date]',
+  ].join(', ');
 
+  const candidates = Array.from(document.querySelectorAll(archiveSelectors)).filter(
+    (el) => !el.closest('.plug-backdrop, #vp-inline-day-bar, .year-col')
+  );
+
+  // Also check cards inside #archive-view / .archive-list if custom class names are used
+  const archiveHost = document.querySelector(
+    '#archive-view, #view-archive, .archive-view, .archive-list, [data-view-panel="archive"]'
+  );
+  if (archiveHost && archiveHost.offsetParent !== null) {
+    archiveHost.querySelectorAll('article, .card, .item, li').forEach((node) => {
+      if (!candidates.includes(node)) candidates.push(node);
+    });
+  }
+
+  let harvested = 0;
+  candidates.forEach((node, idx) => {
+    const iso = extractExplicitIsoFromNode(node);
+    if (!iso) return;
+    const parsed = extractCleanCardData(node);
+    if (!parsed.body || parsed.body.length < 3) return;
+    const looksTruncated = parsed.body.endsWith('…') || parsed.body.endsWith('...');
+    upsertEntryIntoStore({
+      isoDate: iso,
+      orderHint: idx,
+      title: parsed.title,
+      text: parsed.body,
+      tags: parsed.tags,
+      pills: parsed.pills,
+      timeStamp: parsed.timeStamp,
+      source: 'archive-dom',
+      isExcerptOnly: looksTruncated,
+    });
+    harvested++;
+  });
+  return harvested;
+}
+
+function captureVisibleDOM(strictExpectedMmdd = null) {
+  const displayedMmdd = detectDisplayedUIMMDD();
+
+  // If scanning a specific date, NEVER capture unless the UI actually moved to that MM-DD
+  if (strictExpectedMmdd && displayedMmdd !== strictExpectedMmdd) {
+    return 0;
+  }
+
+  let captured = 0;
   const seenYears = new Set();
   findAllMainColumns().forEach((col) => {
     const yr = getColumnYear(col);
     if (!yr || seenYears.has(yr)) return;
     seenYears.add(yr);
 
-    const items = extractEntriesFromColumn(col, fallbackMmdd);
-    if (!items.length) return;
-
-    const byIso = new Map();
-    items.forEach((it) => {
-      if (!byIso.has(it.isoDate)) byIso.set(it.isoDate, []);
-      byIso.get(it.isoDate).push(it);
-    });
-
-    byIso.forEach((list, isoDate) => {
-      Array.from(vpSessionCache.keys()).forEach((k) => {
-        if (k.startsWith(`${isoDate}|`)) vpSessionCache.delete(k);
-      });
-      list.forEach((item, idx) => {
-        vpSessionCache.set(`${isoDate}|${idx}`, {
-          ...item,
-          entryIndex: idx + 1,
-          totalInYear: list.length,
-        });
-      });
+    const items = extractEntriesFromColumn(col, displayedMmdd);
+    items.forEach((item) => {
+      // Double-check strictExpectedMmdd so pinned or stale columns can NEVER pollute another date
+      if (strictExpectedMmdd && item.mmdd !== strictExpectedMmdd) return;
+      upsertEntryIntoStore(item);
+      captured++;
     });
   });
+
+  captured += captureVisibleArchiveDOM();
+  return captured;
 }
 
-function normalizeYearEntryList(yearVal) {
-  if (!yearVal) return [];
-  if (Array.isArray(yearVal)) return yearVal;
-  if (Array.isArray(yearVal.entries)) return yearVal.entries;
-  if (typeof yearVal === 'object' && (yearVal.body || yearVal.text || yearVal.content)) return [yearVal];
-  if (typeof yearVal === 'string') return [{ body: yearVal }];
-  return [];
+/* --- DEEP RECURSIVE STORAGE & INDEXEDDB SCANNER (FINDS ALL UNENCRYPTED CACHED ENTRIES) --- */
+
+function isEncryptedEnvelope(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  return Boolean(
+    obj.encrypted === true ||
+      (typeof obj.ct === 'string' && typeof obj.iv === 'string') ||
+      (typeof obj.ciphertext === 'string' && typeof obj.iv === 'string') ||
+      (typeof obj.cipher === 'string' && typeof obj.salt === 'string')
+  );
 }
 
-function collectAllKnownEntries() {
-  captureVisibleDOM();
+function extractEntriesFromArbitraryObject(root, sink, depth = 0, ctxMmdd = '', ctxYear = '') {
+  if (!root || typeof root !== 'object' || depth > 6 || isEncryptedEnvelope(root)) return;
 
-  const metaMap = loadEntryMetaMap();
-  const results = [];
-  const seen = new Set();
-
-  const pushEntry = (isoDate, year, mmdd, idx, totalInYear, raw) => {
-    const text = String(raw.body || raw.text || raw.content || '').trim();
-    const rawTitle = String(raw.title || '').trim();
-    if (!text && !rawTitle) return;
-
-    const norm = normalizeForDedupe(text || rawTitle);
-    const dedupeKey = `${isoDate}|${norm}`;
-    if (!norm || seen.has(dedupeKey)) return;
-    seen.add(dedupeKey);
-
-    const entryIndex = idx + 1;
-    const metaKey = `${isoDate}|${entryIndex}`;
-    const customMeta = metaMap[metaKey] || {};
-    const title = customMeta.title || rawTitle;
-    const description = customMeta.description || '';
-
-    results.push({
-      isoDate,
-      year: String(year),
-      mmdd,
-      entryIndex,
-      totalInYear,
-      title,
-      description,
-      text: text || title,
-      excerpt: makeExcerpt(text || title, 180),
-      words: countWords(text),
-      tags: extractTags(`${title} ${description} ${text}`, raw.tags || []),
-      pills: Array.isArray(raw.pills) ? raw.pills : [],
-      timeStamp: raw.timeStamp || raw.createdAt || '',
-    });
-  };
-
-  vpSessionCache.forEach((item) => {
-    pushEntry(item.isoDate, item.year, item.mmdd, item.entryIndex - 1, item.totalInYear, item);
-  });
-
-  const ingestDayObject = (mmdd, dayObj) => {
-    if (!dayObj || typeof dayObj !== 'object' || dayObj.encrypted || dayObj.ct || !/^\d{2}-\d{2}$/.test(mmdd)) return;
-    const yearsMap = dayObj.years && typeof dayObj.years === 'object' ? dayObj.years : dayObj;
-    Object.keys(yearsMap).forEach((yr) => {
-      if (!/^\d{4}$/.test(yr)) return;
-      const list = normalizeYearEntryList(yearsMap[yr]);
-      list.forEach((item, idx) => {
-        if (item && !item.encrypted && !item.ct) {
-          pushEntry(`${yr}-${mmdd}`, yr, mmdd, idx, list.length, item);
+  if (Array.isArray(root)) {
+    root.forEach((item, idx) => {
+      if (typeof item === 'string' && ctxYear && ctxMmdd) {
+        sink({ isoDate: `${ctxYear}-${ctxMmdd}`, text: item, orderHint: idx, source: 'storage' });
+      } else if (item && typeof item === 'object' && !isEncryptedEnvelope(item)) {
+        const text = item.body ?? item.text ?? item.content ?? item.markdown ?? '';
+        const explicitDate =
+          (typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date) && item.date) ||
+          (typeof item.isoDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.isoDate) && item.isoDate) ||
+          (ctxYear && ctxMmdd ? `${ctxYear}-${ctxMmdd}` : '');
+        if (typeof text === 'string' && text.trim() && explicitDate) {
+          sink({
+            isoDate: explicitDate,
+            orderHint: idx,
+            title: String(item.title || '').trim(),
+            text: text.trim(),
+            tags: extractTags(text, item.tags || []),
+            timeStamp: item.createdAt || item.updatedAt || item.timestamp || '',
+            source: 'storage',
+          });
+        } else {
+          extractEntriesFromArbitraryObject(item, sink, depth + 1, ctxMmdd, ctxYear);
         }
-      });
+      }
     });
-  };
+    return;
+  }
 
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
+  // Check if this object itself is a single diary entry
+  const directText = root.body ?? root.text ?? root.content ?? root.markdown;
+  const directDate =
+    (typeof root.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(root.date) && root.date) ||
+    (typeof root.isoDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(root.isoDate) && root.isoDate) ||
+    (ctxYear && ctxMmdd ? `${ctxYear}-${ctxMmdd}` : '');
+
+  if (typeof directText === 'string' && directText.trim() && directDate) {
+    sink({
+      isoDate: directDate,
+      orderHint: 0,
+      title: String(root.title || '').trim(),
+      text: directText.trim(),
+      tags: extractTags(directText, root.tags || []),
+      timeStamp: root.createdAt || root.updatedAt || root.timestamp || '',
+      source: 'storage',
+    });
+  }
+
+  // Walk child keys for MM-DD, YYYY-MM-DD, YYYY, days, years, entries
+  Object.keys(root).forEach((k) => {
+    const val = root[k];
+    if (!val || typeof val !== 'object') {
+      if (typeof val === 'string' && /^\d{4}$/.test(k) && ctxMmdd) {
+        sink({ isoDate: `${k}-${ctxMmdd}`, text: val, orderHint: 0, source: 'storage' });
+      }
+      return;
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(k)) {
+      extractEntriesFromArbitraryObject(val, sink, depth + 1, k.slice(5), k.slice(0, 4));
+    } else if (/^\d{2}-\d{2}$/.test(k)) {
+      extractEntriesFromArbitraryObject(val, sink, depth + 1, k, ctxYear);
+    } else if (/^\d{4}$/.test(k)) {
+      extractEntriesFromArbitraryObject(val, sink, depth + 1, ctxMmdd, k);
+    } else if (k === 'days' || k === 'years' || k === 'entries' || k === 'items' || k === 'data' || k === 'cache') {
+      extractEntriesFromArbitraryObject(val, sink, depth + 1, ctxMmdd, ctxYear);
+    }
+  });
+}
+
+function scanWebStorage(storageObj) {
+  if (!storageObj) return;
+  for (let i = 0; i < storageObj.length; i++) {
+    const k = storageObj.key(i);
     if (!k || VP_SKIP_KEYS.has(k)) continue;
-    const rawStr = localStorage.getItem(k);
-    if (!rawStr || rawStr[0] !== '{') continue;
+    const rawStr = storageObj.getItem(k);
+    if (!rawStr || (rawStr[0] !== '{' && rawStr[0] !== '[')) continue;
     try {
       const parsed = JSON.parse(rawStr);
-      if (!parsed || typeof parsed !== 'object' || parsed.encrypted || parsed.ct) continue;
-      if (/^\d{2}-\d{2}$/.test(k)) {
-        ingestDayObject(k, parsed);
-      } else if (parsed.days && typeof parsed.days === 'object') {
-        Object.keys(parsed.days).forEach((d) => ingestDayObject(d, parsed.days[d]));
-      } else {
-        Object.keys(parsed).forEach((subKey) => {
-          if (/^\d{2}-\d{2}$/.test(subKey)) ingestDayObject(subKey, parsed[subKey]);
-          if (/^\d{4}-\d{2}-\d{2}$/.test(subKey)) {
-            const list = normalizeYearEntryList(parsed[subKey]);
-            list.forEach((item, idx) => {
-              if (item && !item.encrypted && !item.ct) {
-                pushEntry(subKey, subKey.slice(0, 4), subKey.slice(5), idx, list.length, item);
-              }
-            });
-          }
-        });
-      }
+      const initMmdd = /^\d{2}-\d{2}$/.test(k) ? k : /^\d{4}-\d{2}-\d{2}$/.test(k) ? k.slice(5) : '';
+      const initYear = /^\d{4}-\d{2}-\d{2}$/.test(k) ? k.slice(0, 4) : '';
+      extractEntriesFromArbitraryObject(parsed, upsertEntryIntoStore, 0, initMmdd, initYear);
     } catch {
       // ignore non-JSON
     }
   }
+}
 
-  return results;
+async function scanIndexedDBReadOnly() {
+  if (vpIdbScanned || typeof indexedDB === 'undefined' || typeof indexedDB.databases !== 'function') return;
+  vpIdbScanned = true;
+  const collected = [];
+  try {
+    const dbs = await indexedDB.databases();
+    for (const info of dbs || []) {
+      if (!info?.name) continue;
+      await new Promise((resolve) => {
+        let req;
+        try {
+          req = indexedDB.open(info.name);
+        } catch {
+          return resolve();
+        }
+        req.onerror = () => resolve();
+        req.onsuccess = () => {
+          const db = req.result;
+          const stores = Array.from(db.objectStoreNames || []);
+          if (!stores.length) {
+            db.close();
+            return resolve();
+          }
+          let pending = stores.length;
+          const done = () => {
+            pending--;
+            if (pending <= 0) {
+              try { db.close(); } catch { /* noop */ }
+              resolve();
+            }
+          };
+          stores.forEach((storeName) => {
+            try {
+              const tx = db.transaction(storeName, 'readonly');
+              const st = tx.objectStore(storeName);
+              const allReq = st.getAll();
+              allReq.onerror = done;
+              allReq.onsuccess = () => {
+                (allReq.result || []).forEach((rec) => {
+                  extractEntriesFromArbitraryObject(rec, (e) => collected.push(e), 0, '', '');
+                });
+                done();
+              };
+            } catch {
+              done();
+            }
+          });
+        };
+      });
+    }
+  } catch {
+    // ignore IndexedDB permission errors
+  }
+  vpIdbEntriesCache = collected;
+  vpIdbEntriesCache.forEach(upsertEntryIntoStore);
+}
+
+function ingestOptionalAppBridge() {
+  try {
+    const candidates = [
+      typeof window.__PD_BRIDGE__?.getAllEntries === 'function' ? window.__PD_BRIDGE__.getAllEntries() : null,
+      typeof window.__PD_BRIDGE__?.getPlainEntries === 'function' ? window.__PD_BRIDGE__.getPlainEntries() : null,
+      typeof window.__PD_PRINT_ENTRIES__ === 'function' ? window.__PD_PRINT_ENTRIES__() : window.__PD_PRINT_ENTRIES__,
+    ];
+    candidates.forEach((data) => {
+      if (data) extractEntriesFromArbitraryObject(data, upsertEntryIntoStore, 0, '', '');
+    });
+  } catch {
+    // ignore bridge errors
+  }
+}
+
+function collectAllKnownEntries() {
+  ingestOptionalAppBridge();
+  captureVisibleDOM();
+  scanWebStorage(localStorage);
+  scanWebStorage(sessionStorage);
+  vpIdbEntriesCache.forEach(upsertEntryIntoStore);
+
+  const metaMap = loadEntryMetaMap();
+  const out = [];
+
+  Array.from(vpEntryStore.keys())
+    .sort()
+    .forEach((isoDate) => {
+      const dayList = Array.from(vpEntryStore.get(isoDate).values()).sort(
+        (a, b) => (a.orderHint ?? 0) - (b.orderHint ?? 0)
+      );
+      dayList.forEach((item, idx) => {
+        const entryIndex = idx + 1;
+        const customMeta = metaMap[`${isoDate}|${entryIndex}`] || {};
+        const title = customMeta.title || item.title || '';
+        const description = customMeta.description || '';
+        out.push({
+          ...item,
+          entryIndex,
+          totalInYear: dayList.length,
+          title,
+          description,
+          excerpt: makeExcerpt(item.text || title, 180),
+          tags: extractTags(`${title} ${description} ${item.text}`, item.tags || []),
+        });
+      });
+    });
+
+  return out;
 }
 
 /* ==========================================================================
-   4. INTEGRATED MAIN-PAGE DAY VIEW (LIVE DOM FOCUS MODE — ZERO MISSING ENTRIES)
+   4. INTEGRATED MAIN-PAGE DAY VIEW (LIVE DOM FOCUS MODE)
    ========================================================================== */
 
 function clearInlineDayViewStyles() {
@@ -626,7 +900,6 @@ function toggleIntegratedDayView(forceState = null, preferredYear = null) {
 
 function findGridHostForColumns(cols) {
   if (!cols.length) return null;
-  // Find common parent container holding the year columns
   const parent = cols[0].parentElement;
   if (parent && parent !== document.body) return parent;
   return document.querySelector('#columns-container, #reader-grid, .columns-grid, .side-by-side, main') || parent;
@@ -643,7 +916,6 @@ function syncIntegratedDayView() {
 
   const allCols = findAllMainColumns();
   if (!allCols.length) {
-    // User may be on Archive, Heatmap, or Lock Screen — remove inline bar cleanly until reader is visible
     const strayBar = document.getElementById('vp-inline-day-bar');
     if (strayBar) strayBar.remove();
     return;
@@ -654,37 +926,24 @@ function syncIntegratedDayView() {
     document.body.classList.add('vp-day-mode');
     document.body.classList.toggle('vp-clean-read', vpState.cleanRead);
 
-    // Deduplicate columns by year (so pinned duplicate columns like two 2026 columns collapse to one)
     const uniqueEntries = [];
     const seenYears = new Set();
     allCols.forEach((col, idx) => {
       const yr = getColumnYear(col);
-      if (!yr) {
-        col.classList.add('vp-hidden-col');
-        col.classList.remove('vp-focused-col');
-        return;
-      }
-      const hasContent = columnHasRealEntry(col);
-      if (seenYears.has(yr)) {
-        // Hide duplicate pinned column of the same year
+      if (!yr || seenYears.has(yr)) {
         col.classList.add('vp-hidden-col');
         col.classList.remove('vp-focused-col');
         return;
       }
       seenYears.add(yr);
-      uniqueEntries.push({ yr, col, hasContent, idx });
+      uniqueEntries.push({ yr, col, hasContent: columnHasRealEntry(col), idx });
     });
 
     if (!uniqueEntries.length) return;
 
-    // Pick which year column to focus:
-    // 1) User's selected year if present AND (has content OR no other year has content)
-    // 2) Otherwise the first year that actually has an entry on this date
-    // 3) Otherwise the first available year column
     let chosen = uniqueEntries.find((u) => u.yr === vpState.selectedYear);
     if (!chosen || (!chosen.hasContent && uniqueEntries.some((u) => u.hasContent))) {
-      const firstPopulated = uniqueEntries.find((u) => u.hasContent);
-      chosen = firstPopulated || uniqueEntries[0];
+      chosen = uniqueEntries.find((u) => u.hasContent) || uniqueEntries[0];
     }
     vpState.selectedYear = chosen.yr;
 
@@ -712,11 +971,8 @@ function syncIntegratedDayView() {
         'vp-theme-sepia',
         'vp-theme-paper'
       );
-      if (u.col === chosen.col) {
-        u.col.classList.add(...focusClasses);
-      } else {
-        u.col.classList.add('vp-hidden-col');
-      }
+      if (u.col === chosen.col) u.col.classList.add(...focusClasses);
+      else u.col.classList.add('vp-hidden-col');
     });
 
     renderInlineDayToolbar(host, uniqueEntries, chosen);
@@ -748,14 +1004,14 @@ function renderInlineDayToolbar(gridHost, uniqueEntries, chosen) {
     <div class="vp-bar-row">
       <div class="vp-bar-left">
         <span class="vp-bar-date">${esc(formatLongDate(activeIso))}</span>
-        <span class="vp-bar-meta">${liveItems.length ? `${wordCount.toLocaleString()} words` : 'Empty day'}</span>
+        <span class="vp-bar-meta">${liveItems.length ? `${liveItems.length > 1 ? `${liveItems.length} entries · ` : ''}${wordCount.toLocaleString()} words` : 'Empty day'}</span>
       </div>
 
       <div class="vp-bar-years" role="tablist" aria-label="Switch Year">
         ${uniqueEntries
           .map(
             (u) => `
-          <button type="button" class="vp-yr-pill ${u.yr === chosen.yr ? 'is-active' : ''} ${u.hasContent ? 'has-entry' : 'is-empty'}" data-vp-yr="${esc(u.yr)}" title="${u.hasContent ? `${u.yr} has an entry` : `${u.yr} is empty`}">
+          <button type="button" class="vp-yr-pill ${u.yr === chosen.yr ? 'is-active' : ''} ${u.hasContent ? 'has-entry' : 'is-empty'}" data-vp-yr="${esc(u.yr)}">
             ${esc(u.yr)}${u.hasContent ? '<i class="vp-yr-dot"></i>' : ''}
           </button>`
           )
@@ -763,10 +1019,10 @@ function renderInlineDayToolbar(gridHost, uniqueEntries, chosen) {
       </div>
 
       <div class="vp-bar-right">
-        <button type="button" class="plug-btn plug-btn-sm ${vpState.aaOpen ? 'plug-btn-primary' : ''}" id="vp-bar-aa" title="Reading appearance">Aa</button>
-        <button type="button" class="plug-btn plug-btn-sm ${vpState.pinOpen ? 'plug-btn-primary' : ''}" id="vp-bar-pin" title="Pin this day to your Index">${dayPins.length ? `Pinned (${dayPins.length})` : '+ Pin'}</button>
-        <button type="button" class="plug-btn plug-btn-sm" id="vp-bar-print" title="Print this day">Print Day</button>
-        <button type="button" class="plug-btn plug-btn-sm" id="vp-bar-exit" title="Return to Side-by-Side view">Side-by-Side</button>
+        <button type="button" class="plug-btn plug-btn-sm ${vpState.aaOpen ? 'plug-btn-primary' : ''}" id="vp-bar-aa">Aa</button>
+        <button type="button" class="plug-btn plug-btn-sm ${vpState.pinOpen ? 'plug-btn-primary' : ''}" id="vp-bar-pin">${dayPins.length ? `Pinned (${dayPins.length})` : '+ Pin'}</button>
+        <button type="button" class="plug-btn plug-btn-sm" id="vp-bar-print">Print Day</button>
+        <button type="button" class="plug-btn plug-btn-sm" id="vp-bar-exit">Side-by-Side</button>
       </div>
     </div>
 
@@ -920,7 +1176,7 @@ function renderInlineDayToolbar(gridHost, uniqueEntries, chosen) {
 }
 
 /* ==========================================================================
-   5. RANGE-SAFE HIGHLIGHT RENDERER & iOS-SAFE PRINT ENGINE
+   5. PRINT-SAFE HIGHLIGHT RENDERER & OVERLAP-FREE IFRAME PRINT ENGINE
    ========================================================================== */
 
 function formatEntryProseWithHighlights(rawText, dayHighlights = []) {
@@ -1003,7 +1259,9 @@ function downloadPrintableHtml(html, filename) {
 
 function sendHtmlToIframePrinter(html, fallbackFilename) {
   try {
+    document.querySelectorAll('iframe.vp-print-frame').forEach((f) => f.remove());
     const iframe = document.createElement('iframe');
+    iframe.className = 'vp-print-frame';
     Object.assign(iframe.style, {
       position: 'fixed',
       left: '-9999px',
@@ -1022,25 +1280,32 @@ function sendHtmlToIframePrinter(html, fallbackFilename) {
     doc.close();
 
     let printed = false;
+    const cleanup = () => {
+      try { iframe.remove(); } catch { /* noop */ }
+    };
+    win.addEventListener('afterprint', () => setTimeout(cleanup, 400), { once: true });
+
     const runPrint = () => {
       if (printed) return;
       printed = true;
       try {
         win.focus();
         win.print();
-        setTimeout(() => iframe.remove(), 3500);
+        // Keep iframe alive long enough for slow print dialogs, then clean up
+        setTimeout(cleanup, 60000);
       } catch {
-        iframe.remove();
+        cleanup();
         downloadPrintableHtml(html, fallbackFilename);
       }
     };
     iframe.addEventListener('load', () => setTimeout(runPrint, 120), { once: true });
-    setTimeout(runPrint, 380);
+    setTimeout(runPrint, 420);
   } catch {
     downloadPrintableHtml(html, fallbackFilename);
   }
 }
 
+// Overlap-free, block/table print CSS (NO flex rows, NO break-inside: avoid on long entries)
 function buildRangePrintDocument(daysGrouped, opts) {
   const fontCss = getFontStack(opts.font);
   const allHighlights = loadHighlights();
@@ -1051,19 +1316,22 @@ function buildRangePrintDocument(daysGrouped, opts) {
     opts.includeToc && daysGrouped.length > 1
       ? `<section class="toc">
           <h2>Table of Contents</h2>
-          <ol>
-            ${daysGrouped
-              .map((g) => {
-                const firstTitle = g.entries.find((e) => e.title)?.title || '';
-                const words = g.entries.reduce((s, e) => s + e.words, 0);
-                return `<li>
-                  <span class="toc-date">${esc(g.isoDate)}</span>
-                  <span class="toc-title">${esc(firstTitle || formatShortDate(g.isoDate))}</span>
-                  <span class="toc-meta">${g.entries.length > 1 ? `${g.entries.length} entries · ` : ''}${words.toLocaleString()} words</span>
-                </li>`;
-              })
-              .join('')}
-          </ol>
+          <table class="toc-table">
+            <tbody>
+              ${daysGrouped
+                .map((g, i) => {
+                  const firstTitle = g.entries.find((e) => e.title)?.title || '';
+                  const words = g.entries.reduce((s, e) => s + e.words, 0);
+                  return `<tr>
+                    <td class="toc-num">${i + 1}.</td>
+                    <td class="toc-date">${esc(g.isoDate)}</td>
+                    <td class="toc-title">${esc(firstTitle || formatShortDate(g.isoDate))}</td>
+                    <td class="toc-meta">${g.entries.length > 1 ? `${g.entries.length} entries · ` : ''}${words.toLocaleString()} words</td>
+                  </tr>`;
+                })
+                .join('')}
+            </tbody>
+          </table>
         </section>`
       : '';
 
@@ -1072,11 +1340,13 @@ function buildRangePrintDocument(daysGrouped, opts) {
       const dayHl = opts.includeHighlights ? allHighlights.filter((h) => h.isoDate === g.isoDate) : [];
       const breakCls = opts.pageBreakPerDay && dayIdx > 0 ? ' day-break' : '';
       return `
-        <article class="day-section${breakCls}">
-          <header class="day-head">
-            <h2>${esc(formatLongDate(g.isoDate))}</h2>
-            <span class="day-iso">${esc(g.isoDate)}</span>
-          </header>
+        <section class="day-section${breakCls}">
+          <table class="day-head-table">
+            <tr>
+              <td class="day-head-left"><h2>${esc(formatLongDate(g.isoDate))}</h2></td>
+              <td class="day-head-right">${esc(g.isoDate)}</td>
+            </tr>
+          </table>
           ${g.entries
             .map(
               (e) => `
@@ -1095,7 +1365,7 @@ function buildRangePrintDocument(daysGrouped, opts) {
             </div>`
             )
             .join('')}
-        </article>`;
+        </section>`;
     })
     .join('');
 
@@ -1107,27 +1377,41 @@ function buildRangePrintDocument(daysGrouped, opts) {
 <style>
   @page { margin: 18mm 16mm; }
   * { box-sizing: border-box; }
-  body { font-family: ${fontCss}; color: #16181d; background: #ffffff; margin: 0; padding: 12px 18px; line-height: 1.65; font-size: 11.5pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .doc-header { border-bottom: 2px solid #16181d; padding-bottom: 10px; margin-bottom: 20px; }
-  .doc-header h1 { margin: 0 0 4px; font-size: 19pt; letter-spacing: -0.01em; }
+  body {
+    font-family: ${fontCss};
+    color: #16181d;
+    background: #ffffff;
+    margin: 0;
+    padding: 8px 14px;
+    line-height: 1.65;
+    font-size: 11.2pt;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  .doc-header { display: block; border-bottom: 2px solid #16181d; padding-bottom: 10px; margin-bottom: 20px; }
+  .doc-header h1 { margin: 0 0 4px; font-size: 18pt; line-height: 1.2; }
   .doc-meta { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 9pt; color: #525866; }
-  .toc { margin: 0 0 24px; padding: 12px 16px; border: 1px solid #d1d5db; border-radius: 6px; page-break-after: always; }
+  .toc { display: block; margin: 0 0 24px; padding: 12px 14px; border: 1px solid #d1d5db; page-break-after: always; break-after: page; }
   .toc h2 { margin: 0 0 10px; font-size: 13pt; }
-  .toc ol { margin: 0; padding-left: 18px; }
-  .toc li { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; border-bottom: 1px dotted #e5e7eb; font-size: 10pt; }
-  .toc-date { font-family: monospace; font-weight: 700; min-width: 84px; }
-  .toc-title { flex: 1; }
-  .toc-meta { font-family: sans-serif; font-size: 8.5pt; color: #6b7280; }
-  .day-section { margin-bottom: 26px; }
-  .day-break { page-break-before: always; }
-  .day-head { display: flex; justify-content: space-between; align-items: baseline; border-bottom: 1px solid #9ca3af; padding-bottom: 4px; margin-bottom: 12px; page-break-after: avoid; }
-  .day-head h2 { margin: 0; font-size: 13.5pt; }
-  .day-iso { font-family: monospace; font-size: 9.5pt; color: #4b5563; }
-  .entry-block { margin-bottom: 16px; break-inside: avoid-page; }
-  .entry-num { font-family: sans-serif; font-size: 8.5pt; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
-  .entry-title { margin: 0 0 4px; font-size: 12pt; }
-  .entry-desc { margin: 0 0 8px; font-style: italic; color: #4b5563; font-size: 10pt; }
-  .entry-prose p { margin: 0 0 10px; text-align: justify; }
+  .toc-table { width: 100%; border-collapse: collapse; font-size: 9.8pt; }
+  .toc-table td { padding: 4px 6px; border-bottom: 1px dotted #d1d5db; vertical-align: top; }
+  .toc-num { width: 28px; color: #6b7280; font-family: sans-serif; }
+  .toc-date { width: 92px; font-family: monospace; font-weight: 700; white-space: nowrap; }
+  .toc-title { }
+  .toc-meta { width: 140px; text-align: right; font-family: sans-serif; font-size: 8.5pt; color: #6b7280; white-space: nowrap; }
+  .day-section { display: block; position: relative; clear: both; margin: 0 0 26px; }
+  .day-break { page-break-before: always; break-before: page; }
+  .day-head-table { width: 100%; border-collapse: collapse; border-bottom: 1px solid #9ca3af; margin-bottom: 12px; page-break-after: avoid; break-after: avoid; }
+  .day-head-left { padding: 0 0 4px; vertical-align: baseline; }
+  .day-head-left h2 { margin: 0; font-size: 13.5pt; line-height: 1.25; }
+  .day-head-right { padding: 0 0 4px; text-align: right; font-family: monospace; font-size: 9.5pt; color: #4b5563; white-space: nowrap; vertical-align: baseline; }
+  .entry-block { display: block; position: relative; clear: both; margin: 0 0 18px; padding: 0 0 12px; border-bottom: 1px dotted #e2e8f0; }
+  .entry-block:last-child { border-bottom: none; padding-bottom: 0; }
+  .entry-num { font-family: sans-serif; font-size: 8.5pt; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; page-break-after: avoid; break-after: avoid; }
+  .entry-title { margin: 0 0 4px; font-size: 12pt; page-break-after: avoid; break-after: avoid; }
+  .entry-desc { margin: 0 0 8px; font-style: italic; color: #4b5563; font-size: 10pt; page-break-after: avoid; break-after: avoid; }
+  .entry-prose { display: block; overflow-wrap: break-word; word-wrap: break-word; }
+  .entry-prose p { margin: 0 0 10px; text-align: left; orphans: 3; widows: 3; }
   .entry-foot { font-family: sans-serif; font-size: 8.5pt; color: #6b7280; margin-top: 6px; }
 </style>
 </head>
@@ -1227,7 +1511,7 @@ function buildIndicesPrintDocument(payload, opts) {
         ${payload.highlights
           .map(
             (h) => `<div class="hl-card" style="border-left-color:${colorMap[h.color || 'gold'] || colorMap.gold};">
-              <div class="hl-head"><span class="mono">${esc(h.isoDate)}</span>${h.title ? `<strong>${esc(h.title)}</strong>` : ''}</div>
+              <div class="hl-head"><span class="mono">${esc(h.isoDate)}</span>${h.title ? ` <strong>${esc(h.title)}</strong>` : ''}</div>
               ${h.description ? `<p class="hl-desc">${esc(h.description)}</p>` : ''}
               <blockquote>“${esc(h.quote)}”</blockquote>
               ${h.tags.length ? `<div class="tag-line">${h.tags.map((t) => `#${esc(t)}`).join(' ')}</div>` : ''}
@@ -1265,16 +1549,19 @@ function buildIndicesPrintDocument(payload, opts) {
   if (opts.includeTags && payload.tags.length) {
     bodySections += `<section class="idx-sec">
       <h2>#Tag Cross-Reference Index (${payload.tags.length})</h2>
-      <div class="tag-grid">
-        ${payload.tags
-          .map(
-            ([tag, dates]) => `<div class="tag-card">
-              <strong>#${esc(tag)}</strong> <span class="muted">(${dates.length})</span>
-              <div class="tag-dates">${dates.map((d) => esc(d)).join(' · ')}</div>
-            </div>`
-          )
-          .join('')}
-      </div>
+      <table>
+        <thead><tr><th style="width:28%;">Tag</th><th>Dates</th></tr></thead>
+        <tbody>
+          ${payload.tags
+            .map(
+              ([tag, dates]) => `<tr>
+                <td><strong>#${esc(tag)}</strong> <span class="muted">(${dates.length})</span></td>
+                <td class="mono">${dates.map((d) => esc(d)).join(' · ')}</td>
+              </tr>`
+            )
+            .join('')}
+        </tbody>
+      </table>
     </section>`;
   }
 
@@ -1286,25 +1573,22 @@ function buildIndicesPrintDocument(payload, opts) {
 <style>
   @page { margin: 16mm 14mm; }
   * { box-sizing: border-box; }
-  body { font-family: ${fontCss}; color: #16181d; background: #ffffff; margin: 0; padding: 10px 16px; font-size: 10.5pt; line-height: 1.5; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { font-family: ${fontCss}; color: #16181d; background: #ffffff; margin: 0; padding: 8px 14px; font-size: 10.5pt; line-height: 1.5; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   header { border-bottom: 2px solid #16181d; padding-bottom: 8px; margin-bottom: 18px; }
   h1 { margin: 0 0 3px; font-size: 18pt; }
-  h2 { font-size: 13pt; margin: 18px 0 8px; border-bottom: 1px solid #9ca3af; padding-bottom: 3px; page-break-after: avoid; }
+  h2 { font-size: 13pt; margin: 18px 0 8px; border-bottom: 1px solid #9ca3af; padding-bottom: 3px; page-break-after: avoid; break-after: avoid; }
   .meta { font-family: sans-serif; font-size: 9pt; color: #525866; }
-  .mono { font-family: monospace; font-size: 9.5pt; }
+  .mono { font-family: monospace; font-size: 9.2pt; }
   .muted { color: #525866; font-size: 9.2pt; }
   table { width: 100%; border-collapse: collapse; margin-bottom: 14px; }
-  th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th, td { border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; vertical-align: top; overflow-wrap: break-word; }
   th { background: #f3f4f6; font-family: sans-serif; font-size: 9pt; font-weight: 700; }
   tr { break-inside: avoid; }
-  .hl-card { border: 1px solid #e5e7eb; border-left: 4px solid #d99b1e; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; break-inside: avoid; }
-  .hl-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 3px; }
+  .hl-card { display: block; border: 1px solid #e5e7eb; border-left: 4px solid #d99b1e; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; break-inside: avoid; }
+  .hl-head { margin-bottom: 3px; }
   .hl-desc { margin: 0 0 4px; color: #4b5563; font-size: 9.5pt; }
   blockquote { margin: 2px 0 0; padding: 0; font-style: italic; }
   .tag-line { font-family: sans-serif; font-size: 8.5pt; color: #4b5563; margin-top: 3px; }
-  .tag-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
-  .tag-card { border: 1px solid #d1d5db; border-radius: 4px; padding: 7px 9px; break-inside: avoid; }
-  .tag-dates { font-family: monospace; font-size: 8.5pt; color: #4b5563; margin-top: 3px; }
 </style>
 </head>
 <body>
@@ -1318,7 +1602,7 @@ function buildIndicesPrintDocument(payload, opts) {
 }
 
 /* ==========================================================================
-   6. NAVIGATION HELPERS FOR RANGE SCANNER & JUMP-TO-DAY
+   6. SAFE NAVIGATION & ARCHIVE / RANGE COLLECTORS (ZERO DATE OVERWRITING)
    ========================================================================== */
 
 function setSelectOptionSmart(sel, numVal) {
@@ -1333,6 +1617,12 @@ function setSelectOptionSmart(sel, numVal) {
   return true;
 }
 
+function findNavButtonByText(regex) {
+  const btns = Array.from(document.querySelectorAll('header button, nav button, .tabs button, .nav-tabs button, [role="tab"]'));
+  return btns.find((b) => !b.closest('.plug-backdrop, #plug-trigger-dock') && regex.test((b.textContent || '').trim())) || null;
+}
+
+// Returns true ONLY if an actual UI date control was found and triggered (never fakes via hash alone)
 function navigateMainPageToMMDD(mmdd, fullIsoHint = '') {
   const [mNum, dNum] = mmdd.split('-').map(Number);
 
@@ -1344,10 +1634,12 @@ function navigateMainPageToMMDD(mmdd, fullIsoHint = '') {
     return true;
   }
 
-  const monthSel = document.querySelector('#month-select, [data-role="month-select"]');
-  const daySel = document.querySelector('#day-select, [data-role="day-select"]');
+  const monthSel = document.querySelector('#month-select, [data-role="month-select"], select[name="month"]');
+  const daySel = document.querySelector('#day-select, [data-role="day-select"], select[name="day"]');
   if (monthSel && daySel) {
-    if (setSelectOptionSmart(monthSel, mNum) || setSelectOptionSmart(daySel, dNum)) return true;
+    const okM = setSelectOptionSmart(monthSel, mNum);
+    const okD = setSelectOptionSmart(daySel, dNum);
+    if (okM || okD) return true;
   }
 
   const dateInput = document.querySelector('#date-picker, #current-date-input, input[type="date"]');
@@ -1358,19 +1650,17 @@ function navigateMainPageToMMDD(mmdd, fullIsoHint = '') {
     return true;
   }
 
-  location.hash = `#${mmdd}`;
-  window.dispatchEvent(new HashChangeEvent('hashchange'));
-  return true;
+  return false;
 }
 
 function getVisibleDOMSignature() {
   const cols = findAllMainColumns();
-  return `${detectCurrentDiaryMMDD()}|${cols
-    .map((c) => `${getColumnYear(c) || ''}:${(c.textContent || '').slice(0, 80)}`)
+  return `${detectDisplayedUIMMDD() || 'none'}|${cols
+    .map((c) => `${getColumnYear(c) || ''}:${(c.textContent || '').slice(0, 90)}`)
     .join('||')}`;
 }
 
-async function waitForMainRender(targetMmdd, prevSig, maxWaitMs = 1100) {
+async function waitForMainDateVerified(targetMmdd, prevSig, maxWaitMs = 1400) {
   const start = Date.now();
   let lastSig = prevSig;
   let changedAt = 0;
@@ -1378,15 +1668,132 @@ async function waitForMainRender(targetMmdd, prevSig, maxWaitMs = 1100) {
   while (Date.now() - start < maxWaitMs) {
     await sleep(90);
     const curSig = getVisibleDOMSignature();
-    const curMmdd = detectCurrentDiaryMMDD();
+    const curMmdd = detectDisplayedUIMMDD();
+
     if (curSig !== lastSig) {
       lastSig = curSig;
       changedAt = Date.now();
     }
-    if (curMmdd === targetMmdd && changedAt > 0 && Date.now() - changedAt >= 140) break;
-    if (curMmdd === targetMmdd && Date.now() - start >= 420 && changedAt === 0) break;
+    if (curMmdd === targetMmdd && changedAt > 0 && Date.now() - changedAt >= 160) {
+      return true;
+    }
+    if (curMmdd === targetMmdd && Date.now() - start >= 500 && changedAt === 0) {
+      return true;
+    }
   }
-  captureVisibleDOM();
+  return detectDisplayedUIMMDD() === targetMmdd;
+}
+
+async function collectEntriesFromArchiveTab() {
+  const archiveBtn =
+    document.querySelector('[data-view="archive"], #tab-archive, #nav-archive, #btn-archive') ||
+    findNavButtonByText(/^archive$/i);
+  const readerBtn =
+    document.querySelector('[data-view="reader"], [data-view="diary"], #tab-reader, #nav-reader, #btn-reader') ||
+    findNavButtonByText(/^(diary|reader|entries|side[- ]by[- ]side)$/i);
+
+  if (!archiveBtn) {
+    const count = captureVisibleArchiveDOM();
+    if (count > 0) {
+      updateRangeResultsOnly();
+      showToast(`Collected ${count} entries from Archive`);
+    } else {
+      showToast('Open your Archive tab once, then reopen Print Studio to load all entries.');
+    }
+    return;
+  }
+
+  const wasAlreadyInReader = findAllMainColumns().length > 0;
+  vpState.rangeScanning = true;
+  vpState.rangeScanProgress = 'Reading Archive tab…';
+  updateRangeScanUI();
+
+  archiveBtn.click();
+  await sleep(550);
+  const count = captureVisibleArchiveDOM();
+
+  // Return to Reader cleanly if user started there
+  if (wasAlreadyInReader && readerBtn) {
+    readerBtn.click();
+    await sleep(320);
+    captureVisibleDOM();
+  }
+
+  vpState.rangeScanning = false;
+  vpState.rangeScanProgress = '';
+  updateRangeScanUI();
+  updateRangeResultsOnly();
+  if (vpState.dayMode) syncIntegratedDayView();
+  showToast(
+    count > 0
+      ? `Collected ${count} entries from Archive`
+      : 'Archive scanned — if entries use click-to-open, use Scan Date Range instead.'
+  );
+}
+
+async function scanUnlockedVaultForRange() {
+  const allDates = enumerateDatesBetween(vpState.rangeStart, vpState.rangeEnd, 370);
+  if (!allDates.length) return showToast('Choose a valid Start and End date first.');
+
+  const uniqueMmdds = Array.from(new Set(allDates.map((d) => d.slice(5))));
+  if (uniqueMmdds.length > 45) {
+    if (!confirm(`Scanning ${uniqueMmdds.length} calendar days will take ~${Math.round(uniqueMmdds.length * 0.55)}s. Continue?`)) {
+      return;
+    }
+  }
+
+  const originalMmdd = detectDisplayedUIMMDD();
+  vpScanCancelled = false;
+  vpState.rangeScanning = true;
+  updateRangeScanUI();
+
+  let verifiedDays = 0;
+  let failedNavCount = 0;
+
+  for (let i = 0; i < uniqueMmdds.length; i++) {
+    if (vpScanCancelled) break;
+    const mmdd = uniqueMmdds[i];
+    vpState.rangeScanProgress = `Scanning ${i + 1} / ${uniqueMmdds.length} (${mmdd})…`;
+    updateRangeScanUI();
+
+    const prevSig = getVisibleDOMSignature();
+    const triggered = navigateMainPageToMMDD(mmdd, `${vpState.rangeStart.slice(0, 4)}-${mmdd}`);
+    if (!triggered) {
+      failedNavCount++;
+      if (failedNavCount >= 2) {
+        showToast('Could not locate date controls on this view. Try "Collect from Archive" instead.');
+        break;
+      }
+      continue;
+    }
+
+    const ok = await waitForMainDateVerified(mmdd, prevSig, 1300);
+    if (ok) {
+      // Strictly verify date matches mmdd before caching — eliminates overwriting!
+      captureVisibleDOM(mmdd);
+      verifiedDays++;
+      updateRangeResultsOnly();
+    }
+  }
+
+  if (originalMmdd) {
+    const prevSig = getVisibleDOMSignature();
+    if (navigateMainPageToMMDD(originalMmdd)) {
+      await waitForMainDateVerified(originalMmdd, prevSig, 900);
+      captureVisibleDOM(originalMmdd);
+    }
+  }
+
+  vpState.rangeScanning = false;
+  vpState.rangeScanProgress = '';
+  updateRangeScanUI();
+  updateRangeResultsOnly();
+  if (vpState.dayMode) syncIntegratedDayView();
+  showToast(
+    vpScanCancelled
+      ? 'Range scan stopped'
+      : `Verified ${verifiedDays} day${verifiedDays === 1 ? '' : 's'} in range`
+  );
 }
 
 /* ==========================================================================
@@ -1423,6 +1830,14 @@ function openPrintHubModal(defaultTab = 'range', prefill = null) {
   const backdrop = ensureModal('vp-print-backdrop');
   backdrop.classList.add('is-open');
   renderPrintHubShell();
+
+  // Trigger read-only IndexedDB scan in background and refresh results if anything new is found
+  scanIndexedDBReadOnly().then(() => {
+    if (vpIdbEntriesCache.length && backdrop.classList.contains('is-open')) {
+      if (vpState.printTab === 'range') updateRangeResultsOnly();
+      else updateIndicesResultsOnly();
+    }
+  });
 }
 
 function getFilteredRangeGroups() {
@@ -1519,47 +1934,6 @@ function getFilteredIndexPayload() {
   return { pinned, highlights, entries, tags };
 }
 
-async function scanUnlockedVaultForRange() {
-  const allDates = enumerateDatesBetween(vpState.rangeStart, vpState.rangeEnd, 370);
-  if (!allDates.length) return showToast('Choose a valid Start and End date first.');
-
-  const uniqueMmdds = Array.from(new Set(allDates.map((d) => d.slice(5))));
-  if (uniqueMmdds.length > 45) {
-    if (!confirm(`Scanning ${uniqueMmdds.length} calendar days will take ~${Math.round(uniqueMmdds.length * 0.45)}s. Continue?`)) {
-      return;
-    }
-  }
-
-  const originalMmdd = detectCurrentDiaryMMDD();
-  vpScanCancelled = false;
-  vpState.rangeScanning = true;
-  updateRangeScanUI();
-
-  for (let i = 0; i < uniqueMmdds.length; i++) {
-    if (vpScanCancelled) break;
-    const mmdd = uniqueMmdds[i];
-    vpState.rangeScanProgress = `Scanning ${i + 1} / ${uniqueMmdds.length} (${mmdd})…`;
-    updateRangeScanUI();
-    const prevSig = getVisibleDOMSignature();
-    navigateMainPageToMMDD(mmdd, `${vpState.rangeStart.slice(0, 4)}-${mmdd}`);
-    await waitForMainRender(mmdd, prevSig, 1000);
-    updateRangeResultsOnly();
-  }
-
-  if (originalMmdd) {
-    const prevSig = getVisibleDOMSignature();
-    navigateMainPageToMMDD(originalMmdd);
-    await waitForMainRender(originalMmdd, prevSig, 900);
-  }
-
-  vpState.rangeScanning = false;
-  vpState.rangeScanProgress = '';
-  updateRangeScanUI();
-  updateRangeResultsOnly();
-  if (vpState.dayMode) syncIntegratedDayView();
-  showToast(vpScanCancelled ? 'Range scan stopped' : 'Finished scanning date range');
-}
-
 function renderPrintHubShell() {
   const backdrop = ensureModal('vp-print-backdrop');
   backdrop.innerHTML = `
@@ -1567,7 +1941,7 @@ function renderPrintHubShell() {
       <div class="plug-header">
         <div class="plug-title-wrap">
           <h2>Print Studio — Date Ranges &amp; Indices</h2>
-          <p class="plug-subtitle">Book-ready printing &amp; HTML export for specific date ranges and your Master Index</p>
+          <p class="plug-subtitle">Overlap-free printing &amp; HTML export for specific date ranges and your Master Index</p>
         </div>
         <div class="plug-header-actions">
           <button type="button" class="plug-btn plug-btn-sm" id="vp-print-close">Close</button>
@@ -1631,7 +2005,7 @@ function mountPrintRangeShell(container) {
 
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:12px;flex-wrap:wrap;">
         <span id="vp-r-scan-status" style="font-size:0.79rem;color:var(--plug-muted);"></span>
-        <div id="vp-r-scan-actions" style="display:flex;gap:6px;"></div>
+        <div id="vp-r-scan-actions" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
       </div>
     </div>
 
@@ -1702,8 +2076,12 @@ function updateRangeScanUI() {
     actEl.innerHTML = `<button type="button" id="vp-r-stop" class="plug-btn plug-btn-danger plug-btn-sm">Stop Scan</button>`;
     actEl.querySelector('#vp-r-stop').addEventListener('click', () => { vpScanCancelled = true; });
   } else {
-    statusEl.textContent = 'Encrypted vault? Scan collects unvisited days in this range from your unlocked diary.';
-    actEl.innerHTML = `<button type="button" id="vp-r-scan" class="plug-btn plug-btn-sm">Scan Unlocked Diary for Range</button>`;
+    statusEl.textContent = 'Missing encrypted entries? Collect from Archive (fast) or Scan Date Range:';
+    actEl.innerHTML = `
+      <button type="button" id="vp-r-archive" class="plug-btn plug-btn-sm">Collect from Archive</button>
+      <button type="button" id="vp-r-scan" class="plug-btn plug-btn-sm">Scan Date Range</button>
+    `;
+    actEl.querySelector('#vp-r-archive').addEventListener('click', collectEntriesFromArchiveTab);
     actEl.querySelector('#vp-r-scan').addEventListener('click', scanUnlockedVaultForRange);
   }
 }
@@ -1750,14 +2128,14 @@ function updateRangeResultsOnly() {
                   </label>
                   <div style="display:flex;gap:6px;align-items:center;">
                     <span class="pdx-entry-num">${g.entries.length} ${g.entries.length === 1 ? 'entry' : 'entries'} · ${words.toLocaleString()}w</span>
-                    <button type="button" class="plug-btn plug-btn-sm vp-open-day-btn" data-iso="${esc(g.isoDate)}">Open in Day View</button>
+                    <button type="button" class="plug-btn plug-btn-sm vp-open-day-btn" data-iso="${esc(g.isoDate)}">Open Day</button>
                   </div>
                 </div>
                 <p class="pdx-excerpt" style="margin-left:22px;">${esc(g.entries[0].excerpt)}</p>
               </div>`;
               })
               .join('')
-          : `<div class="pdx-empty">No loaded entries found between <strong>${esc(vpState.rangeStart)}</strong> and <strong>${esc(vpState.rangeEnd)}</strong>. Browse those dates or click <strong>Scan Unlocked Diary for Range</strong> above.</div>`
+          : `<div class="pdx-empty">No loaded entries found between <strong>${esc(vpState.rangeStart)}</strong> and <strong>${esc(vpState.rangeEnd)}</strong>. Click <strong>Collect from Archive</strong> or <strong>Scan Date Range</strong> above.</div>`
       }
     </div>
   `;
@@ -2038,9 +2416,12 @@ function mountTriggers() {
 function bootViewerPrintAddon() {
   mountTriggers();
   captureVisibleDOM();
+  scanIndexedDBReadOnly();
+
   if (vpState.dayMode) syncIntegratedDayView();
   setTimeout(() => {
     mountTriggers();
+    captureVisibleDOM();
     if (vpState.dayMode) syncIntegratedDayView();
   }, 450);
 
@@ -2078,3 +2459,4 @@ if (document.readyState === 'loading') {
   bootViewerPrintAddon();
 }
 
+Securing strict date verification and multi-source harvesting
