@@ -4075,3 +4075,271 @@ box-shadow: none !important;
 .pdx-sel-bar-form.is-open {
   display: flex;
 }
+/* ==========================================================================
+   DROP-IN ADDON: ONE DAY VIEWER & PRINT STUDIO (.vp-)
+   ========================================================================== */
+
+.vp-day-modal {
+  width: min(860px, 100%);
+}
+
+.vp-day-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 18px;
+  background: var(--plug-surface);
+  border-bottom: 1px solid var(--plug-border);
+}
+
+.vp-day-nav,
+.vp-day-typo,
+.vp-year-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.vp-quick-pin-box {
+  max-width: 68ch;
+  margin: 0 auto 12px;
+  padding: 10px 12px;
+  border-radius: var(--plug-radius);
+  background: var(--plug-surface);
+  border: 1px solid var(--plug-accent);
+}
+
+.vp-day-sheet {
+  max-width: 68ch;
+  margin: 0 auto;
+  padding: 20px 22px 28px;
+  background: var(--plug-surface);
+  color: var(--plug-text);
+  border: 1px solid var(--plug-border);
+  border-radius: var(--plug-radius);
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.vp-theme-sepia {
+  background: #f5eedc;
+  color: #2c2419;
+  border-color: rgba(120, 96, 62, 0.28);
+}
+
+.vp-theme-sepia .vp-day-banner,
+.vp-theme-sepia .vp-day-entry,
+.vp-theme-sepia .vp-day-notes {
+  border-color: rgba(120, 96, 62, 0.25);
+}
+
+.vp-theme-sepia .vp-day-entry-meta,
+.vp-theme-sepia .vp-day-banner span,
+.vp-theme-sepia .vp-day-entry-desc,
+.vp-theme-sepia .vp-day-hint,
+.vp-theme-sepia .vp-note-group h4,
+.vp-theme-sepia .vp-note-item p {
+  color: #6b5b44;
+}
+
+.vp-theme-sepia .vp-day-entry-title {
+  color: #8c5a14;
+}
+
+.vp-theme-sepia .vp-pill,
+.vp-theme-sepia .vp-note-item {
+  background: rgba(120, 96, 62, 0.1);
+  border-color: rgba(120, 96, 62, 0.22);
+  color: #2c2419;
+}
+
+.vp-theme-paper {
+  background: #ffffff;
+  color: #16181d;
+  border-color: #d5dae2;
+}
+
+.vp-theme-paper .vp-day-banner,
+.vp-theme-paper .vp-day-entry,
+.vp-theme-paper .vp-day-notes {
+  border-color: #e2e6ee;
+}
+
+.vp-theme-paper .vp-day-entry-meta,
+.vp-theme-paper .vp-day-banner span,
+.vp-theme-paper .vp-day-entry-desc,
+.vp-theme-paper .vp-day-hint,
+.vp-theme-paper .vp-note-group h4,
+.vp-theme-paper .vp-note-item p {
+  color: #5b6374;
+}
+
+.vp-theme-paper .vp-day-entry-title {
+  color: #9a6510;
+}
+
+.vp-theme-paper .vp-pill,
+.vp-theme-paper .vp-note-item {
+  background: #f3f5f8;
+  border-color: #dde2ea;
+  color: #16181d;
+}
+
+.vp-font-serif { font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif; }
+.vp-font-sans  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.vp-font-mono  { font-family: "SFMono-Regular", Consolas, Menlo, monospace; }
+
+.vp-size-sm .vp-day-prose { font-size: 0.92rem; line-height: 1.62; }
+.vp-size-md .vp-day-prose { font-size: 1.04rem; line-height: 1.74; }
+.vp-size-lg .vp-day-prose { font-size: 1.18rem; line-height: 1.82; }
+
+.vp-day-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 10px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--plug-border);
+}
+
+.vp-day-banner h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  line-height: 1.25;
+}
+
+.vp-day-banner span {
+  font-family: monospace;
+  font-size: 0.82rem;
+  color: var(--plug-muted);
+}
+
+.vp-day-entry {
+  padding-bottom: 18px;
+  margin-bottom: 18px;
+  border-bottom: 1px dashed var(--plug-border);
+}
+
+.vp-day-entry:last-of-type {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.vp-day-entry-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.76rem;
+  color: var(--plug-muted);
+}
+
+.vp-pill {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--plug-surface-2);
+  border: 1px solid var(--plug-border);
+  color: var(--plug-muted);
+}
+
+.vp-day-entry-title {
+  margin: 0 0 4px;
+  font-size: 1.1rem;
+  color: var(--plug-accent);
+}
+
+.vp-day-entry-desc {
+  margin: 0 0 10px;
+  font-size: 0.88rem;
+  font-style: italic;
+  color: var(--plug-muted);
+}
+
+.vp-day-prose p {
+  margin: 0 0 12px;
+}
+
+.vp-day-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.vp-day-notes {
+  margin-top: 20px;
+  padding-top: 14px;
+  border-top: 1px solid var(--plug-border);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.vp-note-group {
+  margin-bottom: 12px;
+}
+
+.vp-note-group h4 {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--plug-muted);
+}
+
+.vp-note-item {
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  border-radius: 8px;
+  background: var(--plug-surface-2);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.vp-note-item p {
+  margin: 3px 0 0;
+  color: var(--plug-muted);
+}
+
+.vp-day-hint {
+  margin-top: 18px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 0.76rem;
+  color: var(--plug-muted);
+  text-align: center;
+  opacity: 0.82;
+}
+
+.vp-day-sel-bar {
+  z-index: 10020;
+}
+
+.vp-checks-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
+}
+
+.vp-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.83rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+@media (max-width: 700px) {
+  .vp-day-sheet {
+    padding: 14px 14px 22px;
+  }
+  .vp-checks-grid {
+    grid-template-columns: 1fr;
+  }
+}
