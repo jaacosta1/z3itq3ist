@@ -3930,3 +3930,79 @@ box-shadow: none !important;
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+/* ==========================================================================
+   TEXT HIGHLIGHTING & FLOATING SELECTION BAR (.pdx-hl / .pdx-sel-bar)
+   ========================================================================== */
+
+.pdx-hl {
+  border-radius: 4px;
+  padding: 0 2px;
+  cursor: pointer;
+  color: inherit;
+  transition: box-shadow 0.2s ease, filter 0.2s ease;
+}
+
+.pdx-hl-gold  { background: rgba(245, 196, 81, 0.32); border-bottom: 2px solid rgba(245, 196, 81, 0.85); }
+.pdx-hl-blue  { background: rgba(96, 165, 250, 0.28); border-bottom: 2px solid rgba(96, 165, 250, 0.85); }
+.pdx-hl-green { background: rgba(52, 211, 153, 0.28); border-bottom: 2px solid rgba(52, 211, 153, 0.85); }
+.pdx-hl-pink  { background: rgba(244, 114, 182, 0.28); border-bottom: 2px solid rgba(244, 114, 182, 0.85); }
+
+.pdx-hl-pulse {
+  animation: pdxPulse 1.8s ease;
+}
+
+@keyframes pdxPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(229, 184, 105, 0.85); }
+  50%  { box-shadow: 0 0 0 8px rgba(229, 184, 105, 0.15); }
+  100% { box-shadow: 0 0 0 0 rgba(229, 184, 105, 0); }
+}
+
+.pdx-sel-bar {
+  position: fixed;
+  z-index: 9980;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: var(--plug-surface, #1a1f2b);
+  border: 1px solid var(--plug-accent, #e5b869);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+  color: var(--plug-text, #eef2f7);
+  font-size: 0.78rem;
+}
+
+.pdx-sel-bar.is-visible {
+  display: inline-flex;
+}
+
+.pdx-color-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  cursor: pointer;
+  padding: 0;
+}
+
+.pdx-color-dot:hover {
+  transform: scale(1.15);
+  border-color: #ffffff;
+}
+
+.pdx-quote-preview {
+  margin: 2px 0 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--plug-accent, #e5b869);
+  background: var(--plug-surface-2, #232a3a);
+  border-radius: 0 8px 8px 0;
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.pdx-match-mark {
+  background: rgba(245, 196, 81, 0.35);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 2px;
+}
