@@ -2353,7 +2353,7 @@ function updateIndicesResultsOnly() {
 }
 
 /* ==========================================================================
-   8. HEADER TRIGGERS, INDEX BRIDGE & LIVE OBSERVER BOOTSTRAP
+   8. HEADER TRIGGERS (SELF-HEALING), INDEX BRIDGE & BOOTSTRAP
    ========================================================================== */
 
 function injectPrintButtonIntoIndexModal() {
@@ -2375,17 +2375,33 @@ function injectPrintButtonIntoIndexModal() {
   actions.insertBefore(btn, actions.firstChild);
 }
 
-function mountTriggers() {
-  if (document.getElementById('vp-day-trigger')) return;
+function injectPrintStudioIntoDayBar() {
+  const barRight = document.querySelector('#vp-inline-day-bar .vp-bar-right');
+  if (!barRight || barRight.querySelector('#vp-bar-print-studio')) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'vp-bar-print-studio';
+  btn.className = 'plug-btn plug-btn-sm';
+  btn.textContent = 'Print Range';
+  btn.title = 'Open Print Studio (Range of Days & Indices)';
+  btn.addEventListener('click', () => openPrintHubModal('range'));
+  const printDayBtn = barRight.querySelector('#vp-bar-print');
+  if (printDayBtn && printDayBtn.nextSibling) {
+    barRight.insertBefore(btn, printDayBtn.nextSibling);
+  } else {
+    barRight.appendChild(btn);
+  }
+}
 
+function mountTriggers() {
   let dock = document.getElementById('plug-trigger-dock');
-  if (!dock) {
+  if (!dock || !document.body.contains(dock)) {
     dock = document.createElement('div');
     dock.id = 'plug-trigger-dock';
     const headerTarget =
       document.querySelector('.header-actions, .topbar-actions, .nav-actions, header .actions, header .right') ||
       document.querySelector('header');
-    if (headerTarget) {
+    if (headerTarget && headerTarget.offsetParent !== null) {
       dock.className = 'plug-dock-inline';
       headerTarget.appendChild(dock);
     } else {
@@ -2394,41 +2410,63 @@ function mountTriggers() {
     }
   }
 
-  const dayBtn = document.createElement('button');
-  dayBtn.type = 'button';
-  dayBtn.id = 'vp-day-trigger';
-  dayBtn.className = 'plug-trigger-btn';
-  dayBtn.addEventListener('click', () => toggleIntegratedDayView());
+  if (!dock.querySelector('#vp-day-trigger')) {
+    const existingDay = document.getElementById('vp-day-trigger');
+    if (existingDay) existingDay.remove();
+    const dayBtn = document.createElement('button');
+    dayBtn.type = 'button';
+    dayBtn.id = 'vp-day-trigger';
+    dayBtn.className = 'plug-trigger-btn';
+    dayBtn.addEventListener('click', () => toggleIntegratedDayView());
+    dock.appendChild(dayBtn);
+  }
 
-  const printBtn = document.createElement('button');
-  printBtn.type = 'button';
-  printBtn.id = 'vp-print-trigger';
-  printBtn.className = 'plug-trigger-btn';
-  printBtn.textContent = 'Print';
-  printBtn.title = 'Print Specific Range of Days or Indices';
-  printBtn.addEventListener('click', () => openPrintHubModal('range'));
+  if (!dock.querySelector('#vp-print-trigger')) {
+    const existingPrint = document.getElementById('vp-print-trigger');
+    if (existingPrint) existingPrint.remove();
+    const printBtn = document.createElement('button');
+    printBtn.type = 'button';
+    printBtn.id = 'vp-print-trigger';
+    printBtn.className = 'plug-trigger-btn';
+    printBtn.textContent = 'Print';
+    printBtn.title = 'Print Specific Range of Days or Indices (Alt+P)';
+    printBtn.addEventListener('click', () => openPrintHubModal('range'));
+    dock.appendChild(printBtn);
+  }
 
-  dock.appendChild(dayBtn);
-  dock.appendChild(printBtn);
   updateHeaderDayButtonState();
 }
 
 function bootViewerPrintAddon() {
+  window.__VP_OPEN_PRINT__ = (tab = 'range') => openPrintHubModal(tab);
+
   mountTriggers();
   captureVisibleDOM();
   scanIndexedDBReadOnly();
 
-  if (vpState.dayMode) syncIntegratedDayView();
+  if (vpState.dayMode) {
+    syncIntegratedDayView();
+    injectPrintStudioIntoDayBar();
+  }
+
   setTimeout(() => {
     mountTriggers();
     captureVisibleDOM();
-    if (vpState.dayMode) syncIntegratedDayView();
+    if (vpState.dayMode) {
+      syncIntegratedDayView();
+      injectPrintStudioIntoDayBar();
+    }
   }, 450);
 
   let timer = null;
   const obs = new MutationObserver((muts) => {
     if (vpSyncingLayout) return;
+    if (!document.getElementById('vp-print-trigger') || !document.getElementById('vp-day-trigger')) {
+      mountTriggers();
+    }
     injectPrintButtonIntoIndexModal();
+    injectPrintStudioIntoDayBar();
+
     const relevant = muts.some(
       (m) => !m.target?.closest?.('.plug-backdrop, #pdx-sel-bar, #vp-inline-day-bar, #plug-toast')
     );
@@ -2436,7 +2474,10 @@ function bootViewerPrintAddon() {
     clearTimeout(timer);
     timer = setTimeout(() => {
       captureVisibleDOM();
-      if (vpState.dayMode) syncIntegratedDayView();
+      if (vpState.dayMode) {
+        syncIntegratedDayView();
+        injectPrintStudioIntoDayBar();
+      }
     }, 180);
   });
   obs.observe(document.body, { childList: true, subtree: true });
@@ -2446,9 +2487,14 @@ function bootViewerPrintAddon() {
       closePrintModal();
       return;
     }
-    if (e.altKey && (e.key === 'd' || e.key === 'D') && !e.target.closest('input, textarea, select')) {
-      e.preventDefault();
-      toggleIntegratedDayView();
+    if (e.altKey && !e.target.closest('input, textarea, select')) {
+      if (e.key === 'd' || e.key === 'D') {
+        e.preventDefault();
+        toggleIntegratedDayView();
+      } else if (e.key === 'p' || e.key === 'P') {
+        e.preventDefault();
+        openPrintHubModal('range');
+      }
     }
   });
 }
@@ -2458,5 +2504,3 @@ if (document.readyState === 'loading') {
 } else {
   bootViewerPrintAddon();
 }
-
-Securing strict date verification and multi-source harvesting
