@@ -352,28 +352,185 @@ async function persistTrackerStore() {
 }
 
 /* ==========================================================================
-   4. UNIVERSAL DIARY ENTRY SCANNER (Stacked Multi-Entries + #Tags)
+   4. UNIVERSAL DIARY ENTRY SCANNER (Clean DOM + Live Cache + Multi-Entry)
    ========================================================================== */
+
+const PDX_BOOKMARKS_KEY = 'pd_simple_index_bookmarks_v1';
+const pdxLiveEntryCache = new Map(); // persists clean decrypted entries seen during this session
+
+function loadManualBookmarks() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(PDX_BOOKMARKS_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveManualBookmarks(list) {
+  localStorage.setItem(PDX_BOOKMARKS_KEY, JSON.stringify(list));
+}
 
 function normalizeYearEntryList(yearVal) {
   if (!yearVal) return [];
   if (Array.isArray(yearVal)) return yearVal;
   if (Array.isArray(yearVal.entries)) return yearVal.entries;
-  if (typeof yearVal === 'object' && (yearVal.body || yearVal.text || yearVal.content || yearVal.html)) {
+  if (typeof yearVal === 'object' && (yearVal.body || yearVal.text || yearVal.content)) {
     return [yearVal];
   }
   if (typeof yearVal === 'string') return [{ body: yearVal }];
   return [];
 }
 
+function extractCleanCardText(node) {
+  // Prefer dedicated text container first so buttons/headers are never scraped
+  const dedicated = node.querySelector(
+    '.entry-body-content, .entry-body, .entry-text, .year-entry-body, .entry-prose, .prose, .markdown-body'
+  );
+  const clone = (dedicated || node).cloneNode(true);
+  clone
+    .querySelectorAll(
+      'button, nav, input, textarea, select, script, style, .entry-actions, .year-col-add-entry-bar, .stacked-entry-index, .stacked-entry-header, .entry-meta, .entry-toolbar, .margin-notes, .comments-section'
+    )
+    .forEach((el) => el.remove());
+  return (clone.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+function detectCurrentDiaryMMDD() {
+  const dateInput = document.querySelector('#date-picker, #current-date-input, input[type="date"]');
+  if (dateInput && /^\d{4}-\d{2}-\d{2}$/.test(dateInput.value)) {
+    return dateInput.value.slice(5);
+  }
+  const monthSel = document.querySelector('#month-select, [data-role="month-select"]');
+  const daySel = document.querySelector('#day-select, [data-role="day-select"]');
+  if (monthSel && daySel && monthSel.value && daySel.value) {
+    return `${String(Number(monthSel.value)).padStart(2, '0')}-${String(Number(daySel.value)).padStart(2, '0')}`;
+  }
+  const activeCell = document.querySelector('[data-mmdd].is-active, [data-mmdd].active, [data-date].is-active');
+  if (activeCell) {
+    const val = activeCell.getAttribute('data-mmdd') || activeCell.getAttribute('data-date') || '';
+    if (/^\d{2}-\d{2}$/.test(val)) return val;
+  }
+  const hashMatch = (location.hash || '').match(/(\d{2}-\d{2})/);
+  if (hashMatch) return hashMatch[1];
+
+  // Parse visible date header (e.g. "November 28")
+  const headerText =
+    document.querySelector('#current-date-title, #date-heading, .date-display, .current-date, h1, h2')
+      ?.textContent || '';
+  const monthNames = [
+    'january', 'february', 'march', 'april', 'may', 'june',
+    'july', 'august', 'september', 'october', 'november', 'december',
+  ];
+  const mRegex = new RegExp(`\\b(${monthNames.join('|')})\\s+(\\d{1,2})\\b`, 'i');
+  const mHit = headerText.match(mRegex);
+  if (mHit) {
+    const mNum = monthNames.indexOf(mHit[1].toLowerCase()) + 1;
+    const dNum = Number(mHit[2]);
+    if (mNum >= 1 && dNum >= 1 && dNum <= 31) {
+      return `${String(mNum).padStart(2, '0')}-${String(dNum).padStart(2, '0')}`;
+    }
+  }
+  return todayISO().slice(5);
+}
+
+function captureVisibleDOMIntoCache() {
+  const activeMmdd = detectCurrentDiaryMMDD();
+  if (!activeMmdd) return;
+
+  // Capture rendered year columns without duplicating parent + child selectors
+  document.querySelectorAll('.year-col, [data-year]').forEach((col) => {
+    if (col.closest('.plug-backdrop')) return;
+    const yr =
+      col.getAttribute('data-year') ||
+      (col.querySelector('.year-header, .year-title, h3, h2')?.textContent.match(/\b(19|20)\d{2}\b/) || [])[0];
+    if (!yr || !/^\d{4}$/.test(yr)) return;
+
+    let cards = Array.from(col.querySelectorAll('.stacked-entry-item'));
+    if (!cards.length) {
+      cards = Array.from(col.querySelectorAll('.entry-card, .year-entry'));
+    }
+    if (!cards.length) {
+      const singleBody = col.querySelector('.entry-body, .year-entry-body, .entry-text');
+      if (singleBody) cards = [singleBody];
+    }
+
+    const cleanTexts = cards
+      .map((card) => ({
+        title: (card.querySelector('.entry-title, .stacked-entry-title, h4')?.textContent || '').trim(),
+        body: extractCleanCardText(card),
+        tags: Array.from(card.querySelectorAll('.tag, .tag-chip, .entry-tag')).map((t) => t.textContent.trim()),
+      }))
+      .filter((item) => item.body.length > 0);
+
+    if (!cleanTexts.length) return;
+    const isoDate = `${yr}-${activeMmdd}`;
+
+    // Clear stale entries for this isoDate before writing fresh count
+    Array.from(pdxLiveEntryCache.keys()).forEach((k) => {
+      if (k.startsWith(`${isoDate}|`)) pdxLiveEntryCache.delete(k);
+    });
+
+    cleanTexts.forEach((item, idx) => {
+      pdxLiveEntryCache.set(`${isoDate}|${idx}`, {
+        isoDate,
+        year: yr,
+        mmdd: activeMmdd,
+        entryIndex: idx + 1,
+        totalInYear: cleanTexts.length,
+        title: item.title,
+        text: item.body,
+        excerpt: makeExcerpt(item.body, 165),
+        words: countWords(item.body),
+        tags: extractTags(item.body, item.tags),
+        createdAt: '',
+        hour: null,
+        isManual: false,
+      });
+    });
+  });
+
+  // Also capture any visible Archive rows if the Archive tab is open
+  document.querySelectorAll('[data-archive-date], .archive-entry, .archive-item').forEach((row) => {
+    if (row.closest('.plug-backdrop')) return;
+    const rawDate = row.getAttribute('data-archive-date') || row.getAttribute('data-date') || '';
+    const dateHit = rawDate.match(/(\d{4}-\d{2}-\d{2})/) || (row.textContent || '').match(/\b(\d{4}-\d{2}-\d{2})\b/);
+    if (!dateHit) return;
+    const isoDate = dateHit[1];
+    const body = extractCleanCardText(row);
+    if (!body || body.length < 4) return;
+    const key = `${isoDate}|0`;
+    if (!pdxLiveEntryCache.has(key)) {
+      pdxLiveEntryCache.set(key, {
+        isoDate,
+        year: isoDate.slice(0, 4),
+        mmdd: isoDate.slice(5),
+        entryIndex: 1,
+        totalInYear: 1,
+        title: '',
+        text: body,
+        excerpt: makeExcerpt(body, 165),
+        words: countWords(body),
+        tags: extractTags(body),
+        createdAt: '',
+        hour: null,
+        isManual: false,
+      });
+    }
+  });
+}
+
 function scanAllDiaryEntries() {
+  captureVisibleDOMIntoCache();
+
   const results = [];
   const seen = new Set();
 
   const pushEntry = (isoDate, year, mmdd, idx, totalInYear, rawEntry) => {
     const text = String(rawEntry.body || rawEntry.text || rawEntry.content || '').trim();
-    if (!text) return;
-    const dedupeKey = `${isoDate}|${idx}|${text.slice(0, 60)}`;
+    const title = String(rawEntry.title || '').trim();
+    if (!text && !title) return;
+    const dedupeKey = `${isoDate}|${idx}|${(title + text).slice(0, 50)}`;
     if (seen.has(dedupeKey)) return;
     seen.add(dedupeKey);
 
@@ -385,42 +542,71 @@ function scanAllDiaryEntries() {
     }
 
     results.push({
+      id: rawEntry.id || '',
       isoDate,
       year: String(year),
       mmdd,
       entryIndex: idx + 1,
       totalInYear,
-      title: String(rawEntry.title || '').trim(),
-      text,
-      excerpt: makeExcerpt(text, 165),
+      title,
+      text: text || title,
+      excerpt: makeExcerpt(text || title, 165),
       words: countWords(text),
-      tags: extractTags(text, rawEntry.tags || []),
+      tags: extractTags(`${title} ${text}`, rawEntry.tags || []),
       createdAt,
       hour,
+      isManual: Boolean(rawEntry.isManual),
     });
   };
 
+  // 1) Optional read-only bridge from app.js if wired
+  try {
+    if (window.__PD_BRIDGE__ && typeof window.__PD_BRIDGE__.getPlainEntries === 'function') {
+      const bridged = window.__PD_BRIDGE__.getPlainEntries() || [];
+      bridged.forEach((e) => {
+        if (!e || !e.isoDate) return;
+        pushEntry(
+          e.isoDate,
+          e.year || e.isoDate.slice(0, 4),
+          e.mmdd || e.isoDate.slice(5),
+          (e.entryIndex || 1) - 1,
+          e.totalInYear || 1,
+          e
+        );
+      });
+    }
+  } catch {
+    // ignore bridge errors
+  }
+
+  // 2) Live session cache (captured cleanly from every date viewed/decrypted)
+  pdxLiveEntryCache.forEach((item) => {
+    pushEntry(item.isoDate, item.year, item.mmdd, item.entryIndex - 1, item.totalInYear, item);
+  });
+
+  // 3) Plaintext / Sandbox localStorage entries (skips encrypted envelopes)
   const ingestDayObject = (mmdd, dayObj) => {
-    if (!dayObj || typeof dayObj !== 'object' || !/^\d{2}-\d{2}$/.test(mmdd)) return;
+    if (!dayObj || typeof dayObj !== 'object' || dayObj.encrypted || dayObj.ct || !/^\d{2}-\d{2}$/.test(mmdd)) return;
     const yearsMap = dayObj.years && typeof dayObj.years === 'object' ? dayObj.years : dayObj;
     Object.keys(yearsMap).forEach((yr) => {
       if (!/^\d{4}$/.test(yr)) return;
       const list = normalizeYearEntryList(yearsMap[yr]);
       list.forEach((item, idx) => {
-        pushEntry(`${yr}-${mmdd}`, yr, mmdd, idx, list.length, item);
+        if (item && !item.encrypted && !item.ct) {
+          pushEntry(`${yr}-${mmdd}`, yr, mmdd, idx, list.length, item);
+        }
       });
     });
   };
 
-  // 1) Scan localStorage caches (works with sandbox, offline cache, & plain cache structures)
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
-    if (!k || k === BPT_LOCAL_KEY) continue;
+    if (!k || k === BPT_LOCAL_KEY || k === PDX_BOOKMARKS_KEY) continue;
     const rawStr = localStorage.getItem(k);
     if (!rawStr || rawStr[0] !== '{') continue;
     try {
       const parsed = JSON.parse(rawStr);
-      if (!parsed || typeof parsed !== 'object') continue;
+      if (!parsed || typeof parsed !== 'object' || parsed.encrypted || parsed.ct) continue;
       if (/^\d{2}-\d{2}$/.test(k)) {
         ingestDayObject(k, parsed);
       } else if (parsed.days && typeof parsed.days === 'object') {
@@ -429,10 +615,12 @@ function scanAllDiaryEntries() {
         Object.keys(parsed).forEach((subKey) => {
           if (/^\d{2}-\d{2}$/.test(subKey)) ingestDayObject(subKey, parsed[subKey]);
           if (/^\d{4}-\d{2}-\d{2}$/.test(subKey)) {
-            const yr = subKey.slice(0, 4);
-            const mmdd = subKey.slice(5);
             const list = normalizeYearEntryList(parsed[subKey]);
-            list.forEach((item, idx) => pushEntry(subKey, yr, mmdd, idx, list.length, item));
+            list.forEach((item, idx) => {
+              if (item && !item.encrypted && !item.ct) {
+                pushEntry(subKey, subKey.slice(0, 4), subKey.slice(5), idx, list.length, item);
+              }
+            });
           }
         });
       }
@@ -441,71 +629,61 @@ function scanAllDiaryEntries() {
     }
   }
 
-  // 2) Scan currently rendered DOM year columns (captures unlocked/decrypted active day in RAM)
-  const activeMmdd = detectCurrentDiaryMMDD();
-  document.querySelectorAll('.year-col, [data-year]').forEach((col) => {
-    const yr = col.getAttribute('data-year') || (col.textContent.match(/\b(19|20)\d{2}\b/) || [])[0];
-    if (!yr || !activeMmdd) return;
-    const cards = col.querySelectorAll('.stacked-entry-item, .entry-body, .year-entry-body');
-    const items = cards.length ? Array.from(cards) : [col];
-    const cleanItems = items
-      .map((node) => ({
-        body: (node.querySelector('.entry-body, .entry-text, .prose') || node).innerText || '',
-      }))
-      .filter((x) => x.body.trim().length > 0);
-    cleanItems.forEach((item, idx) => {
-      pushEntry(`${yr}-${activeMmdd}`, yr, activeMmdd, idx, cleanItems.length, item);
-    });
-  });
-
   return results;
 }
 
-function detectCurrentDiaryMMDD() {
-  const dateInput = document.querySelector('#date-picker, input[type="date"]');
-  if (dateInput && /^\d{4}-\d{2}-\d{2}$/.test(dateInput.value)) {
-    return dateInput.value.slice(5);
-  }
-  const monthSel = document.querySelector('#month-select, [data-role="month-select"]');
-  const daySel = document.querySelector('#day-select, [data-role="day-select"]');
-  if (monthSel && daySel && monthSel.value && daySel.value) {
-    return `${String(monthSel.value).padStart(2, '0')}-${String(daySel.value).padStart(2, '0')}`;
-  }
-  const hashMatch = (location.hash || '').match(/(\d{2}-\d{2})/);
-  if (hashMatch) return hashMatch[1];
-  return todayISO().slice(5);
+function setSelectOptionSmart(sel, numVal) {
+  if (!sel) return false;
+  const padded = String(numVal).padStart(2, '0');
+  const plain = String(numVal);
+  const match = Array.from(sel.options || []).find((o) => o.value === padded || o.value === plain);
+  if (!match) return false;
+  sel.value = match.value;
+  sel.dispatchEvent(new Event('input', { bubbles: true }));
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+  return true;
 }
 
 function jumpToDiaryDate(isoDate, year) {
   const mmdd = isoDate.slice(5);
-  const [mStr, dStr] = mmdd.split('-');
+  const [mNum, dNum] = mmdd.split('-').map(Number);
   let navigated = false;
 
-  // Try heatmap cell click first (triggers full native app state update)
-  const hmCell = document.querySelector(
-    `[data-mmdd="${mmdd}"], [data-date="${mmdd}"], [data-day-key="${mmdd}"]`
-  );
-  if (hmCell) {
-    hmCell.click();
-    navigated = true;
+  // 1) App bridge if present
+  if (window.__PD_BRIDGE__ && typeof window.__PD_BRIDGE__.goToDate === 'function') {
+    try {
+      window.__PD_BRIDGE__.goToDate(mmdd, year);
+      navigated = true;
+    } catch {
+      // fall through
+    }
   }
 
-  // Try month/day selects
+  // 2) Heatmap cell click
   if (!navigated) {
-    const monthSel = document.querySelector('#month-select');
-    const daySel = document.querySelector('#day-select');
-    if (monthSel && daySel) {
-      monthSel.value = String(Number(mStr));
-      monthSel.dispatchEvent(new Event('change', { bubbles: true }));
-      daySel.value = String(Number(dStr));
-      daySel.dispatchEvent(new Event('change', { bubbles: true }));
+    const hmCell = document.querySelector(
+      `[data-mmdd="${mmdd}"], [data-date="${mmdd}"], [data-day-key="${mmdd}"], [data-date="${isoDate}"]`
+    );
+    if (hmCell) {
+      hmCell.click();
       navigated = true;
     }
   }
 
-  // Try native date input
+  // 3) Month & Day dropdowns (handles both "01" and "1")
   if (!navigated) {
-    const dateInput = document.querySelector('#date-picker, input[type="date"]');
+    const monthSel = document.querySelector('#month-select, [data-role="month-select"]');
+    const daySel = document.querySelector('#day-select, [data-role="day-select"]');
+    if (monthSel && daySel) {
+      const okM = setSelectOptionSmart(monthSel, mNum);
+      const okD = setSelectOptionSmart(daySel, dNum);
+      if (okM || okD) navigated = true;
+    }
+  }
+
+  // 4) Native date picker
+  if (!navigated) {
+    const dateInput = document.querySelector('#date-picker, #current-date-input, input[type="date"]');
     if (dateInput) {
       dateInput.value = isoDate;
       dateInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -514,15 +692,15 @@ function jumpToDiaryDate(isoDate, year) {
     }
   }
 
-  // Fallback hash update
+  // 5) Hash fallback
   if (!navigated) {
     location.hash = `#${mmdd}`;
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
   }
 
   closePluginModals();
-  showPluginToast(`Jumped to ${formatShortDate(isoDate)}`);
+  showPluginToast(navigated ? `Opened ${formatShortDate(isoDate)}` : `Set date to ${mmdd} (${year})`);
 
-  // Highlight matching year column once rendered
   setTimeout(() => {
     const targetCol = document.querySelector(`.year-col[data-year="${year}"], [data-year="${year}"]`);
     if (targetCol) {
@@ -533,258 +711,33 @@ function jumpToDiaryDate(isoDate, year) {
         targetCol.style.outline = prevOutline;
       }, 2200);
     }
-  }, 260);
+  }, 300);
 }
 
-/* ==========================================================================
-   5. SCIENCE-BASED CLINICAL ENGINE (NIMH-LCM, IPSRT/SRM-5, ASRM, PHQ-9, PASSIVE)
-   ========================================================================== */
-
-const ASRM_ITEMS = [
-  {
-    q: '1. Positive Mood / Cheerfulness',
-    opts: [
-      '0 — Not happier or more cheerful than usual',
-      '1 — Occasionally happier or more cheerful than usual',
-      '2 — Often happier or more cheerful than usual',
-      '3 — Happier or more cheerful than usual most of the time',
-      '4 — Happier or more cheerful than usual all of the time',
-    ],
-  },
-  {
-    q: '2. Self-Confidence',
-    opts: [
-      '0 — Not more self-confident than usual',
-      '1 — Occasionally more self-confident than usual',
-      '2 — Often more self-confident than usual',
-      '3 — More self-confident than usual most of the time',
-      '4 — Extremely self-confident all of the time',
-    ],
-  },
-  {
-    q: '3. Need for Sleep',
-    opts: [
-      '0 — Do not need less sleep than usual',
-      '1 — Occasionally need less sleep than usual',
-      '2 — Often need less sleep than usual',
-      '3 — Frequently need less sleep than usual',
-      '4 — Can go all day and night without sleep and still not feel tired',
-    ],
-  },
-  {
-    q: '4. Speech / Talkativeness',
-    opts: [
-      '0 — Do not talk more than usual',
-      '1 — Occasionally talk more than usual',
-      '2 — Often talk more than usual',
-      '3 — Frequently talk more than usual',
-      '4 — Talk constantly and cannot be interrupted',
-    ],
-  },
-  {
-    q: '5. Activity Level',
-    opts: [
-      '0 — Not more active (socially, work, or physically) than usual',
-      '1 — Occasionally more active than usual',
-      '2 — Often more active than usual',
-      '3 — Frequently more active than usual',
-      '4 — Constantly active or on the go all the time',
-    ],
-  },
-];
-
-const PHQ9_ITEMS = [
-  '1. Little interest or pleasure in doing things',
-  '2. Feeling down, depressed, or hopeless',
-  '3. Trouble falling or staying asleep, or sleeping too much',
-  '4. Feeling tired or having little energy',
-  '5. Poor appetite or overeating',
-  '6. Feeling bad about yourself — or that you are a failure',
-  '7. Trouble concentrating on things (reading, studying, etc.)',
-  '8. Moving or speaking noticeably slowly, or being fidgety/restless',
-  '9. Thoughts that you would be better off dead, or of hurting yourself',
-];
-
-const PHQ9_SCALE = ['0 — Not at all', '1 — Several days', '2 — More than half the days', '3 — Nearly every day'];
-
-const TRIGGER_OPTIONS = [
-  'Late caffeine',
-  'Alcohol / substance',
-  'Travel / schedule shift',
-  'Skipped meals',
-  'High stress / conflict',
-  'Illness / physical pain',
-  'Exam / deadline crunch',
-];
-
-const SYMPTOM_OPTIONS = [
-  'Racing thoughts',
-  'Irritability / agitation',
-  'Impulsivity / overspending',
-  'Pressured speech',
-  'Sensory overload',
-  'Anhedonia',
-  'Psychomotor slowing',
-  'High anxiety',
-];
-
-function classifyPolarity(elev, dep) {
-  const e = Number(elev) || 0;
-  const d = Number(dep) || 0;
-  if (e >= 1 && d >= 1) return { label: 'Mixed Features', cls: 'bpt-badge-mixed', code: 'mixed' };
-  if (e >= 2) return { label: e === 3 ? 'Severe Elevation (+3)' : 'Moderate Elevation (+2)', cls: 'bpt-badge-elev', code: 'elev' };
-  if (d >= 2) return { label: d === 3 ? 'Severe Depression (-3)' : 'Moderate Depression (-2)', cls: 'bpt-badge-dep', code: 'dep' };
-  if (e === 1) return { label: 'Mild Elevation (+1)', cls: 'bpt-badge-elev', code: 'elev' };
-  if (d === 1) return { label: 'Mild Depression (-1)', cls: 'bpt-badge-dep', code: 'dep' };
-  return { label: 'Euthymic (0)', cls: 'bpt-badge-ok', code: 'euthymic' };
-}
-
-function parseTimeMinutes(hhmm, isBedtime = false) {
-  if (!hhmm || !/^\d{2}:\d{2}$/.test(hhmm)) return null;
-  const [h, m] = hhmm.split(':').map(Number);
-  let mins = h * 60 + m;
-  if (isBedtime && h < 6) mins += 1440;
-  return mins;
-}
-
-function computeSRM5Regularity(logsMap) {
-  const dates = Object.keys(logsMap).sort().slice(-14);
-  const fields = [
-    { key: 'wake', bedtime: false },
-    { key: 'contact', bedtime: false },
-    { key: 'work', bedtime: false },
-    { key: 'dinner', bedtime: false },
-    { key: 'bed', bedtime: true },
-  ];
-  const sds = [];
-  fields.forEach((f) => {
-    const vals = dates
-      .map((d) => parseTimeMinutes(logsMap[d]?.srm?.[f.key], f.bedtime))
-      .filter((v) => v !== null);
-    if (vals.length >= 3) {
-      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-      const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length;
-      sds.push(Math.sqrt(variance));
-    }
-  });
-  if (!sds.length) return { score: null, avgDevMin: null };
-  const avgDevMin = Math.round(sds.reduce((a, b) => a + b, 0) / sds.length);
-  // 0 min deviation = 100 regularity; >= 120 min average SD = 0 regularity
-  const score = Math.max(0, Math.min(100, Math.round(100 - (avgDevMin / 120) * 100)));
-  return { score, avgDevMin };
-}
-
-function computePassiveDiarySignals(entries) {
-  const byDate = {};
-  const absRegex = /\b(always|never|nothing|completely|totally|everyone|nobody|impossible|ruined)\b/gi;
-  entries.forEach((e) => {
-    if (!byDate[e.isoDate]) {
-      byDate[e.isoDate] = { words: 0, entries: 0, lateNight: 0, absolutist: 0 };
-    }
-    byDate[e.isoDate].words += e.words;
-    byDate[e.isoDate].entries += 1;
-    if (e.hour !== null && e.hour >= 0 && e.hour < 5) byDate[e.isoDate].lateNight += 1;
-    const absMatches = e.text.match(absRegex);
-    if (absMatches) byDate[e.isoDate].absolutist += absMatches.length;
-  });
-
-  const dates = Object.keys(byDate).sort();
-  const recent14 = dates.slice(-14);
-  const avgWords = recent14.length
-    ? Math.round(recent14.reduce((a, d) => a + byDate[d].words, 0) / recent14.length)
-    : 0;
-  const lateNightCount = recent14.reduce((a, d) => a + byDate[d].lateNight, 0);
-  const multiEntryDays = recent14.filter((d) => byDate[d].entries > 1).length;
-  const totalWords14 = recent14.reduce((a, d) => a + byDate[d].words, 0);
-  const totalAbs14 = recent14.reduce((a, d) => a + byDate[d].absolutist, 0);
-  const absRate = totalWords14 > 0 ? Number(((totalAbs14 / totalWords14) * 100).toFixed(2)) : 0;
-
-  return { byDate, avgWords, lateNightCount, multiEntryDays, absRate };
-}
-
-function evaluateClinicalAlerts(data, passiveSignals) {
-  const alerts = [];
-  const logs = data.logs || {};
-  const sortedDates = Object.keys(logs).sort();
-  const recent = sortedDates.slice(-16);
-
-  // 14-day sleep baseline (prior to most recent 2 days when enough data exists)
-  const sleepEntries = recent.filter((d) => typeof logs[d].sleepHours === 'number' && logs[d].sleepHours > 0);
-  let sleepBaseline = null;
-  if (sleepEntries.length >= 4) {
-    const basePool = sleepEntries.slice(0, Math.max(2, sleepEntries.length - 2));
-    sleepBaseline = basePool.reduce((a, d) => a + logs[d].sleepHours, 0) / basePool.length;
-    const lastTwo = sleepEntries.slice(-2);
-    if (
-      lastTwo.length === 2 &&
-      lastTwo.every((d) => sleepBaseline - logs[d].sleepHours >= 2.0)
-    ) {
-      const wired = lastTwo.some((d) => logs[d].sleepNeed === 'decreased' || (logs[d].elevation || 0) >= 1);
-      alerts.push({
-        level: wired ? 'danger' : 'warn',
-        title: wired
-          ? 'Sleep Drop + Activation Prodrome Flag'
-          : 'Consecutive Sleep Drop Below Baseline',
-        detail: `Sleep dropped >= 2h below your ${sleepBaseline.toFixed(1)}h rolling baseline for 2+ nights (${lastTwo
-          .map((d) => `${d}: ${logs[d].sleepHours}h`)
-          .join(', ')}). Consider prioritizing circadian stabilization and checking in with your care plan.`,
-      });
-    }
-  }
-
-  // Severe state or Safety Plan trigger
-  const latestDate = sortedDates[sortedDates.length - 1];
-  const latest = latestDate ? logs[latestDate] : null;
-  if (latest && (Number(latest.elevation) === 3 || Number(latest.depression) === 3)) {
-    alerts.push({
-      level: 'danger',
-      title: `Severe State Logged (${latestDate})`,
-      detail: 'A Level 3 (Severe) rating was logged. Your encrypted Stanley-Brown Safety Plan is available in the Safety Plan tab.',
-      openSafety: true,
+// Quietly index newly rendered dates as you browse the diary
+(function startPassiveIndexObserver() {
+  let timer = null;
+  const run = () => {
+    clearTimeout(timer);
+    timer = setTimeout(captureVisibleDOMIntoCache, 450);
+  };
+  const attach = () => {
+    captureVisibleDOMIntoCache();
+    const obs = new MutationObserver((muts) => {
+      const relevant = muts.some((m) => !m.target?.closest?.('.plug-backdrop'));
+      if (relevant) run();
     });
-  } else if (latest && Number(latest.elevation) >= 1 && Number(latest.depression) >= 1) {
-    alerts.push({
-      level: 'warn',
-      title: `Mixed Features Detected (${latestDate})`,
-      detail: `Simultaneous Elevation (+${latest.elevation}) and Depression (-${latest.depression}) logged. Monitor sleep, agitation, and impulses closely.`,
-    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', attach);
+  } else {
+    attach();
   }
+})();
 
-  // Latest ASRM / PHQ-9 threshold flags
-  const screeners = [...(data.screeners || [])].sort((a, b) => a.date.localeCompare(b.date));
-  const lastASRM = [...screeners].reverse().find((s) => s.type === 'ASRM');
-  if (lastASRM && lastASRM.score >= 6) {
-    alerts.push({
-      level: 'warn',
-      title: `Elevated ASRM Score (${lastASRM.score}/20 on ${lastASRM.date})`,
-      detail: 'ASRM >= 6 indicates a high probability of hypomanic or manic symptoms.',
-    });
-  }
-  const lastPHQ = [...screeners].reverse().find((s) => s.type === 'PHQ9');
-  if (lastPHQ && (lastPHQ.score >= 10 || (lastPHQ.answers && lastPHQ.answers[8] > 0))) {
-    alerts.push({
-      level: lastPHQ.answers && lastPHQ.answers[8] > 0 ? 'danger' : 'warn',
-      title: `PHQ-9 Clinical Flag (${lastPHQ.score}/27 on ${lastPHQ.date})`,
-      detail:
-        lastPHQ.answers && lastPHQ.answers[8] > 0
-          ? 'Item 9 (self-harm thoughts) was endorsed. Please review your Safety Plan and reach out to your clinician or support contact.'
-          : 'PHQ-9 >= 10 indicates moderate-to-severe depressive symptoms.',
-      openSafety: Boolean(lastPHQ.answers && lastPHQ.answers[8] > 0),
-    });
-  }
 
-  // Passive writing burst alert (00:00-04:59 posts)
-  if (passiveSignals && passiveSignals.lateNightCount >= 3) {
-    alerts.push({
-      level: 'warn',
-      title: 'Passive Signal: Late-Night Writing Drift',
-      detail: `${passiveSignals.lateNightCount} diary entries were written between 12:00 AM and 5:00 AM in your recent 14-day window.`,
-    });
-  }
-
-  return { alerts, sleepBaseline };
-}
-
+  
 /* ==========================================================================
    6. SIMPLE ENTRY INDEX MODAL (100% NON-CLINICAL)
    ========================================================================== */
