@@ -739,7 +739,7 @@ function jumpToDiaryDate(isoDate, year) {
 
   
 /* ==========================================================================
-   6. SIMPLE ENTRY INDEX MODAL (100% NON-CLINICAL)
+   6. SIMPLE ENTRY INDEX MODAL (100% NON-CLINICAL · NO RE-RENDER FOCUS LOSS)
    ========================================================================== */
 
 function ensureModalHost(id) {
@@ -769,24 +769,171 @@ function openSimpleIndexModal() {
 
 function renderSimpleIndexModal() {
   const backdrop = ensureModalHost('pdx-modal-backdrop');
-  const allEntries = scanAllDiaryEntries();
+  const currentMmdd = detectCurrentDiaryMMDD();
+  const defaultPinDate = `${new Date().getFullYear()}-${currentMmdd}`;
 
-  // Build years list and tag directory
-  const yearSet = new Set();
-  const tagMap = new Map();
-  allEntries.forEach((e) => {
-    yearSet.add(e.year);
-    e.tags.forEach((tag) => {
-      if (!tagMap.has(tag)) tagMap.set(tag, []);
-      tagMap.get(tag).push(e);
+  // Build static modal shell once so typing in search NEVER steals focus or drops iOS keyboard
+  backdrop.innerHTML = `
+    <div class="plug-modal" role="dialog" aria-modal="true" aria-label="Entry Index">
+      <div class="plug-header">
+        <div class="plug-title-wrap">
+          <h2>Entry Index</h2>
+          <p class="plug-subtitle">Simple table of contents for pinned entries, browsed dates, and #tags</p>
+        </div>
+        <div class="plug-header-actions">
+          <button type="button" class="plug-btn plug-btn-sm" id="pdx-refresh-btn">Rescan</button>
+          <button type="button" class="plug-btn plug-btn-sm" id="pdx-close-btn">Close</button>
+        </div>
+      </div>
+
+      <div class="plug-tabs" id="pdx-tabs-bar">
+        <button type="button" class="plug-tab" data-pdx-tab="entries">All Entries</button>
+        <button type="button" class="plug-tab" data-pdx-tab="pinned">Pinned Index</button>
+        <button type="button" class="plug-tab" data-pdx-tab="tags">By #Tag</button>
+      </div>
+
+      <div class="plug-body">
+        <div class="plug-card" style="padding:10px 12px;margin-bottom:12px;">
+          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+            <input type="date" id="pdx-pin-date" class="plug-input" style="width:auto;flex:0 0 auto;" value="${esc(defaultPinDate)}" />
+            <input type="text" id="pdx-pin-title" class="plug-input" style="flex:1 1 180px;" placeholder="Add custom index title (e.g., Tokyo trip, Zine idea #zine)" />
+            <button type="button" id="pdx-pin-add" class="plug-btn plug-btn-primary plug-btn-sm">+ Add to Index</button>
+          </div>
+        </div>
+
+        <div class="pdx-toolbar">
+          <input type="search" id="pdx-search-input" class="plug-input" placeholder="Search titles, text, dates (YYYY-MM-DD), or #tags..." value="${esc(pluginState.indexSearch)}" />
+          <select id="pdx-year-select" class="plug-select"></select>
+          <select id="pdx-sort-select" class="plug-select">
+            <option value="newest" ${pluginState.indexSort === 'newest' ? 'selected' : ''}>Newest First</option>
+            <option value="oldest" ${pluginState.indexSort === 'oldest' ? 'selected' : ''}>Oldest First</option>
+            <option value="words" ${pluginState.indexSort === 'words' ? 'selected' : ''}>Most Words</option>
+          </select>
+        </div>
+
+        <div class="plug-stat-strip" id="pdx-stats-strip"></div>
+        <div class="pdx-list" id="pdx-list-container"></div>
+      </div>
+    </div>
+  `;
+
+  backdrop.querySelector('#pdx-close-btn').addEventListener('click', closePluginModals);
+  backdrop.querySelector('#pdx-refresh-btn').addEventListener('click', () => {
+    captureVisibleDOMIntoCache();
+    updateSimpleIndexBody();
+    showPluginToast('Index rescanned');
+  });
+
+  backdrop.querySelectorAll('[data-pdx-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      pluginState.indexTab = btn.getAttribute('data-pdx-tab');
+      updateSimpleIndexBody();
     });
   });
-  const years = Array.from(yearSet).sort((a, b) => b.localeCompare(a));
 
-  // Apply search, year, and tag filters
+  backdrop.querySelector('#pdx-search-input').addEventListener('input', (e) => {
+    pluginState.indexSearch = e.target.value;
+    updateSimpleIndexBody();
+  });
+
+  backdrop.querySelector('#pdx-year-select').addEventListener('change', (e) => {
+    pluginState.indexYear = e.target.value;
+    updateSimpleIndexBody();
+  });
+
+  backdrop.querySelector('#pdx-sort-select').addEventListener('change', (e) => {
+    pluginState.indexSort = e.target.value;
+    updateSimpleIndexBody();
+  });
+
+  const addPin = () => {
+    const dateVal = backdrop.querySelector('#pdx-pin-date').value || todayISO();
+    const titleVal = backdrop.querySelector('#pdx-pin-title').value.trim();
+    if (!titleVal) return showPluginToast('Enter an index title first.');
+    const list = loadManualBookmarks();
+    list.unshift({
+      id: `pin_${Date.now()}`,
+      isoDate: dateVal,
+      year: dateVal.slice(0, 4),
+      mmdd: dateVal.slice(5),
+      title: titleVal,
+      tags: extractTags(titleVal),
+      createdAt: new Date().toISOString(),
+    });
+    saveManualBookmarks(list);
+    backdrop.querySelector('#pdx-pin-title').value = '';
+    showPluginToast(`Indexed ${dateVal}`);
+    updateSimpleIndexBody();
+  };
+
+  backdrop.querySelector('#pdx-pin-add').addEventListener('click', addPin);
+  backdrop.querySelector('#pdx-pin-title').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') addPin();
+  });
+
+  updateSimpleIndexBody();
+}
+
+function updateSimpleIndexBody() {
+  const backdrop = document.getElementById('pdx-modal-backdrop');
+  if (!backdrop) return;
+
+  const scanned = scanAllDiaryEntries();
+  const pinnedRaw = loadManualBookmarks();
+  const pinnedEntries = pinnedRaw.map((p) => ({
+    id: p.id,
+    isoDate: p.isoDate,
+    year: p.year || p.isoDate.slice(0, 4),
+    mmdd: p.mmdd || p.isoDate.slice(5),
+    entryIndex: 1,
+    totalInYear: 1,
+    title: p.title,
+    text: p.title,
+    excerpt: p.title,
+    words: countWords(p.title),
+    tags: extractTags(p.title, p.tags || []),
+    isManual: true,
+  }));
+
+  const combined = [...pinnedEntries, ...scanned];
+
+  // Populate years select cleanly
+  const yearSet = new Set(combined.map((e) => e.year));
+  const years = Array.from(yearSet).sort((a, b) => b.localeCompare(a));
+  const yearSel = backdrop.querySelector('#pdx-year-select');
+  yearSel.innerHTML =
+    `<option value="all">All Years</option>` +
+    years.map((y) => `<option value="${esc(y)}">${esc(y)}</option>`).join('');
+  yearSel.value = years.includes(pluginState.indexYear) ? pluginState.indexYear : 'all';
+  pluginState.indexYear = yearSel.value;
+
+  // Build tag directory across combined items
+  const tagMap = new Map();
+  combined.forEach((e) => {
+    e.tags.forEach((t) => {
+      if (!tagMap.has(t)) tagMap.set(t, []);
+      tagMap.get(t).push(e);
+    });
+  });
+
+  // Update tab counts & active state
+  const tabLabels = {
+    entries: `All Entries (${combined.length})`,
+    pinned: `Pinned Index (${pinnedEntries.length})`,
+    tags: `By #Tag (${tagMap.size})`,
+  };
+  backdrop.querySelectorAll('[data-pdx-tab]').forEach((btn) => {
+    const key = btn.getAttribute('data-pdx-tab');
+    btn.textContent = tabLabels[key] || btn.textContent;
+    btn.classList.toggle('is-active', pluginState.indexTab === key);
+  });
+
+  // Filter & sort
   const q = pluginState.indexSearch.trim().toLowerCase();
   const activeTag = pluginState.indexTag.trim().toLowerCase();
-  let filtered = allEntries.filter((e) => {
+  const sourceList = pluginState.indexTab === 'pinned' ? pinnedEntries : combined;
+
+  const filtered = sourceList.filter((e) => {
     if (pluginState.indexYear !== 'all' && e.year !== pluginState.indexYear) return false;
     if (activeTag && !e.tags.includes(activeTag)) return false;
     if (q) {
@@ -796,7 +943,6 @@ function renderSimpleIndexModal() {
     return true;
   });
 
-  // Sort
   if (pluginState.indexSort === 'oldest') {
     filtered.sort((a, b) => a.isoDate.localeCompare(b.isoDate) || a.entryIndex - b.entryIndex);
   } else if (pluginState.indexSort === 'words') {
@@ -805,176 +951,131 @@ function renderSimpleIndexModal() {
     filtered.sort((a, b) => b.isoDate.localeCompare(a.isoDate) || b.entryIndex - a.entryIndex);
   }
 
-  const uniqueDatesCount = new Set(allEntries.map((e) => e.isoDate)).size;
-
-  const entriesHtml = filtered.length
-    ? filtered
-        .map(
-          (e) => `
-      <div class="pdx-row">
-        <div class="pdx-row-top">
-          <div class="pdx-date-badge">
-            <span>${esc(e.isoDate)}</span>
-            ${e.totalInYear > 1 ? `<span class="pdx-entry-num">#${e.entryIndex} of ${e.totalInYear}</span>` : ''}
-            ${e.title ? `<span style="color:var(--plug-text);font-weight:600;">· ${esc(e.title)}</span>` : ''}
-          </div>
-          <button type="button" class="plug-btn plug-btn-sm pdx-jump-btn" data-iso="${esc(e.isoDate)}" data-year="${esc(e.year)}">Jump →</button>
-        </div>
-        <p class="pdx-excerpt">${esc(e.excerpt)}</p>
-        <div class="pdx-meta-line">
-          <span>${e.words.toLocaleString()} words</span>
-          ${e.tags.length ? '<span>·</span>' : ''}
-          ${e.tags
-            .map(
-              (t) =>
-                `<button type="button" class="pdx-tag-chip ${activeTag === t ? 'is-active' : ''}" data-tag="${esc(t)}">#${esc(t)}</button>`
-            )
-            .join('')}
-        </div>
-      </div>`
-        )
-        .join('')
-    : `<div class="pdx-empty">No matching entries found in the loaded diary cache. Unlock your vault or browse dates to populate entries, or clear your filter.</div>`;
-
-  const sortedTags = Array.from(tagMap.entries())
-    .filter(([tag]) => !q || tag.includes(q.replace(/^#/, '')))
-    .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
-
-  const tagsHtml = sortedTags.length
-    ? sortedTags
-        .map(([tag, list]) => {
-          const sortedDates = Array.from(new Set(list.map((x) => x.isoDate))).sort((a, b) => b.localeCompare(a));
-          const spanYears = Array.from(new Set(list.map((x) => x.year))).sort();
-          const yearSpanLabel =
-            spanYears.length > 1 ? `${spanYears[0]}–${spanYears[spanYears.length - 1]}` : spanYears[0] || '';
-          return `
-        <div class="pdx-row">
-          <div class="pdx-row-top">
-            <div class="pdx-date-badge">
-              <span>#${esc(tag)}</span>
-              <span class="pdx-entry-num">${list.length} ${list.length === 1 ? 'entry' : 'entries'}${yearSpanLabel ? ` · ${yearSpanLabel}` : ''}</span>
-            </div>
-            <button type="button" class="plug-btn plug-btn-sm pdx-filter-tag-btn" data-tag="${esc(tag)}">Filter Entries</button>
-          </div>
-          <div class="pdx-date-chips">
-            ${sortedDates
-              .slice(0, 14)
-              .map(
-                (iso) =>
-                  `<button type="button" class="pdx-date-chip pdx-jump-btn" data-iso="${esc(iso)}" data-year="${esc(iso.slice(0, 4))}">${esc(iso)}</button>`
-              )
-              .join('')}
-            ${sortedDates.length > 14 ? `<span class="pdx-entry-num">+${sortedDates.length - 14} more</span>` : ''}
-          </div>
-        </div>`;
-        })
-        .join('')
-    : `<div class="pdx-empty">No #tags found yet. Add #tags anywhere inside your diary entries (e.g., #zine, #travel, #study) to organize them here automatically.</div>`;
-
-  backdrop.innerHTML = `
-    <div class="plug-modal" role="dialog" aria-modal="true" aria-label="Entry Index">
-      <div class="plug-header">
-        <div class="plug-title-wrap">
-          <h2>Entry Index</h2>
-          <p class="plug-subtitle">Simple directory of diary entries, stacked notes, and #tags</p>
-        </div>
-        <div class="plug-header-actions">
-          <button type="button" class="plug-btn plug-btn-sm" id="pdx-close-btn">Close</button>
-        </div>
-      </div>
-
-      <div class="plug-tabs">
-        <button type="button" class="plug-tab ${pluginState.indexTab === 'entries' ? 'is-active' : ''}" data-pdx-tab="entries">All Entries (${filtered.length})</button>
-        <button type="button" class="plug-tab ${pluginState.indexTab === 'tags' ? 'is-active' : ''}" data-pdx-tab="tags">By #Tag (${tagMap.size})</button>
-      </div>
-
-      <div class="plug-body">
-        <div class="pdx-toolbar">
-          <input type="search" id="pdx-search-input" class="plug-input" placeholder="Search entries, dates (YYYY-MM-DD), or #tags..." value="${esc(pluginState.indexSearch)}" />
-          <select id="pdx-year-select" class="plug-select">
-            <option value="all" ${pluginState.indexYear === 'all' ? 'selected' : ''}>All Years</option>
-            ${years.map((y) => `<option value="${esc(y)}" ${pluginState.indexYear === y ? 'selected' : ''}>${esc(y)}</option>`).join('')}
-          </select>
-          <select id="pdx-sort-select" class="plug-select">
-            <option value="newest" ${pluginState.indexSort === 'newest' ? 'selected' : ''}>Newest First</option>
-            <option value="oldest" ${pluginState.indexSort === 'oldest' ? 'selected' : ''}>Oldest First</option>
-            <option value="words" ${pluginState.indexSort === 'words' ? 'selected' : ''}>Most Words</option>
-          </select>
-        </div>
-
-        <div class="plug-stat-strip">
-          <span><strong>${allEntries.length}</strong> Entries</span>
-          <span>·</span>
-          <span><strong>${uniqueDatesCount}</strong> Dates</span>
-          <span>·</span>
-          <span><strong>${tagMap.size}</strong> Tags</span>
-          ${
-            activeTag
-              ? `<span>·</span><span>Active Tag: <strong>#${esc(activeTag)}</strong> <button type="button" id="pdx-clear-tag" class="plug-btn plug-btn-sm" style="margin-left:6px;">Clear</button></span>`
-              : ''
-          }
-        </div>
-
-        <div class="pdx-list">
-          ${pluginState.indexTab === 'tags' ? tagsHtml : entriesHtml}
-        </div>
-      </div>
-    </div>
+  // Update stats strip
+  const uniqueDatesCount = new Set(combined.map((e) => e.isoDate)).size;
+  const statsEl = backdrop.querySelector('#pdx-stats-strip');
+  statsEl.innerHTML = `
+    <span><strong>${combined.length}</strong> Indexed</span>
+    <span>·</span>
+    <span><strong>${pinnedEntries.length}</strong> Pinned</span>
+    <span>·</span>
+    <span><strong>${uniqueDatesCount}</strong> Dates</span>
+    <span>·</span>
+    <span><strong>${tagMap.size}</strong> Tags</span>
+    ${
+      activeTag
+        ? `<span>·</span><span>Tag: <strong>#${esc(activeTag)}</strong> <button type="button" id="pdx-clear-tag" class="plug-btn plug-btn-sm" style="margin-left:6px;">Clear</button></span>`
+        : ''
+    }
   `;
 
-  backdrop.querySelector('#pdx-close-btn').addEventListener('click', closePluginModals);
-  backdrop.querySelectorAll('[data-pdx-tab]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      pluginState.indexTab = btn.getAttribute('data-pdx-tab');
-      renderSimpleIndexModal();
-    });
-  });
-
-  const searchInput = backdrop.querySelector('#pdx-search-input');
-  searchInput.addEventListener('input', (e) => {
-    pluginState.indexSearch = e.target.value;
-    renderSimpleIndexModal();
-    const fresh = document.getElementById('pdx-search-input');
-    if (fresh) {
-      fresh.focus();
-      fresh.setSelectionRange(fresh.value.length, fresh.value.length);
-    }
-  });
-
-  backdrop.querySelector('#pdx-year-select').addEventListener('change', (e) => {
-    pluginState.indexYear = e.target.value;
-    renderSimpleIndexModal();
-  });
-
-  backdrop.querySelector('#pdx-sort-select').addEventListener('change', (e) => {
-    pluginState.indexSort = e.target.value;
-    renderSimpleIndexModal();
-  });
-
-  const clearTagBtn = backdrop.querySelector('#pdx-clear-tag');
-  if (clearTagBtn) {
-    clearTagBtn.addEventListener('click', () => {
+  const clearBtn = statsEl.querySelector('#pdx-clear-tag');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
       pluginState.indexTag = '';
-      renderSimpleIndexModal();
+      updateSimpleIndexBody();
     });
   }
 
-  backdrop.querySelectorAll('.pdx-tag-chip, .pdx-filter-tag-btn').forEach((btn) => {
+  // Render list body
+  const listEl = backdrop.querySelector('#pdx-list-container');
+
+  if (pluginState.indexTab === 'tags') {
+    const sortedTags = Array.from(tagMap.entries())
+      .filter(([tag]) => !q || tag.includes(q.replace(/^#/, '')))
+      .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+
+    listEl.innerHTML = sortedTags.length
+      ? sortedTags
+          .map(([tag, list]) => {
+            const sortedDates = Array.from(new Set(list.map((x) => x.isoDate))).sort((a, b) => b.localeCompare(a));
+            const spanYears = Array.from(new Set(list.map((x) => x.year))).sort();
+            const spanLabel =
+              spanYears.length > 1 ? `${spanYears[0]}–${spanYears[spanYears.length - 1]}` : spanYears[0] || '';
+            return `
+          <div class="pdx-row">
+            <div class="pdx-row-top">
+              <div class="pdx-date-badge">
+                <span>#${esc(tag)}</span>
+                <span class="pdx-entry-num">${list.length} ${list.length === 1 ? 'item' : 'items'}${spanLabel ? ` · ${spanLabel}` : ''}</span>
+              </div>
+              <button type="button" class="plug-btn plug-btn-sm pdx-filter-tag-btn" data-tag="${esc(tag)}">Filter</button>
+            </div>
+            <div class="pdx-date-chips">
+              ${sortedDates
+                .slice(0, 14)
+                .map(
+                  (iso) =>
+                    `<button type="button" class="pdx-date-chip pdx-jump-btn" data-iso="${esc(iso)}" data-year="${esc(iso.slice(0, 4))}">${esc(iso)}</button>`
+                )
+                .join('')}
+              ${sortedDates.length > 14 ? `<span class="pdx-entry-num">+${sortedDates.length - 14} more</span>` : ''}
+            </div>
+          </div>`;
+          })
+          .join('')
+      : `<div class="pdx-empty">No #tags yet. Include #tags in your diary entries or pinned index titles (e.g., #zine, #travel).</div>`;
+  } else {
+    listEl.innerHTML = filtered.length
+      ? filtered
+          .map(
+            (e) => `
+        <div class="pdx-row">
+          <div class="pdx-row-top">
+            <div class="pdx-date-badge">
+              <span>${esc(e.isoDate)}</span>
+              ${e.isManual ? `<span class="pdx-entry-num" style="color:var(--plug-accent);">Pinned</span>` : ''}
+              ${!e.isManual && e.totalInYear > 1 ? `<span class="pdx-entry-num">#${e.entryIndex} of ${e.totalInYear}</span>` : ''}
+              ${!e.isManual && e.title ? `<span style="color:var(--plug-text);font-weight:600;">· ${esc(e.title)}</span>` : ''}
+            </div>
+            <div style="display:flex;gap:6px;">
+              ${e.isManual ? `<button type="button" class="plug-btn plug-btn-sm plug-btn-danger pdx-del-pin" data-id="${esc(e.id)}">Remove</button>` : ''}
+              <button type="button" class="plug-btn plug-btn-sm pdx-jump-btn" data-iso="${esc(e.isoDate)}" data-year="${esc(e.year)}">Jump →</button>
+            </div>
+          </div>
+          <p class="pdx-excerpt">${esc(e.excerpt)}</p>
+          <div class="pdx-meta-line">
+            ${!e.isManual ? `<span>${e.words.toLocaleString()} words</span>` : `<span>Custom index entry</span>`}
+            ${e.tags.length ? '<span>·</span>' : ''}
+            ${e.tags
+              .map(
+                (t) =>
+                  `<button type="button" class="pdx-tag-chip ${activeTag === t ? 'is-active' : ''}" data-tag="${esc(t)}">#${esc(t)}</button>`
+              )
+              .join('')}
+          </div>
+        </div>`
+          )
+          .join('')
+      : `<div class="pdx-empty">No matching entries found. Use "+ Add to Index" above to pin any date, or browse dates in your unlocked vault to auto-index them.</div>`;
+  }
+
+  // Bind row actions
+  listEl.querySelectorAll('.pdx-tag-chip, .pdx-filter-tag-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       const t = btn.getAttribute('data-tag');
-      pluginState.indexTag = pluginState.indexTag === t && pluginState.indexTab === 'entries' ? '' : t;
-      pluginState.indexTab = 'entries';
-      renderSimpleIndexModal();
+      pluginState.indexTag = pluginState.indexTag === t && pluginState.indexTab !== 'tags' ? '' : t;
+      if (pluginState.indexTab === 'tags') pluginState.indexTab = 'entries';
+      updateSimpleIndexBody();
     });
   });
 
-  backdrop.querySelectorAll('.pdx-jump-btn').forEach((btn) => {
+  listEl.querySelectorAll('.pdx-jump-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       jumpToDiaryDate(btn.getAttribute('data-iso'), btn.getAttribute('data-year'));
     });
   });
+
+  listEl.querySelectorAll('.pdx-del-pin').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.getAttribute('data-id');
+      saveManualBookmarks(loadManualBookmarks().filter((x) => x.id !== id));
+      updateSimpleIndexBody();
+    });
+  });
 }
 
+// === END OF PART 1 — PASTE PART 2 DIRECTLY BELOW THIS LINE ===
 // === END OF PART 1 — PASTE PART 2 DIRECTLY BELOW THIS LINE ===
 /* ==========================================================================
    7. SVG TRAJECTORY & PERPETUAL SEASONAL OVERLAY CHARTS
